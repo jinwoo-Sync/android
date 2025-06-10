@@ -1,0 +1,39 @@
+# Android Studio / IntelliJ IDEA
+*.iml
+.idea/
+
+# Gradle
+.gradle/
+build/
+app/build/
+app/release/
+
+# Local configuration
+local.properties
+
+# macOS
+.DS_Store
+
+# Native build artifacts
+.externalNativeBuild/
+.cxx/
+
+# Android Studio captures
+/captures/
+
+# Generated reports
+build/reports/
+
+# Log and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# Test directories
+app/src/androidTest/
+app/src/test/
+
+# Non-standard assets directory (if unused)
+app/assets/
