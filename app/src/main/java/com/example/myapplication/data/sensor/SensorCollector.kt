@@ -139,7 +139,7 @@ class SensorCollector(private val context: Context) {
     private var isDetecting = false
 
     var cameraConfig = CameraConfig(
-        imageSize = Size(640, 640),
+        imageSize = Size(1280, 1280),
         lensFacing = CameraCharacteristics.LENS_FACING_BACK,
         aeTargetFpsRange = Range(30, 30),
         jpegQuality = 90,
@@ -557,8 +557,8 @@ class SensorCollector(private val context: Context) {
 
                         rawBitmap?.let { bmp ->
                             // 2) 스케일링
-                            val scaledBitmap = if (bmp.width != 640 || bmp.height != 640) {
-                                Bitmap.createScaledBitmap(bmp, 640, 640, true)
+                            val scaledBitmap = if (bmp.width != 1280 || bmp.height != 1280) {
+                                Bitmap.createScaledBitmap(bmp, 1280, 1280, true)
                             } else {
                                 bmp
                             }

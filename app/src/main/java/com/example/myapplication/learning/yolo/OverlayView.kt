@@ -19,8 +19,8 @@ class OverlayView(context: Context?, attrs: AttributeSet?) : View(context, attrs
 
     private var bounds = Rect()
 
-    private val imageWidth = 640f // 원본 이미지 크기 (YOLO 입력 크기)
-    private val imageHeight = 640f
+    private val imageWidth = 1280f // 원본 이미지 크기 (YOLO 입력 크기)
+    private val imageHeight = 1280f
     init {
         initPaints()
     }
