@@ -2,204 +2,359 @@ package com.example.myapplication.data.logging
 
 import android.content.ContentValues
 import android.content.Context
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.location.Location
-import android.media.ExifInterface
 import android.media.MediaScannerConnection
-import android.os.Build
-import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
-import androidx.core.content.ContextCompat
 import com.example.myapplication.model.GnssData
 import com.example.myapplication.model.SensorData
+import com.example.myapplication.model.BoundingBoxLog
 import com.example.myapplication.data.streaming.StreamingClient
 import com.example.myapplication.data.streaming.StreamingClientFactory
-import com.example.myapplication.data.streaming.test.WebSocketStreamingClient
-import com.example.myapplication.model.BoundingBoxLog
+import com.example.myapplication.data.sync.DataSynchronizer
+import com.example.myapplication.data.sync.HybridSynchronizedDataEntry
 import kotlinx.coroutines.*
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 
-/** 고정 크기 순환 큐 */
-class CircularQueue<T>(private val capacity: Int) : Iterable<T> {
-    private val deque = ArrayDeque<T>(capacity)
-
-    // push 메서드를 synchronized 블록으로 감싸 스레드 안전하게 만듭니다.
-    fun push(item: T) {
-        synchronized(deque) { // deque 객체를 락으로 사용하여 동기화
-            if (deque.size >= capacity) {
-                deque.removeFirst()
-            }
-            deque.addLast(item)
-        }
-    }
-    fun isNotEmpty(): Boolean = deque.isNotEmpty()
-    fun poll(): T? = if (deque.isEmpty()) null else deque.removeFirst()
-    fun isEmpty(): Boolean = deque.isEmpty()
-    fun snapshot(): List<T> = deque.toList()
-    fun clear() = deque.clear()
-    fun size(): Int = deque.size
-    fun removeLast(): T? = if (deque.isEmpty()) null else deque.removeLast()
-    override fun iterator(): Iterator<T> = deque.iterator()
-}
-
+/**
+ * 단일 책임 원칙을 준수하는 LoggerManager
+ *
+ * 책임:
+ * 1. 데이터 수집 및 큐 관리
+ * 2. 파일 저장 (텍스트, 이미지)
+ * 3. 라이브스트리밍 연동
+ *
+ * 시간 동기화는 DataSynchronizer에서 담당
+ */
 object LoggerManager {
     private const val TAG = "LoggerManager"
-    private const val QUEUE_CAPACITY   = 1_000
-    private const val TEXT_BATCH_SIZE  = 100
+
+    // 큐 크기 설정 (3-5분 데이터 보관)
+    private const val GPS_QUEUE_CAPACITY = 300      // 1Hz × 300초
+    private const val GNSS_QUEUE_CAPACITY = 1200    // 4Hz × 300초
+    private const val IMU_QUEUE_CAPACITY = 15000    // 50Hz × 300초
+    private const val CAMERA_QUEUE_CAPACITY = 1800  // 6Hz × 300초
+    private const val BBOX_QUEUE_CAPACITY = 1800    // 6Hz × 300초
+
+    private const val SYNC_INTERVAL_MS = 30000L     // 30초마다 동기화 저장
 
     private var isLogSavingEnabled = false
-    private var isStreamingEnabled = false
-
-    private inline fun shouldSave()   = isLogSavingEnabled
-    private inline fun shouldStream() = isStreamingEnabled
+    private var isLiveStreamingEnabled = false      // 이름 변경: streaming -> livestreaming
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var sendingJob: Job? = null
+    private var syncJob: Job? = null
 
-    private val cameraQueue = CircularQueue<SensorData>(QUEUE_CAPACITY)
-    private val gpsQueue    = CircularQueue<Triple<Location, Long, Long>>(QUEUE_CAPACITY)
-    private val imuQueue    = CircularQueue<Triple<FloatArray, Long, Long>>(QUEUE_CAPACITY)
-    private val gnssQueue   = CircularQueue<GnssData>(QUEUE_CAPACITY)
-    private val boundingBoxQueue = CircularQueue<List<BoundingBoxLog>>(QUEUE_CAPACITY) // New queue for bounding boxes
+    // 시간 동기화 담당 클래스
+    private val dataSynchronizer = DataSynchronizer()
 
-    private var currentBatchTs: Long = 0L
-
-    private lateinit var streamingClient: StreamingClient
+    // 라이브스트리밍 클라이언트
+    private lateinit var liveStreamingClient: StreamingClient
     private var currentTransportType: String? = null
 
-    fun setTransportType(transportType: String) {
-        if (currentTransportType != transportType || !::streamingClient.isInitialized) {
-            streamingClient = StreamingClientFactory.createStreamingClient(transportType)
-            currentTransportType = transportType
-            Log.d(TAG, "통신 방식 설정됨: $transportType")
+    init {
+        startSynchronizationLoop()
+    }
+
+    /**
+     * 주기적 동기화 및 저장 루프
+     */
+    private fun startSynchronizationLoop() {
+        syncJob = scope.launch {
+            while (isActive) {
+                delay(SYNC_INTERVAL_MS)
+                if (shouldSave()) {
+                    performDataSynchronizationAndSave()
+                }
+            }
         }
     }
 
-    fun enableLogSaving() 
-    { 
-        isLogSavingEnabled = true; 
-        Log.d(TAG, "Local log saving ENABLED")
+    /**
+     * 동기화 및 저장 수행
+     */
+    private suspend fun performDataSynchronizationAndSave(force: Boolean = false) = withContext(Dispatchers.IO) {
+        try {
+            // DataSynchronizer에서 동기화된 데이터 추출
+            val synchronizedData = dataSynchronizer.extractSynchronizedData(force)
+
+            if (synchronizedData.isNotEmpty()) {
+                // 동기화된 데이터 저장
+                saveHybridSynchronizedData(synchronizedData)
+                saveRawGnssData(synchronizedData)
+
+                // 큐 크기 관리
+                dataSynchronizer.maintainQueueSizes(
+                    GPS_QUEUE_CAPACITY,
+                    GNSS_QUEUE_CAPACITY,
+                    IMU_QUEUE_CAPACITY,
+                    CAMERA_QUEUE_CAPACITY,
+                    BBOX_QUEUE_CAPACITY
+                )
+
+                Log.d(TAG, "${synchronizedData.size}개 항목 저장 완료")
+            }
+            else{
+
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "동기화 및 저장 오류: ${e.message}", e)
+        }
+    }
+
+    // ========== 설정 메서드들 ==========
+
+    fun setTransportType(transportType: String) {
+        if (currentTransportType != transportType || !::liveStreamingClient.isInitialized) {
+            liveStreamingClient = StreamingClientFactory.createStreamingClient(transportType)
+            currentTransportType = transportType
+            Log.d(TAG, "라이브스트리밍 통신 방식 설정됨: $transportType")
+        }
+    }
+
+    fun enableLogSaving() {
+        isLogSavingEnabled = true
+        Log.d(TAG, "로컬 로그 저장 활성화")
     }
 
     fun disableLogSaving(ctx: Context) {
         isLogSavingEnabled = false
-        saveAllTextBatches(ctx, force = true)
-        Log.d(TAG, "Local log saving DISABLED & flushed")
+        scope.launch {
+            performDataSynchronizationAndSave(force = true)
+            Log.d(TAG, "로컬 로그 저장 비활성화 및 최종 동기화 수행")
+        }
+    }
+
+    suspend fun enableLiveStreaming(context: Context) {
+        if (isLiveStreamingEnabled) return
+        if (!::liveStreamingClient.isInitialized) {
+            throw IllegalStateException("라이브스트리밍을 시작하기 전에 통신 방식을 설정해야 합니다.")
+        }
+        isLiveStreamingEnabled = true
+        liveStreamingClient.startStreaming(context)
+        Log.d(TAG, "라이브스트리밍 활성화")
+    }
+
+    suspend fun disableLiveStreaming() {
+        if (!isLiveStreamingEnabled) return
+        isLiveStreamingEnabled = false
+        liveStreamingClient.stopStreaming()
+        Log.d(TAG, "라이브스트리밍 비활성화")
     }
 
     suspend fun enableStreaming(context: Context) {
-        if (isStreamingEnabled) return
-        if (!::streamingClient.isInitialized) {
-            throw IllegalStateException("스트리밍을 시작하기 전에 통신 방식을 설정해야 합니다. setTransportType()을 호출하세요.")
-        }
-        isStreamingEnabled = true
-        streamingClient.startStreaming(context)
-        scope.launch {
-            delay(2000)
-            if (sendingJob?.isActive != true) startSendingLoop()
-            Log.d(TAG, "Streaming ENABLED")
-        }
+        enableLiveStreaming(context)
     }
 
+    /**
+     * UI에서 호출하는 스트리밍 비활성화 (기존 코드 호환성)
+     */
     suspend fun disableStreaming() {
-        if (!isStreamingEnabled) return
-        isStreamingEnabled = false
-        streamingClient.stopStreaming()
-        sendingJob?.cancel()
-        sendingJob = null
-        Log.d(TAG, "Streaming DISABLED")
+        disableLiveStreaming()
     }
+
+    // ========== 데이터 수집 메서드들 ==========
 
     fun pushGps(ctx: Context, loc: Location, sysTs: Long = System.currentTimeMillis(), monoTs: Long = System.nanoTime()) {
-        gpsQueue.push(Triple(loc, sysTs, monoTs))
-        if (shouldSave() && gpsQueue.size() >= TEXT_BATCH_SIZE) saveAllTextBatches(ctx)
+        dataSynchronizer.addGpsData(loc, sysTs, monoTs)
+
+        // 라이브스트리밍
+        if (shouldLiveStream()) {
+            liveStreamingClient.sendGpsData(loc, sysTs, monoTs)
+        }
     }
 
     fun pushGnss(ctx: Context, g: GnssData) {
-        Log.d(TAG, "Pushing GNSS data: $g")
-        initBatchTsIfNeeded(g.timestamp)
-        gnssQueue.push(g)
-        if (shouldSave() && gnssQueue.size() >= TEXT_BATCH_SIZE) saveAllTextBatches(ctx)
+        dataSynchronizer.addGnssData(g)
+
+        // 라이브스트리밍
+        if (shouldLiveStream()) {
+            liveStreamingClient.sendGnssData(g)
+        }
     }
 
     fun pushImu(ctx: Context, imu: FloatArray, sysTs: Long = System.currentTimeMillis(), monoTs: Long = System.nanoTime()) {
-        initBatchTsIfNeeded(sysTs)
-        imuQueue.push(Triple(imu.clone(), sysTs, monoTs))
-        if (shouldSave() && imuQueue.size() >= TEXT_BATCH_SIZE) saveAllTextBatches(ctx)
+        dataSynchronizer.addImuData(imu, sysTs, monoTs)
+
+        // 라이브스트리밍
+        if (shouldLiveStream()) {
+            liveStreamingClient.sendImuData(imu, sysTs, monoTs)
+        }
     }
 
     fun pushCamera(ctx: Context, data: SensorData) {
-        initBatchTsIfNeeded(data.timestamp)
-        cameraQueue.push(data)
-        if (shouldSave()) saveSingleCameraFrame(ctx, data)
+        dataSynchronizer.addCameraData(data)
+
+        // 카메라 이미지 즉시 저장
+        if (shouldSave()) {
+            saveCameraImage(ctx, data)
+        }
+
+        // 라이브스트리밍
+        if (shouldLiveStream()) {
+            liveStreamingClient.sendCameraData(data)
+        }
     }
 
     fun pushBoundingBox(ctx: Context, bboxes: List<BoundingBoxLog>) {
-        if (bboxes.isNotEmpty()) {
-            initBatchTsIfNeeded(bboxes[0].timestamp)
-            boundingBoxQueue.push(bboxes)
-            if (shouldSave() && boundingBoxQueue.size() >= TEXT_BATCH_SIZE) saveAllTextBatches(ctx)
+        dataSynchronizer.addBoundingBoxData(bboxes)
+
+        // 라이브스트리밍
+        if (shouldLiveStream()) {
+            liveStreamingClient.sendBoundingBoxData(bboxes)
         }
     }
 
-    private fun startSendingLoop() {
-        sendingJob = scope.launch {
-            while (shouldStream()) {
-                if (cameraQueue.isNotEmpty()) {
-                    val lastCamera = cameraQueue.removeLast()
-                    if (lastCamera != null) {
-                        Log.d(TAG, "Dequeuing camera data: frameId=${lastCamera.frameId}")
-                        streamingClient.sendCameraData(lastCamera)
+    // ========== 파일 저장 메서드들 ==========
+
+    /**
+     * 하이브리드 동기화된 데이터를 gps_sync.txt로 저장
+     */
+    private suspend fun saveHybridSynchronizedData(data: List<HybridSynchronizedDataEntry>) = withContext(Dispatchers.IO) {
+        try {
+            val date = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date())
+            val relativePath = "Documents/SensorLogger/$date/gps"
+            val fileName = "gps_sync.txt"
+
+            val header = """
+                # GPS Synchronized Data (Hybrid Time System)
+                # HYBRID_TIME: Synchronized time (GPS when available, Monotonic+offset when GPS lost)
+                # GPS_STATUS: GPS availability (AVAILABLE|LOST)
+                # LAT: Latitude (degrees, WGS84)
+                # LON: Longitude (degrees, WGS84)
+                # ALT: Altitude (meters above WGS84 ellipsoid)
+                # ACC_X,ACC_Y,ACC_Z: Accelerometer (m/s²)
+                # GYRO_X,GYRO_Y,GYRO_Z: Gyroscope (rad/s)
+                # MAG_X,MAG_Y,MAG_Z: Magnetometer (μT)
+                # GNSS_TYPE: Constellation type
+                # SAT_ID: Satellite ID
+                # CN0: Signal strength (dB-Hz)
+                # CAMERA_FRAME_ID: Camera frame ID (or NULL)
+                # BBOX_COUNT: Number of bounding boxes (or NULL)
+                HYBRID_TIME	GPS_STATUS	LAT	LON	ALT	ACC_X	ACC_Y	ACC_Z	GYRO_X	GYRO_Y	GYRO_Z	MAG_X	MAG_Y	MAG_Z	GNSS_TYPE	SAT_ID	CN0	CAMERA_FRAME_ID	BBOX_COUNT
+            """.trimIndent()
+
+            val content = buildString {
+                for (entry in data) {
+                    val gpsData = entry.gpsData
+                    if (gpsData == null) continue
+
+                    val (loc, _, _) = gpsData
+                    val imu = entry.imuData?.first
+                    val gnss = entry.gnssData
+                    val camera = entry.cameraData
+                    val bbox = entry.bboxData
+
+                    append("${entry.hybridTime}\t")
+                    append("${if (entry.gpsAvailable) "AVAILABLE" else "LOST"}\t")
+                    append("${loc.latitude}\t${loc.longitude}\t")
+                    append("${if (loc.hasAltitude()) loc.altitude else "NULL"}\t")
+
+                    if (imu != null && imu.size >= 9) {
+                        append("${imu[0]}\t${imu[1]}\t${imu[2]}\t")  // ACC
+                        append("${imu[3]}\t${imu[4]}\t${imu[5]}\t")  // GYRO
+                        append("${imu[6]}\t${imu[7]}\t${imu[8]}\t")  // MAG
+                    } else {
+                        append("NULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\t")
                     }
-                }
-                if (gpsQueue.isNotEmpty()) {
-                    val lastGps = gpsQueue.removeLast()
-                    if (lastGps != null) {
-                        streamingClient.sendGpsData(lastGps.first, lastGps.second, lastGps.third)
+
+                    if (gnss != null) {
+                        append("${gnss.gnssType}\t${gnss.satelliteId}\t${gnss.signalStrength}\t")
+                    } else {
+                        append("NULL\tNULL\tNULL\t")
                     }
+
+                    append("${camera?.frameId ?: "NULL"}\t")
+                    append("${bbox?.size ?: "NULL"}")
+                    append("\n")
                 }
-                if (imuQueue.isNotEmpty()) {
-                    val lastImu = imuQueue.removeLast()
-                    if (lastImu != null) {
-                        streamingClient.sendImuData(lastImu.first, lastImu.second, lastImu.third)
-                    }
-                }
-                if (gnssQueue.isNotEmpty()) {
-                    val lastGnss = gnssQueue.removeLast()
-                    if (lastGnss != null) {
-                        Log.d(TAG, "Sending GNSS data: $lastGnss")
-                        streamingClient.sendGnssData(lastGnss)
-                    }
-                } else {
-                    Log.d(TAG, "GNSS queue is empty")
-                }
-                // --- 바운딩 박스 데이터 전송 로직 추가 시작 ---
-                if (boundingBoxQueue.isNotEmpty()) {
-                    val bboxesForFrame = boundingBoxQueue.removeLast() // List<BoundingBoxLog>
-                    if (bboxesForFrame != null) {
-                        Log.d(TAG, "Sending Bounding Box data for frame: ${bboxesForFrame.firstOrNull()?.frameId}, count: ${bboxesForFrame.size}")
-                        streamingClient.sendBoundingBoxData(bboxesForFrame) // List<BoundingBoxLog> 전달
-                    }
-                } else {
-                    Log.d(TAG, "BoundingBox queue is empty")
-                }
-                // --- 바운딩 박스 데이터 전송 로직 추가 끝 ---
-                delay(100) // 10 Hz
             }
+
+            saveTextFile(relativePath, fileName, header, content)
+        } catch (e: Exception) {
+            Log.e(TAG, "동기화된 데이터 저장 실패: ${e.message}", e)
         }
     }
 
-    private fun saveSingleCameraFrame(ctx: Context, d: SensorData) {
+    /**
+     * Raw 데이터 저장
+     */
+    private suspend fun saveRawGnssData(data: List<HybridSynchronizedDataEntry>) = withContext(Dispatchers.IO) {
+        try {
+            val date = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date())
+            val relativePath = "Documents/SensorLogger/$date/gps"
+            val fileName = "raw_gnss.txt"
+
+            val header = """
+                # Raw GNSS/Sensor Data (Hybrid Time System)
+                # TYPE: Data type (GPS|GNSS|IMU|CAMERA|BBOX)
+                # HYBRID_TIME: Synchronized time
+                # GPS_STATUS: GPS availability
+                # DATA: Type-specific data fields
+                TYPE	HYBRID_TIME	GPS_STATUS	DATA
+            """.trimIndent()
+
+            val content = buildString {
+                for (entry in data) {
+                    val gpsStatus = if (entry.gpsAvailable) "AVAILABLE" else "LOST"
+                    val gpsData = entry.gpsData ?: continue
+                    val (loc, sysTs, monoTs) = gpsData
+
+                    // GPS 엔트리
+                    append("GPS\t${entry.hybridTime}\t$gpsStatus\t")
+                    append("lat=${loc.latitude},lon=${loc.longitude},alt=${if (loc.hasAltitude()) loc.altitude else "NULL"}")
+                    append("\n")
+
+                    // IMU 엔트리
+                    entry.imuData?.let { (imu, sysTs, monoTs) ->
+                        append("IMU\t${entry.hybridTime}\t$gpsStatus\t")
+                        append("acc=${imu[0]},${imu[1]},${imu[2]},")
+                        append("gyro=${imu[3]},${imu[4]},${imu[5]},")
+                        append("mag=${imu[6]},${imu[7]},${imu[8]}")
+                        append("\n")
+                    }
+
+                    // GNSS 엔트리
+                    entry.gnssData?.let { gnss ->
+                        append("GNSS\t${entry.hybridTime}\t$gpsStatus\t")
+                        append("type=${gnss.gnssType},sat_id=${gnss.satelliteId},cn0=${gnss.signalStrength}")
+                        append("\n")
+                    }
+
+                    // 카메라 엔트리
+                    entry.cameraData?.let { camera ->
+                        append("CAMERA\t${entry.hybridTime}\t$gpsStatus\t")
+                        append("frame_id=${camera.frameId}")
+                        append("\n")
+                    }
+
+                    // 바운딩 박스 엔트리
+                    entry.bboxData?.let { bboxes ->
+                        for (bbox in bboxes) {
+                            append("BBOX\t${entry.hybridTime}\t$gpsStatus\t")
+                            append("frame_id=${bbox.frameId},x1=${bbox.x1},y1=${bbox.y1},x2=${bbox.x2},y2=${bbox.y2},cnf=${bbox.cnf},cls=${bbox.clsName}")
+                            append("\n")
+                        }
+                    }
+                }
+            }
+
+            saveTextFile(relativePath, fileName, header, content)
+        } catch (e: Exception) {
+            Log.e(TAG, "Raw 데이터 저장 실패: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 카메라 이미지 저장 (요구된 폴더 구조)
+     */
+    private fun saveCameraImage(context: Context, data: SensorData) {
         scope.launch {
-            runCatching {
-                val date = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date(currentBatchTs))
-                val relativePath = "Pictures/CameraLogger/$date"
-                val fileName = "${d.timestamp}_${d.frameId}.jpeg"
+            try {
+                val date = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date(data.timestamp))
+                val relativePath = "Pictures/SensorLogger/$date/camera01/Clip_000"
+                val fileName = "${data.timestamp}.jpg"
 
                 val values = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
@@ -208,192 +363,115 @@ object LoggerManager {
                     put(MediaStore.Images.Media.IS_PENDING, 1)
                 }
 
-                val uri = ctx.contentResolver.insert(
+                val uri = context.contentResolver.insert(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                     values
-                ) ?: run {
-                    Log.e(TAG, "Failed to create MediaStore entry for image")
-                    return@runCatching
-                }
+                ) ?: return@launch
 
-                val bmp: Bitmap = d.bitmap ?: return@runCatching
-                ctx.contentResolver.openOutputStream(uri)?.use { out ->
-                    bmp.compress(Bitmap.CompressFormat.JPEG, 90, out)
-                    out.flush()
+                data.bitmap?.let { bitmap ->
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                        out.flush()
+                    }
                 }
 
                 values.clear()
                 values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                ctx.contentResolver.update(uri, values, null, null)
+                context.contentResolver.update(uri, values, null, null)
 
-                MediaScannerConnection.scanFile(
-                    ctx,
-                    arrayOf("$relativePath/$fileName"),
-                    arrayOf("image/jpeg"),
-                    null
-                )
+                Log.d(TAG, "카메라 이미지 저장: $relativePath/$fileName")
 
-                Log.d(TAG, "CAMERA saved → $relativePath/$fileName via MediaStore")
-            }.onFailure {
-                Log.e(TAG, "saveSingleCameraFrame error", it)
+            } catch (e: Exception) {
+                Log.e(TAG, "카메라 이미지 저장 실패: ${e.message}", e)
             }
         }
     }
 
-    private fun saveAllTextBatches(ctx: Context, force: Boolean = false) {
-        if (!force && gpsQueue.isEmpty() && imuQueue.isEmpty() && gnssQueue.isEmpty()) return
-        val date = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date(currentBatchTs))
-        if (gpsQueue.isNotEmpty()) { saveText(ctx, gpsQueue.snapshot(), "gps", date) { (loc, sys, mono) -> "sys_ts=$sys,mono_ts=$mono,lat=${loc.latitude},lon=${loc.longitude},alt=${loc.altitude},time=${loc.time}" }; gpsQueue.clear() }
-        if (imuQueue.isNotEmpty()) { saveText(ctx, imuQueue.snapshot(), "imu", date) { (imu, sys, mono) -> "sys_ts=$sys,mono_ts=$mono,${imu.joinToString(",")}" }; imuQueue.clear() }
-        if (gnssQueue.isNotEmpty()) { saveText(ctx, gnssQueue.snapshot(), "gnss", date) { g -> "sys_ts=${g.timestamp},mono_ts=${g.monoTimestamp},gnss_type=${g.gnssType},svid=${g.satelliteId},cn0=${g.signalStrength},pseudorange_rate=${g.pseudorangeRate ?: "null"},carrier_phase=${g.carrierPhase ?: "null"},info=${g.additionalInfo}" }; gnssQueue.clear() }
-        // --- 바운딩 박스 데이터 저장 로직 추가 시작 ---
-        if (boundingBoxQueue.isNotEmpty()) {
-            val allBoundingBoxes = boundingBoxQueue.snapshot().flatten() // List<List<BoundingBoxLog>>를 List<BoundingBoxLog>로 평탄화
-            saveText(ctx, allBoundingBoxes, "bounding_boxes", date) { bbox -> "frame_id=${bbox.frameId},sys_ts=${bbox.timestamp},mono_ts=${bbox.monoTimestamp},x1=${bbox.x1},y1=${bbox.y1},x2=${bbox.x2},y2=${bbox.y2},cnf=${bbox.cnf},cls_name=${bbox.clsName}" }
-            boundingBoxQueue.clear()
-        }
-        // --- 바운딩 박스 데이터 저장 로직 추가 끝 ---
-        currentBatchTs = 0L
-    }
+    /**
+     * 텍스트 파일 저장 유틸리티
+     */
+    private suspend fun saveTextFile(
+        relativePath: String,
+        fileName: String,
+        header: String,
+        content: String
+    ) = withContext(Dispatchers.IO) {
+        try {
+            val context = getApplicationContext() ?: return@withContext
 
-    private fun getLoggerDir(ctx: Context, sensor: String, date: String): File {
-        val base = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-            ?: throw IllegalStateException("External storage unavailable")
-        return File(base, "CameraLogger/$date")
-    }
-
-    private fun <T> saveText(
-        ctx: Context,
-        list: List<T>,
-        sensor: String,
-        date: String,
-        transform: (T) -> String
-    ) {
-        scope.launch {
-            runCatching {
-                val content = list.joinToString("\n", transform = transform) + "\n"
-                val relativePath = "Documents/IMULogger/$date"
-                val fileName = "$sensor.txt"
-
-                val header = when (sensor) {
-                    "gps" -> """
-                    # GPS Data (WGS84 Coordinate System)
-                    # sys_ts: System timestamp (milliseconds since epoch, UTC)
-                    # mono_ts: Monotonic timestamp (nanoseconds since device boot)
-                    # lat: Latitude (degrees, WGS84)
-                    # lon: Longitude (degrees, WGS84)
-                    # alt: Altitude (meters above WGS84 ellipsoid)
-                    # time: Location fix timestamp (milliseconds since epoch, UTC)
-                """.trimIndent()
-                    "gnss" -> """
-                    # GNSS Raw Measurements
-                    # sys_ts: System timestamp (milliseconds since epoch, UTC)
-                    # mono_ts: Monotonic timestamp (nanoseconds since device boot)
-                    # gnss_type: Constellation type (e.g., GPS, Galileo, BeiDou, GLONASS, QZSS)
-                    # svid: Satellite vehicle ID (integer)
-                    # cn0: Carrier-to-noise density (dB-Hz)
-                    # pseudorange_rate: Pseudorange rate (meters per second, null if unavailable)
-                    # carrier_phase: Carrier phase measurement (cycles, null if unavailable)
-                    # info: Additional metadata (e.g., State, TimeOffsetNanos in nanoseconds)
-                """.trimIndent()
-                    "imu" -> """
-                    # IMU Data (Accelerometer, Gyroscope, Magnetometer)
-                    # sys_ts: System timestamp (milliseconds since epoch, UTC)
-                    # mono_ts: Monotonic timestamp (nanoseconds since device boot)
-                    # acc_x,acc_y,acc_z: Accelerometer (m/s²)
-                    # gyro_x,gyro_y,gyro_z: Gyroscope (radians per second)
-                    # mag_x,mag_y,mag_z: Magnetometer (microteslas)
-                """.trimIndent()
-                    "bounding_boxes" -> """
-                    # Bounding Box Detections
-                    # frame_id: Unique ID for the camera frame the detection belongs to
-                    # sys_ts: System timestamp (milliseconds since epoch, UTC)
-                    # mono_ts: Monotonic timestamp (nanoseconds since device boot)
-                    # x1,y1,x2,y2: Bounding box coordinates (normalized, 0-1 range, top-left and bottom-right)
-                    # cnf: Confidence score (0-1)
-                    # cls_name: Class name of the detected object
-                """.trimIndent()
-                    else -> ""
-                }
-
-                val values = ContentValues().apply {
-                    put(MediaStore.Files.FileColumns.DISPLAY_NAME, fileName)
-                    put(MediaStore.Files.FileColumns.MIME_TYPE, "text/plain")
-                    put(MediaStore.Files.FileColumns.RELATIVE_PATH, relativePath)
-                    put(MediaStore.Files.FileColumns.IS_PENDING, 1)
-                }
-
-                val uri = ctx.contentResolver.insert(
-                    MediaStore.Files.getContentUri("external"),
-                    values
-                ) ?: run {
-                    Log.e(TAG, "$sensor save error: Failed to create MediaStore entry")
-                    return@runCatching
-                }
-
-                ctx.contentResolver.openOutputStream(uri)?.use { output ->
-                    val fileExists = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        ctx.contentResolver.query(uri, null, null, null)?.use { cursor ->
-                            cursor.moveToFirst() && cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)) > 0
-                        } ?: false
-                    } else {
-                        false
-                    }
-
-                    if (!fileExists && header.isNotEmpty()) {
-                        output.write(header.toByteArray())
-                        output.write("\n".toByteArray())
-                    }
-                    output.write(content.toByteArray())
-                    output.flush()
-                } ?: run {
-                    Log.e(TAG, "$sensor save error: Failed to open output stream")
-                    return@runCatching
-                }
-
-                values.clear()
-                values.put(MediaStore.Files.FileColumns.IS_PENDING, 0)
-                ctx.contentResolver.update(uri, values, null, null)
-
-                MediaScannerConnection.scanFile(
-                    ctx,
-                    arrayOf("$relativePath/$fileName"),
-                    arrayOf("text/plain"),
-                    null
-                )
-
-                Log.d(TAG, "${sensor.uppercase()} saved → $relativePath/$fileName via MediaStore")
-            }.onFailure {
-                Log.e(TAG, "$sensor save error", it)
+            val values = ContentValues().apply {
+                put(MediaStore.Files.FileColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.Files.FileColumns.MIME_TYPE, "text/plain")
+                put(MediaStore.Files.FileColumns.RELATIVE_PATH, relativePath)
+                put(MediaStore.Files.FileColumns.IS_PENDING, 1)
             }
+
+            val uri = context.contentResolver.insert(
+                MediaStore.Files.getContentUri("external"),
+                values
+            ) ?: return@withContext
+
+            context.contentResolver.openOutputStream(uri, "wa")?.use { output ->  // append 모드
+                // 파일이 비어있으면 헤더 추가
+                val cursor = context.contentResolver.query(uri, arrayOf(MediaStore.Files.FileColumns.SIZE), null, null, null)
+                val fileSize = cursor?.use {
+                    if (it.moveToFirst()) it.getLong(0) else 0L
+                } ?: 0L
+
+                if (fileSize == 0L && header.isNotEmpty()) {
+                    output.write(header.toByteArray())
+                    output.write("\n".toByteArray())
+                }
+                output.write(content.toByteArray())
+                output.flush()
+            }
+
+            values.clear()
+            values.put(MediaStore.Files.FileColumns.IS_PENDING, 0)
+            context.contentResolver.update(uri, values, null, null)
+
+            MediaScannerConnection.scanFile(
+                context,
+                arrayOf("$relativePath/$fileName"),
+                arrayOf("text/plain"),
+                null
+            )
+
+            Log.d(TAG, "텍스트 파일 저장: $relativePath/$fileName")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "텍스트 파일 저장 실패: ${e.message}", e)
         }
     }
 
-    private fun hasStoragePermissions(ctx: Context): Boolean {
-        val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            ContextCompat.checkSelfPermission(
-                ctx,
-                android.Manifest.permission.WRITE_EXTERNAL_STORAGE
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-        Log.d(TAG, "Storage permission check: WRITE_EXTERNAL_STORAGE = $hasPermission")
-        return hasPermission
-    }
+    // ========== 상태 확인 메서드들 ==========
 
-    fun sendCameraData(data: SensorData) {
-        val bitmap = data.bitmap
-        if (bitmap != null) {
-            val byteArrayOutputStream = java.io.ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 100, byteArrayOutputStream)
-            val byteArray = byteArrayOutputStream.toByteArray()
-            val base64Image = android.util.Base64.encodeToString(byteArray, android.util.Base64.DEFAULT)
-            Log.d("WebSocketClient", "Sending image: $base64Image")
-        } else {
-            Log.e("WebSocketClient", "Bitmap is null in sendCameraData")
+    fun getGpsStatus() = dataSynchronizer.getGpsStatus()
+
+    fun getQueueStatus() = dataSynchronizer.getQueueStatus()
+
+    fun getSyncQuality(): String {
+        val syncData = dataSynchronizer.extractSynchronizedData(force = false)
+        if (syncData.isEmpty()) return "동기화 데이터 없음"
+
+        val quality = dataSynchronizer.evaluateSyncQuality(syncData)
+        return buildString {
+            append("동기화 품질 보고:\n")
+            append("총 항목: ${quality.totalEntries}\n")
+            append("GPS 매칭률: ${String.format("%.1f", quality.gpsMatchRate * 100)}%\n")
+            append("IMU 매칭률: ${String.format("%.1f", quality.imuMatchRate * 100)}%\n")
+            append("GPS 가용성: ${String.format("%.1f", quality.gpsAvailabilityRate * 100)}%\n")
+            append("평균 시간차: ${String.format("%.1f", quality.avgTimeDifference)}ms\n")
+            append("시간 안정성: ${String.format("%.3f", quality.offsetStability)}")
         }
     }
 
-    private fun initBatchTsIfNeeded(ts: Long) { if (currentBatchTs == 0L) currentBatchTs = ts }
+    private fun getApplicationContext(): android.content.Context? {
+        // 컨텍스트를 어디서 가져올지는 애플리케이션 구조에 따라 결정
+        // 보통 Application 클래스나 의존성 주입을 통해 제공
+        return null  // 실제 구현에서는 적절한 컨텍스트 제공 필요
+    }
+
+    private inline fun shouldSave() = isLogSavingEnabled
+    private inline fun shouldLiveStream() = isLiveStreamingEnabled
 }
