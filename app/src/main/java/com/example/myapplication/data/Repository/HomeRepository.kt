@@ -83,17 +83,21 @@ class HomeRepository(
 
     fun toggleLogSaving(context: Context, enabled: Boolean) {
         if (enabled) {
-            LoggerManager.enableLogSaving()
+            LoggerManager.getInstance(context).enableLogSaving() // ✅ 수정
             Log.d(TAG, "Logging enabled: $enabled")
         } else {
-            LoggerManager.disableLogSaving(context)   // ✅ context 전달
+            LoggerManager.getInstance(context).disableLogSaving() // ✅ 수정
             Log.d(TAG, "Logging disabled: $enabled")
         }
     }
 
     suspend fun setServerStreamingEnabled(context: Context, enabled: Boolean) {
-        sensorCollector.setServerStreamingEnabled(context, enabled)
-        Log.d(TAG, "Server streaming enabled: $enabled")
+        if (enabled) {
+            LoggerManager.getInstance(context).setTransportType("websocket") // ✅ 수정
+            LoggerManager.getInstance(context).enableStreaming() // ✅ 수정
+        } else {
+            LoggerManager.getInstance(context).disableStreaming() // ✅ 수정
+        }
     }
 
     private suspend fun collectSensorDataAsync(): SensorData? = suspendCancellableCoroutine { continuation ->

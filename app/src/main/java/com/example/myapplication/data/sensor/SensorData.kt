@@ -71,7 +71,7 @@ data class CameraConfig(
     var cameraId: String? = null,
     var lensFacing: Int? = CameraCharacteristics.LENS_FACING_BACK,
     var hardwareLevel: Int? = null,
-    var imageSize: Size = Size(1280, 1280),
+    var imageSize: Size = Size(840, 840),
     var imageFormat: Int = ImageFormat.JPEG,
     var jpegQuality: Int = 90.coerceIn(0, 100),
     var orientation: Int = 0,

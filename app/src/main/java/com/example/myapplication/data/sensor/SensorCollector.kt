@@ -96,7 +96,7 @@ private class YoloDetectorListener(
         }
 
         if (boundingBoxLogs.isNotEmpty()) {
-            LoggerManager.pushBoundingBox(context, boundingBoxLogs)
+            LoggerManager.getInstance(context).pushBoundingBox(boundingBoxLogs)
         }
 
         detectionCallback?.invoke(boundingBoxes, inferenceTime, frameId)
@@ -139,7 +139,7 @@ class SensorCollector(private val context: Context) {
     private var isDetecting = false
 
     var cameraConfig = CameraConfig(
-        imageSize = Size(1280, 1280),
+        imageSize = Size(840, 840),
         lensFacing = CameraCharacteristics.LENS_FACING_BACK,
         aeTargetFpsRange = Range(30, 30),
         jpegQuality = 90,
@@ -228,7 +228,7 @@ class SensorCollector(private val context: Context) {
                 )
                 synchronized(this@SensorCollector) {
                     gpsCallback?.invoke(sensorData)
-                    LoggerManager.pushGps(context, location, systemTimestamp, monoTimestamp)
+                    LoggerManager.getInstance(context).pushGps(location, systemTimestamp, monoTimestamp)
                 }
             }
         }
@@ -249,7 +249,7 @@ class SensorCollector(private val context: Context) {
                     monoTimestamp = monoTimestamp
                 )
                 imuCallback?.invoke(sensorData)
-                LoggerManager.pushImu(context, latestImuData!!, systemTimestamp, monoTimestamp)
+                LoggerManager.getInstance(context).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
             }
         }
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
@@ -289,7 +289,7 @@ class SensorCollector(private val context: Context) {
                 )
 
                 gnssCallback?.invoke(sensorDataString)
-                LoggerManager.pushGnss(context, gnssData)
+                LoggerManager.getInstance(context).pushGnss(gnssData)
             }
         }
 
@@ -325,7 +325,7 @@ class SensorCollector(private val context: Context) {
                     monoTimestamp = gnssData.monoTimestamp
                 )
                 gnssCallback?.invoke(sensorDataString)
-                LoggerManager.pushGnss(context, gnssData)
+                LoggerManager.getInstance(context).pushGnss(gnssData)
             }
         }
     }
@@ -345,7 +345,7 @@ class SensorCollector(private val context: Context) {
                     monoTimestamp = monoTimestamp
                 )
                 imuCallback?.invoke(sensorData)
-                LoggerManager.pushImu(context, latestImuData!!, systemTimestamp, monoTimestamp)
+                LoggerManager.getInstance(context).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
             }
         }
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
@@ -366,12 +366,7 @@ class SensorCollector(private val context: Context) {
                     monoTimestamp = monoTimestamp
                 )
                 imuCallback?.invoke(sensorData)
-                LoggerManager.pushImu(
-                    context,
-                    latestImuData!!,
-                    systemTimestamp,
-                    monoTimestamp
-                )
+                LoggerManager.getInstance(context).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
             }
         }
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
@@ -383,7 +378,7 @@ class SensorCollector(private val context: Context) {
             latestGyroscope.copyInto(this, 3, 0, 3)
             latestMagnetometer.copyInto(this, 6, 0, 3)
         }
-        LoggerManager.pushImu(context, latestImuData!!)
+        LoggerManager.getInstance(context).pushImu(latestImuData!!)
     }
 
     private fun validateImageSize(cameraId: String, size: Size, format: Int): Size {
@@ -448,7 +443,7 @@ class SensorCollector(private val context: Context) {
                                     monoTimestamp = monoTime,
                                     frameId = frameId
                                 )
-                                LoggerManager.pushCamera(this@SensorCollector.context, sensorData)
+                                LoggerManager.getInstance(context).pushCamera(sensorData)
                                 callback(sensorData)
                                 ensureDetectorExecutor()
                                 detectorExecutor.submit {
@@ -557,8 +552,8 @@ class SensorCollector(private val context: Context) {
 
                         rawBitmap?.let { bmp ->
                             // 2) 스케일링
-                            val scaledBitmap = if (bmp.width != 1280 || bmp.height != 1280) {
-                                Bitmap.createScaledBitmap(bmp, 1280, 1280, true)
+                            val scaledBitmap = if (bmp.width != 840 || bmp.height != 840) {
+                                Bitmap.createScaledBitmap(bmp, 840, 840, true)
                             } else {
                                 bmp
                             }
@@ -588,7 +583,7 @@ class SensorCollector(private val context: Context) {
                                 frameId       = frameId
                             )
 
-                            LoggerManager.pushCamera(this@SensorCollector.context, sensorData)
+                            LoggerManager.getInstance(context).pushCamera(sensorData)
                             frameCount++
 
                             if (frameCount % frameSkipInterval == 0) {
@@ -737,7 +732,7 @@ class SensorCollector(private val context: Context) {
                         )
                         synchronized(this@SensorCollector) {
                             gpsCallback?.invoke(data)
-                            LoggerManager.pushGps(context, loc, systemTime, monoTime)
+                            LoggerManager.getInstance(context).pushGps(loc, systemTime, monoTime)
                         }
                     }
                 }
@@ -981,10 +976,10 @@ class SensorCollector(private val context: Context) {
 
     suspend fun setServerStreamingEnabled(context: Context, enabled: Boolean) {
         if (enabled) {
-            LoggerManager.setTransportType("websocket")
-            LoggerManager.enableStreaming(context)
+            LoggerManager.getInstance(context).setTransportType("websocket") // ✅ 수정
+            LoggerManager.getInstance(context).enableStreaming() // ✅ 수정
         } else {
-            LoggerManager.disableStreaming()
+            LoggerManager.getInstance(context).disableStreaming() // ✅ 수정
         }
     }
 }

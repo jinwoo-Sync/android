@@ -28,17 +28,29 @@ import java.util.*
  *
  * 시간 동기화는 DataSynchronizer에서 담당
  */
-object LoggerManager {
-    private const val TAG = "LoggerManager"
+class LoggerManager private constructor(private val context: Context) {
 
-    // 큐 크기 설정 (3-5분 데이터 보관)
-    private const val GPS_QUEUE_CAPACITY = 300      // 1Hz × 300초
-    private const val GNSS_QUEUE_CAPACITY = 1200    // 4Hz × 300초
-    private const val IMU_QUEUE_CAPACITY = 15000    // 50Hz × 300초
-    private const val CAMERA_QUEUE_CAPACITY = 1800  // 6Hz × 300초
-    private const val BBOX_QUEUE_CAPACITY = 1800    // 6Hz × 300초
+    companion object {
+        private const val TAG = "LoggerManager"
 
-    private const val SYNC_INTERVAL_MS = 30000L     // 30초마다 동기화 저장
+        // 큐 크기 설정 (3-5분 데이터 보관)
+        private const val GPS_QUEUE_CAPACITY = 300      // 1Hz × 300초
+        private const val GNSS_QUEUE_CAPACITY = 1200    // 4Hz × 300초
+        private const val IMU_QUEUE_CAPACITY = 15000    // 50Hz × 300초
+        private const val CAMERA_QUEUE_CAPACITY = 1800  // 6Hz × 300초
+        private const val BBOX_QUEUE_CAPACITY = 1800    // 6Hz × 300초
+
+        private const val SYNC_INTERVAL_MS = 30000L     // 30초마다 동기화 저장
+
+        @Volatile
+        private var INSTANCE: LoggerManager? = null
+
+        fun getInstance(context: Context): LoggerManager {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: LoggerManager(context.applicationContext).also { INSTANCE = it }
+            }
+        }
+    }
 
     private var isLogSavingEnabled = false
     private var isLiveStreamingEnabled = false      // 이름 변경: streaming -> livestreaming
@@ -95,7 +107,7 @@ object LoggerManager {
 
                 Log.d(TAG, "${synchronizedData.size}개 항목 저장 완료")
             }
-            else{
+            else {
 
             }
         } catch (e: Exception) {
@@ -118,7 +130,7 @@ object LoggerManager {
         Log.d(TAG, "로컬 로그 저장 활성화")
     }
 
-    fun disableLogSaving(ctx: Context) {
+    fun disableLogSaving() {
         isLogSavingEnabled = false
         scope.launch {
             performDataSynchronizationAndSave(force = true)
@@ -126,7 +138,7 @@ object LoggerManager {
         }
     }
 
-    suspend fun enableLiveStreaming(context: Context) {
+    suspend fun enableLiveStreaming() {
         if (isLiveStreamingEnabled) return
         if (!::liveStreamingClient.isInitialized) {
             throw IllegalStateException("라이브스트리밍을 시작하기 전에 통신 방식을 설정해야 합니다.")
@@ -143,8 +155,8 @@ object LoggerManager {
         Log.d(TAG, "라이브스트리밍 비활성화")
     }
 
-    suspend fun enableStreaming(context: Context) {
-        enableLiveStreaming(context)
+    suspend fun enableStreaming() {
+        enableLiveStreaming()
     }
 
     /**
@@ -156,7 +168,7 @@ object LoggerManager {
 
     // ========== 데이터 수집 메서드들 ==========
 
-    fun pushGps(ctx: Context, loc: Location, sysTs: Long = System.currentTimeMillis(), monoTs: Long = System.nanoTime()) {
+    fun pushGps(loc: Location, sysTs: Long = System.currentTimeMillis(), monoTs: Long = System.nanoTime()) {
         dataSynchronizer.addGpsData(loc, sysTs, monoTs)
 
         // 라이브스트리밍
@@ -165,7 +177,7 @@ object LoggerManager {
         }
     }
 
-    fun pushGnss(ctx: Context, g: GnssData) {
+    fun pushGnss(g: GnssData) {
         dataSynchronizer.addGnssData(g)
 
         // 라이브스트리밍
@@ -174,7 +186,7 @@ object LoggerManager {
         }
     }
 
-    fun pushImu(ctx: Context, imu: FloatArray, sysTs: Long = System.currentTimeMillis(), monoTs: Long = System.nanoTime()) {
+    fun pushImu(imu: FloatArray, sysTs: Long = System.currentTimeMillis(), monoTs: Long = System.nanoTime()) {
         dataSynchronizer.addImuData(imu, sysTs, monoTs)
 
         // 라이브스트리밍
@@ -183,12 +195,12 @@ object LoggerManager {
         }
     }
 
-    fun pushCamera(ctx: Context, data: SensorData) {
+    fun pushCamera(data: SensorData) {
         dataSynchronizer.addCameraData(data)
 
         // 카메라 이미지 즉시 저장
         if (shouldSave()) {
-            saveCameraImage(ctx, data)
+            saveCameraImage(data)
         }
 
         // 라이브스트리밍
@@ -197,7 +209,7 @@ object LoggerManager {
         }
     }
 
-    fun pushBoundingBox(ctx: Context, bboxes: List<BoundingBoxLog>) {
+    fun pushBoundingBox(bboxes: List<BoundingBoxLog>) {
         dataSynchronizer.addBoundingBoxData(bboxes)
 
         // 라이브스트리밍
@@ -349,7 +361,7 @@ object LoggerManager {
     /**
      * 카메라 이미지 저장 (요구된 폴더 구조)
      */
-    private fun saveCameraImage(context: Context, data: SensorData) {
+    private fun saveCameraImage(data: SensorData) {
         scope.launch {
             try {
                 val date = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date(data.timestamp))
@@ -397,8 +409,6 @@ object LoggerManager {
         content: String
     ) = withContext(Dispatchers.IO) {
         try {
-            val context = getApplicationContext() ?: return@withContext
-
             val values = ContentValues().apply {
                 put(MediaStore.Files.FileColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.Files.FileColumns.MIME_TYPE, "text/plain")
@@ -464,12 +474,6 @@ object LoggerManager {
             append("평균 시간차: ${String.format("%.1f", quality.avgTimeDifference)}ms\n")
             append("시간 안정성: ${String.format("%.3f", quality.offsetStability)}")
         }
-    }
-
-    private fun getApplicationContext(): android.content.Context? {
-        // 컨텍스트를 어디서 가져올지는 애플리케이션 구조에 따라 결정
-        // 보통 Application 클래스나 의존성 주입을 통해 제공
-        return null  // 실제 구현에서는 적절한 컨텍스트 제공 필요
     }
 
     private inline fun shouldSave() = isLogSavingEnabled
