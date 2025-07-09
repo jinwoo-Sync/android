@@ -131,10 +131,10 @@ class LoggerManager private constructor(private val context: Context) {
                 try {
                     cleanup() // 이전 리소스 정리
 
-                    // 세션 ID 생성 (UUID 기반)
-                    currentSessionId = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+                    // 세션 ID 생성 (년월일_시까지만)
+                    currentSessionId = SimpleDateFormat("yyyyMMdd_HH", Locale.getDefault()).format(Date())
 
-                    // Movies 디렉토리에 비디오 파일 생성 (허용됨)
+                    // Movies 디렉토리에 비디오 파일 생성
                     val fileName = "sensor_video_${System.currentTimeMillis()}.mp4"
                     val values = ContentValues().apply {
                         put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
@@ -522,6 +522,13 @@ class LoggerManager private constructor(private val context: Context) {
             try {
                 Log.d(TAG, "$reason 시작 - 버퍼 크기: ${frameBuffer.size}")
 
+                // 시간별 폴더 구조를 위한 시간 확인
+                val currentHourlyId = SimpleDateFormat("yyyyMMdd_HH", Locale.getDefault()).format(Date())
+                if (currentEncoder != null && currentEncoder!!.getSessionId() != currentHourlyId) {
+                    currentEncoder?.finalizeEncoding()
+                    currentEncoder = null
+                }
+
                 // 인코더 상태 검증 및 초기화
                 val shouldInitialize = currentEncoder?.isActive() != true
                 if (shouldInitialize) {
@@ -568,26 +575,41 @@ class LoggerManager private constructor(private val context: Context) {
 
     /**
      * 텍스트 데이터 저장 (Documents/gnss 경로)
-     * Android SAF 정책 준수
+     * 시간별 폴더 구조: yyyyMMdd_HH
      */
     private suspend fun saveTextData(syncDataList: List<HybridSynchronizedDataEntry>) = withContext(Dispatchers.IO) {
-        if (currentSessionTimestamp == null) return@withContext
-
         try {
-            // Documents 경로 사용 (텍스트 파일 허용)
-            val relativePath = "Documents/gnss/$currentSessionTimestamp"
+            // 시간별 폴더 구조 생성 (년월일_시까지만)
+            val hourlyFolderName = SimpleDateFormat("yyyyMMdd_HH", Locale.getDefault()).format(Date())
+            val relativePath = "Documents/gnss/$hourlyFolderName"
 
-            // GPS 동기화 데이터
+            Log.d(TAG, "시간별 폴더에 데이터 저장: $relativePath")
+
+            // 1. GPS 동기화 데이터
             val gpsContent = buildGpsSyncContent(syncDataList)
             if (gpsContent.isNotEmpty()) {
                 appendToFile(relativePath, "gps_sync.txt", GPS_SYNC_HEADER, gpsContent)
             }
 
-            // Raw GNSS 데이터
-            val rawContent = buildRawGnssContent(syncDataList)
-            if (rawContent.isNotEmpty()) {
-                appendToFile(relativePath, "raw_gnss.txt", RAW_GNSS_HEADER, rawContent)
+            // 2. Raw GNSS 데이터
+            val rawGnssContent = buildRawGnssContent(syncDataList)
+            if (rawGnssContent.isNotEmpty()) {
+                appendToFile(relativePath, "raw_gnss.txt", RAW_GNSS_HEADER, rawGnssContent)
             }
+
+            // 3. Raw GPS 데이터
+            val rawGpsContent = buildRawGpsContent(syncDataList)
+            if (rawGpsContent.isNotEmpty()) {
+                appendToFile(relativePath, "raw_gps.txt", RAW_GPS_HEADER, rawGpsContent)
+            }
+
+            // 4. Raw IMU 데이터
+            val rawImuContent = buildRawImuContent(syncDataList)
+            if (rawImuContent.isNotEmpty()) {
+                appendToFile(relativePath, "raw_imu.txt", RAW_IMU_HEADER, rawImuContent)
+            }
+
+            Log.d(TAG, "모든 raw 데이터 저장 완료: $hourlyFolderName")
 
         } catch (e: Exception) {
             Log.e(TAG, "텍스트 데이터 저장 실패: ${e.message}", e)
@@ -633,28 +655,73 @@ class LoggerManager private constructor(private val context: Context) {
         }
     }
 
+    /**
+     * Raw GNSS 데이터 구성
+     */
     private fun buildRawGnssContent(syncDataList: List<HybridSynchronizedDataEntry>): String {
         return buildString(syncDataList.size * 300) {
             for (entry in syncDataList) {
+                val gnssData = entry.gnssData ?: continue
                 val gpsStatus = if (entry.gpsAvailable) "AVAILABLE" else "LOST"
-                val gpsData = entry.gpsData ?: continue
-                val (loc, _, _) = gpsData
 
-                append("GPS\t${entry.hybridTime}\t$gpsStatus\t")
-                append("lat=${loc.latitude},lon=${loc.longitude},alt=${if (loc.hasAltitude()) loc.altitude else "NULL"}")
+                append("${entry.hybridTime}\t")
+                append("${gnssData.timestamp}\t")
+                append("${gnssData.monoTimestamp}\t")
+                append("${gnssData.gnssType}\t")
+                append("${gnssData.satelliteId}\t")
+                append("${gnssData.signalStrength}\t")
+                append("${gnssData.pseudorangeRate ?: "NULL"}\t")
+                append("${gnssData.carrierPhase ?: "NULL"}\t")
+                append("${gnssData.additionalInfo}\t")
+                append("$gpsStatus")
                 append("\n")
+            }
+        }
+    }
 
-                entry.imuData?.let { (imu, _, _) ->
-                    append("IMU\t${entry.hybridTime}\t$gpsStatus\t")
-                    append("acc=${imu[0]},${imu[1]},${imu[2]},")
-                    append("gyro=${imu[3]},${imu[4]},${imu[5]},")
-                    append("mag=${imu[6]},${imu[7]},${imu[8]}")
-                    append("\n")
-                }
+    /**
+     * Raw GPS 데이터 구성 (TSV 형식)
+     */
+    private fun buildRawGpsContent(syncDataList: List<HybridSynchronizedDataEntry>): String {
+        return buildString(syncDataList.size * 150) {
+            for (entry in syncDataList) {
+                val gpsData = entry.gpsData ?: continue
+                val (location, systemTime, monoTime) = gpsData
 
-                entry.gnssData?.let { gnss ->
-                    append("GNSS\t${entry.hybridTime}\t$gpsStatus\t")
-                    append("type=${gnss.gnssType},sat_id=${gnss.satelliteId},cn0=${gnss.signalStrength}")
+                append("${entry.hybridTime}\t")
+                append("${systemTime}\t")
+                append("${monoTime}\t")
+                append("${location.time}\t")
+                append("${location.latitude}\t")
+                append("${location.longitude}\t")
+                append("${if (location.hasAltitude()) location.altitude else "NULL"}\t")
+                append("${if (location.hasAccuracy()) location.accuracy else "NULL"}\t")
+                append("${if (location.hasSpeed()) location.speed else "NULL"}\t")
+                append("${if (location.hasBearing()) location.bearing else "NULL"}\t")
+                append("${location.provider}\t")
+                append("${if (entry.gpsAvailable) "AVAILABLE" else "LOST"}")
+                append("\n")
+            }
+        }
+    }
+
+    /**
+     * Raw IMU 데이터 구성 (TSV 형식)
+     */
+    private fun buildRawImuContent(syncDataList: List<HybridSynchronizedDataEntry>): String {
+        return buildString(syncDataList.size * 200) {
+            for (entry in syncDataList) {
+                val imuData = entry.imuData ?: continue
+                val (imu, systemTime, monoTime) = imuData
+
+                if (imu.size >= 9) {
+                    append("${entry.hybridTime}\t")
+                    append("${systemTime}\t")
+                    append("${monoTime}\t")
+                    append("${imu[0]}\t${imu[1]}\t${imu[2]}\t")
+                    append("${imu[3]}\t${imu[4]}\t${imu[5]}\t")
+                    append("${imu[6]}\t${imu[7]}\t${imu[8]}\t")
+                    append("${if (entry.gpsAvailable) "AVAILABLE" else "LOST"}")
                     append("\n")
                 }
             }
@@ -808,8 +875,8 @@ class LoggerManager private constructor(private val context: Context) {
             append("프레임 버퍼: ${frameBuffer.size}/${MAX_FRAME_BUFFER}\n")
             append("세션: $currentSessionTimestamp\n")
             append("인코딩 프레임: ${currentEncoder?.getFrameCount() ?: 0}\n")
-            append("비디오 저장: Movies/gnss/$currentSessionTimestamp/\n")
-            append("텍스트 저장: Documents/gnss/$currentSessionTimestamp/\n")
+            append("비디오 저장: Movies/gnss/yyyyMMdd_HH/\n")
+            append("텍스트 저장: Documents/gnss/yyyyMMdd_HH/\n")
             append("색공간 변환: ITU-R BT.601 RGB→YUV420\n")
             append("코덱: H.264 Baseline Profile\n")
             append("상태 전이: FSM 기반 안정성 보장")
@@ -823,19 +890,32 @@ class LoggerManager private constructor(private val context: Context) {
 
     private val GPS_SYNC_HEADER = """
         # GPS Synchronized Data (Hybrid Logical Clock) - Finite State Machine Video Encoder
-        # Video Storage: Movies/gnss/[session]/sensor_video_[timestamp].mp4  
-        # Text Storage: Documents/gnss/[session]/gps_sync.txt, raw_gnss.txt
+        # Video Storage: Movies/gnss/yyyyMMdd_HH/sensor_video_[timestamp].mp4  
+        # Text Storage: Documents/gnss/yyyyMMdd_HH/gps_sync.txt, raw_gnss.txt, raw_gps.txt, raw_imu.txt
         # Encoding: ITU-R BT.601 RGB→YUV420 → H.264 Baseline Profile
         # State Machine: {IDLE, INITIALIZING, ENCODING, FINALIZING, ERROR}
         # Queueing Theory: M/M/1 model with λ=15frames/batch, W=4s
         HYBRID_TIME	GPS_STATUS	LAT	LON	ALT	ACC_X	ACC_Y	ACC_Z	GYRO_X	GYRO_Y	GYRO_Z	MAG_X	MAG_Y	MAG_Z	GNSS_TYPE	SAT_ID	CN0	CAMERA_FRAME_ID	BBOX_COUNT
     """.trimIndent()
 
+    private val RAW_GPS_HEADER = """
+        # Raw GPS Data - GPS Time Priority (시간별 저장: yyyyMMdd_HH)
+        # Time Rule: GPS Time 우선, GPS 없으면 System Time 사용
+        # Folder Structure: Documents/gnss/yyyyMMdd_HH/
+        HYBRID_TIME	SYS_TIME	MONO_TIME	GPS_TIME	LATITUDE	LONGITUDE	ALTITUDE	ACCURACY	SPEED	BEARING	PROVIDER	GPS_STATUS
+    """.trimIndent()
+
+    private val RAW_IMU_HEADER = """
+        # Raw IMU Data - 9DOF Sensor Fusion (50Hz) 
+        # GPS 시간 기준 정렬, GPS 없으면 시스템 시간
+        # Folder: Documents/gnss/yyyyMMdd_HH/
+        HYBRID_TIME	SYS_TIME	MONO_TIME	ACC_X	ACC_Y	ACC_Z	GYRO_X	GYRO_Y	GYRO_Z	MAG_X	MAG_Y	MAG_Z	GPS_STATUS
+    """.trimIndent()
+
     private val RAW_GNSS_HEADER = """
-        # Raw GNSS/Sensor Data - Finite State Automaton Multimedia Logging
-        # Color Space: ITU-R BT.601 Standard YUV420 Planar (4:2:0 Subsampling)
-        # Synchronization: Hybrid Logical Clock Algorithm
-        # Thread Safety: Peterson's Algorithm + Compare-And-Swap
-        TYPE	HYBRID_TIME	GPS_STATUS	DATA
+        # Raw GNSS Measurements - Multi-Constellation
+        # GPS 시간 기준 정렬  
+        # Folder: Documents/gnss/yyyyMMdd_HH/
+        HYBRID_TIME	SYS_TIME	MONO_TIME	GNSS_TYPE	SAT_ID	CN0_DB_HZ	PSEUDORANGE_RATE	CARRIER_PHASE	ADDITIONAL_INFO	GPS_STATUS
     """.trimIndent()
 }
