@@ -37,7 +37,9 @@ import java.util.concurrent.atomic.AtomicReference
  * - Linear Algebra: YUV→RGB 색공간 변환 행렬
  * - Information Theory: 엔트로피 기반 압축 최적화
  */
-class LoggerManager private constructor(private val context: Context) {
+class LoggerManager private constructor(private val context: Context,
+                                        private val dataSynchronizer: DataSynchronizer  // 외부에서 주입받기
+) {
 
     companion object {
         private const val TAG = "LoggerManager"
@@ -57,9 +59,9 @@ class LoggerManager private constructor(private val context: Context) {
         @Volatile
         private var INSTANCE: LoggerManager? = null
 
-        fun getInstance(context: Context): LoggerManager {
+        fun getInstance(context: Context, dataSynchronizer: DataSynchronizer): LoggerManager {
             return INSTANCE ?: synchronized(this) {
-                INSTANCE ?: LoggerManager(context.applicationContext).also { INSTANCE = it }
+                INSTANCE ?: LoggerManager(context.applicationContext, dataSynchronizer).also { INSTANCE = it }
             }
         }
     }
@@ -80,12 +82,10 @@ class LoggerManager private constructor(private val context: Context) {
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val encodingScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-    // 하이브리드 논리 시계 동기화
-    private val dataSynchronizer = DataSynchronizer()
-
     // 네트워크 스트리밍
     private lateinit var liveStreamingClient: StreamingClient
     private var currentTransportType: String? = null
+
 
     /**
      * 안정적인 상태머신 기반 비디오 인코더
@@ -427,18 +427,47 @@ class LoggerManager private constructor(private val context: Context) {
             try {
                 Log.d(TAG, "비디오 인코딩 완료 처리 시작...")
 
+                // 1. EOS 신호 전송
                 synchronized(codecAccessLock) {
                     drainOutputBuffer(true)
+                }
+
+                // 2. 남은 출력 버퍼 처리 (synchronized 밖에서)
+                var remainingFrames = 0
+                while (remainingFrames < 10) {
+                    try {
+                        synchronized(codecAccessLock) {
+                            drainOutputBuffer(false)
+                        }
+                        delay(100) // synchronized 밖에서 delay 호출
+                        remainingFrames++
+                    } catch (e: Exception) {
+                        Log.w(TAG, "출력 버퍼 처리 중 예외: ${e.message}")
+                        break
+                    }
                 }
 
                 cleanup()
 
                 // MediaStore 완료 처리
                 currentVideoUri?.let { uri ->
-                    val values = ContentValues().apply {
-                        put(MediaStore.Video.Media.IS_PENDING, 0)
+                    try {
+                        val values = ContentValues().apply {
+                            put(MediaStore.Video.Media.IS_PENDING, 0)
+                        }
+                        val updated = context.contentResolver.update(uri, values, null, null)
+                        Log.d(TAG, "비디오 pending 해제: $updated")
+
+                        // 파일 크기 확인
+                        context.contentResolver.query(uri, arrayOf(MediaStore.Video.Media.SIZE), null, null, null)?.use { cursor ->
+                            if (cursor.moveToFirst()) {
+                                val size = cursor.getLong(0)
+                                Log.d(TAG, "최종 비디오 파일 크기: ${size}bytes")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Pending 해제 실패: ${e.message}", e)
                     }
-                    context.contentResolver.update(uri, values, null, null)
                 }
 
                 transitionState(EncoderState.FINALIZING, EncoderState.IDLE)
@@ -520,8 +549,6 @@ class LoggerManager private constructor(private val context: Context) {
 
         encoderMutex.withLock {
             try {
-                Log.d(TAG, "$reason 시작 - 버퍼 크기: ${frameBuffer.size}")
-
                 // 시간별 폴더 구조를 위한 시간 확인
                 val currentHourlyId = SimpleDateFormat("yyyyMMdd_HH", Locale.getDefault()).format(Date())
                 if (currentEncoder != null && currentEncoder!!.getSessionId() != currentHourlyId) {
@@ -579,37 +606,41 @@ class LoggerManager private constructor(private val context: Context) {
      */
     private suspend fun saveTextData(syncDataList: List<HybridSynchronizedDataEntry>) = withContext(Dispatchers.IO) {
         try {
-            // 시간별 폴더 구조 생성 (년월일_시까지만)
             val hourlyFolderName = SimpleDateFormat("yyyyMMdd_HH", Locale.getDefault()).format(Date())
             val relativePath = "Documents/gnss/$hourlyFolderName"
 
-            Log.d(TAG, "시간별 폴더에 데이터 저장: $relativePath")
+            Log.d(TAG, "=== 텍스트 데이터 저장 시작 ===")
+            Log.d(TAG, "동기화 데이터 개수: ${syncDataList.size}")
+            Log.d(TAG, "저장 경로: $relativePath")
 
-            // 1. GPS 동기화 데이터
-            val gpsContent = buildGpsSyncContent(syncDataList)
+            // 각 파일별로 데이터 확인 후 저장
+            val gpsContent = buildRawGpsContent(syncDataList)
+            Log.d(TAG, "GPS 데이터 길이: ${gpsContent.length}")
             if (gpsContent.isNotEmpty()) {
-                appendToFile(relativePath, "gps_sync.txt", GPS_SYNC_HEADER, gpsContent)
+                appendToFile(relativePath, "raw_gps.txt", RAW_GPS_HEADER, gpsContent)
+            } else {
+                Log.w(TAG, "GPS 데이터가 비어있음!")
             }
 
-            // 2. Raw GNSS 데이터
-            val rawGnssContent = buildRawGnssContent(syncDataList)
-            if (rawGnssContent.isNotEmpty()) {
-                appendToFile(relativePath, "raw_gnss.txt", RAW_GNSS_HEADER, rawGnssContent)
+            val gnssSyncContent = buildGpsSyncContent(syncDataList)
+            Log.d(TAG, "GPS Sync 데이터 길이: ${gnssSyncContent.length}")
+            if (gnssSyncContent.isNotEmpty()) {
+                appendToFile(relativePath, "gps_sync.txt", GPS_SYNC_HEADER, gnssSyncContent)
             }
 
-            // 3. Raw GPS 데이터
-            val rawGpsContent = buildRawGpsContent(syncDataList)
-            if (rawGpsContent.isNotEmpty()) {
-                appendToFile(relativePath, "raw_gps.txt", RAW_GPS_HEADER, rawGpsContent)
+            val imuContent = buildRawImuContent(syncDataList)
+            Log.d(TAG, "IMU 데이터 길이: ${imuContent.length}")
+            if (imuContent.isNotEmpty()) {
+                appendToFile(relativePath, "raw_imu.txt", RAW_IMU_HEADER, imuContent)
             }
 
-            // 4. Raw IMU 데이터
-            val rawImuContent = buildRawImuContent(syncDataList)
-            if (rawImuContent.isNotEmpty()) {
-                appendToFile(relativePath, "raw_imu.txt", RAW_IMU_HEADER, rawImuContent)
+            val gnssContent = buildRawGnssContent(syncDataList)
+            Log.d(TAG, "GNSS 데이터 길이: ${gnssContent.length}")
+            if (gnssContent.isNotEmpty()) {
+                appendToFile(relativePath, "raw_gnss.txt", RAW_GNSS_HEADER, gnssContent)
             }
 
-            Log.d(TAG, "모든 raw 데이터 저장 완료: $hourlyFolderName")
+            Log.d(TAG, "=== 텍스트 데이터 저장 완료 ===")
 
         } catch (e: Exception) {
             Log.e(TAG, "텍스트 데이터 저장 실패: ${e.message}", e)
@@ -683,9 +714,18 @@ class LoggerManager private constructor(private val context: Context) {
      * Raw GPS 데이터 구성 (TSV 형식)
      */
     private fun buildRawGpsContent(syncDataList: List<HybridSynchronizedDataEntry>): String {
-        return buildString(syncDataList.size * 150) {
+        Log.d(TAG, "GPS 데이터 빌드 시작, 전체 엔트리: ${syncDataList.size}")
+
+        var gpsEntryCount = 0
+        val result = buildString(syncDataList.size * 150) {
             for (entry in syncDataList) {
-                val gpsData = entry.gpsData ?: continue
+                val gpsData = entry.gpsData
+                if (gpsData == null) {
+                    Log.v(TAG, "GPS 데이터 없음: ${entry.hybridTime}")
+                    continue
+                }
+
+                gpsEntryCount++
                 val (location, systemTime, monoTime) = gpsData
 
                 append("${entry.hybridTime}\t")
@@ -703,6 +743,9 @@ class LoggerManager private constructor(private val context: Context) {
                 append("\n")
             }
         }
+
+        Log.d(TAG, "GPS 엔트리 개수: $gpsEntryCount / ${syncDataList.size}")
+        return result
     }
 
     /**
@@ -729,7 +772,7 @@ class LoggerManager private constructor(private val context: Context) {
     }
 
     /**
-     * MediaStore 파일 저장 (SAF 준수)
+     * 수정된 appendToFile
      */
     private suspend fun appendToFile(
         relativePath: String,
@@ -740,43 +783,68 @@ class LoggerManager private constructor(private val context: Context) {
         if (content.isEmpty()) return@withContext
 
         try {
-            val values = ContentValues().apply {
-                put(MediaStore.Files.FileColumns.DISPLAY_NAME, fileName)
-                put(MediaStore.Files.FileColumns.MIME_TYPE, "text/plain")
-                put(MediaStore.Files.FileColumns.RELATIVE_PATH, relativePath)
-                put(MediaStore.Files.FileColumns.IS_PENDING, 1)
+            // 1. 기존 파일 찾기
+            val projection = arrayOf(
+                MediaStore.Files.FileColumns._ID,
+                MediaStore.Files.FileColumns.SIZE
+            )
+
+            val selection = "${MediaStore.Files.FileColumns.DISPLAY_NAME} = ? AND " +
+                    "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ?"
+
+            val selectionArgs = arrayOf(fileName, "$relativePath/")
+
+            var existingUri: android.net.Uri? = null
+            var fileSize = 0L
+
+            context.contentResolver.query(
+                MediaStore.Files.getContentUri("external"),
+                projection,
+                selection,
+                selectionArgs,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID))
+                    fileSize = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE))
+                    existingUri = MediaStore.Files.getContentUri("external", id)
+                    Log.d(TAG, "기존 파일 발견: $fileName")
+                }
             }
 
-            val uri = context.contentResolver.insert(
-                MediaStore.Files.getContentUri("external"),
-                values
-            ) ?: return@withContext
-
-            context.contentResolver.openOutputStream(uri, "wa")?.buffered(8192)?.use { output ->
-                val cursor = context.contentResolver.query(
-                    uri, arrayOf(MediaStore.Files.FileColumns.SIZE), null, null, null
-                )
-                val fileSize = cursor?.use {
-                    if (it.moveToFirst()) it.getLong(0) else 0L
-                } ?: 0L
-
-                if (fileSize == 0L && header.isNotEmpty()) {
-                    output.write(header.toByteArray())
-                    output.write("\n".toByteArray())
+            val targetUri = existingUri ?: run {
+                // 새 파일 생성
+                val values = ContentValues().apply {
+                    put(MediaStore.Files.FileColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.Files.FileColumns.MIME_TYPE, "text/plain")
+                    put(MediaStore.Files.FileColumns.RELATIVE_PATH, relativePath)
                 }
 
-                output.write(content.toByteArray())
-                output.flush()
+                context.contentResolver.insert(
+                    MediaStore.Files.getContentUri("external"),
+                    values
+                )
             }
 
-            values.clear()
-            values.put(MediaStore.Files.FileColumns.IS_PENDING, 0)
-            context.contentResolver.update(uri, values, null, null)
+            targetUri?.let { uri ->
+                context.contentResolver.openOutputStream(uri, "wa")?.use { output ->
+                    // 새 파일이거나 빈 파일이면 헤더 추가
+                    if (fileSize == 0L && header.isNotEmpty()) {
+                        output.write(header.toByteArray())
+                        output.write("\n".toByteArray())
+                    }
+
+                    output.write(content.toByteArray())
+                    output.flush()
+                    Log.d(TAG, "데이터 추가 완료: $fileName")
+                }
+            }
 
         } catch (e: Exception) {
-            Log.e(TAG, "파일 저장 실패: ${e.message}", e)
+            Log.e(TAG, "파일 저장 실패: $fileName - ${e.message}", e)
         }
     }
+
 
     // ========== 공개 인터페이스 ==========
 

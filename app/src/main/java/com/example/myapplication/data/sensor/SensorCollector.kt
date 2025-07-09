@@ -63,6 +63,7 @@ import com.example.myapplication.model.ImuConfig
 import com.example.myapplication.model.GpsConfig
 import java.io.ByteArrayOutputStream
 import android.widget.Toast
+import com.example.myapplication.data.sync.DataSynchronizer
 import com.example.myapplication.model.BoundingBoxLog
 
 private class YoloDetectorListener(
@@ -134,6 +135,8 @@ class SensorCollector(private val context: Context) {
     private var latestMagnetometer  = FloatArray(3) { 0f }
     private val MAX_DATA_SIZE = 1000
     private var isGnssCallbackRegistered = false
+
+    private lateinit var dataSynchronizer: DataSynchronizer  // 추가
 
     @Volatile
     private var isDetecting = false
@@ -228,9 +231,11 @@ class SensorCollector(private val context: Context) {
                 )
                 synchronized(this@SensorCollector) {
                     gpsCallback?.invoke(sensorData)
-                    LoggerManager.getInstance(context).pushGps(location, systemTimestamp, monoTimestamp)
+                    if (::dataSynchronizer.isInitialized) {
+                        dataSynchronizer.addGpsData(location, systemTimestamp, monoTimestamp)
+
+                    }
                 }
-            }
         }
     }
 
@@ -378,8 +383,12 @@ class SensorCollector(private val context: Context) {
             latestGyroscope.copyInto(this, 3, 0, 3)
             latestMagnetometer.copyInto(this, 6, 0, 3)
         }
-        LoggerManager.getInstance(context).pushImu(latestImuData!!)
+        // LoggerManager 대신 공통 DataSynchronizer 사용
+        if (::dataSynchronizer.isInitialized) {
+            dataSynchronizer.addImuData(latestImuData!!)
+        }
     }
+
 
     private fun validateImageSize(cameraId: String, size: Size, format: Int): Size {
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -972,6 +981,11 @@ class SensorCollector(private val context: Context) {
             frameSkipInterval = 10 // 기본값으로 복구
             Log.w(TAG, "Invalid frame skip interval: $interval, using default value 10")
         }
+    }
+
+    // 외부에서 DataSynchronizer 설정하는 메서드 추가
+    fun setDataSynchronizer(synchronizer: DataSynchronizer) {
+        this.dataSynchronizer = synchronizer
     }
 
     suspend fun setServerStreamingEnabled(context: Context, enabled: Boolean) {

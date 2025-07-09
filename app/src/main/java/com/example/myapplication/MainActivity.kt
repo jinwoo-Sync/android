@@ -42,6 +42,9 @@ class MainActivity : AppCompatActivity() {
         val dataSynchronizer = DataSynchronizer()
         homeRepository = HomeRepository(sensorCollector, dataSynchronizer)
 
+        // SensorCollector에 DataSynchronizer 설정
+        sensorCollector.setDataSynchronizer(dataSynchronizer)
+
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 

@@ -83,20 +83,18 @@ class HomeRepository(
 
     fun toggleLogSaving(context: Context, enabled: Boolean) {
         if (enabled) {
-            LoggerManager.getInstance(context).enableLogSaving() // ✅ 수정
-            Log.d(TAG, "Logging enabled: $enabled")
+            LoggerManager.getInstance(context, dataSynchronizer).enableLogSaving() // dataSynchronizer 전달
         } else {
-            LoggerManager.getInstance(context).disableLogSaving() // ✅ 수정
-            Log.d(TAG, "Logging disabled: $enabled")
+            LoggerManager.getInstance(context, dataSynchronizer).disableLogSaving()
         }
     }
 
     suspend fun setServerStreamingEnabled(context: Context, enabled: Boolean) {
         if (enabled) {
-            LoggerManager.getInstance(context).setTransportType("websocket") // ✅ 수정
-            LoggerManager.getInstance(context).enableStreaming() // ✅ 수정
+            LoggerManager.getInstance(context, dataSynchronizer).setTransportType("websocket")
+            LoggerManager.getInstance(context, dataSynchronizer).enableStreaming()
         } else {
-            LoggerManager.getInstance(context).disableStreaming() // ✅ 수정
+            LoggerManager.getInstance(context, dataSynchronizer).disableStreaming()
         }
     }
 
