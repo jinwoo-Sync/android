@@ -163,7 +163,7 @@ class DataSynchronizer {
     fun addImuData(imu: FloatArray, sysTs: Long, monoTs: Long) {
         val hybridKey = createHybridTimeKey(null, monoTs)
         imuTimeOrderedQueue[hybridKey] = Triple(imu.clone(), sysTs, monoTs)
-        Log.d(TAG, "IMU 데이터 추가: hybridKey=$hybridKey")
+        //Log.d(TAG, "IMU 데이터 추가: hybridKey=$hybridKey")
     }
 
     fun addCameraData(sensorData: SensorData) {
