@@ -2,7 +2,6 @@ package com.example.myapplication.ui.home
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.location.Location
 import android.util.Log
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
@@ -51,7 +50,7 @@ class HomeViewModel(
 
     private var lastGnssUpdateTime = 0L
     private var lastImuUpdateTime = 0L
-    private val IMU_UPDATE_INTERVAL_MS = 1000L // 100ms 간격으로 UI 업데이트
+    private val IMU_UPDATE_INTERVAL_MS = 1000L
     private val boundingBoxMap = mutableMapOf<Long, Pair<List<BoundingBox>, Long>>()
 
     private val inferenceTimes = ArrayDeque<Long>(30)
@@ -63,18 +62,25 @@ class HomeViewModel(
     private val _isServerTransmissionEnabled = MutableLiveData<Boolean>()
     val isServerTransmissionEnabled: LiveData<Boolean> = _isServerTransmissionEnabled
 
+    private val _syncStatus = MutableLiveData<String>()
+    val syncStatus: LiveData<String> = _syncStatus
+
     fun setServerTransmissionEnabled(enabled: Boolean) {
         _isServerTransmissionEnabled.postValue(enabled)
     }
 
+    /**
+     * 센서 스트리밍 시작 (Repository를 통해 관리)
+     */
     fun startSensorStreaming() {
-        sensorCollector.startSensorStreaming(
+        homeRepository.startSensorStreaming(
             gpsCallback = { sensorDataString ->
                 val gpsInfo = buildString {
                     append(sensorDataString.value)
                     append(", SysTS: ${sensorDataString.timestamp}, MonoTS: ${sensorDataString.monoTimestamp}")
                 }
                 _gpsData.postValue(gpsInfo)
+                updateSyncStatus()
             },
             imuCallback = { sensorDataString ->
                 val currentTime = System.currentTimeMillis()
@@ -86,6 +92,7 @@ class HomeViewModel(
                         """.trimIndent()
                     )
                     lastImuUpdateTime = currentTime
+                    updateSyncStatus()
                 }
             },
             gnssCallback = { sensorDataString ->
@@ -94,6 +101,7 @@ class HomeViewModel(
                     val gnssInfo = "GNSS: ${sensorDataString.value}"
                     _gnssData.postValue(gnssInfo)
                     lastGnssUpdateTime = currentTime
+                    updateSyncStatus()
                 }
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
@@ -107,11 +115,14 @@ class HomeViewModel(
                 checkAndUpdateUI(frameId)
             }
         )
-        Log.d("HomeViewModel", "Sensor streaming started")
+        Log.d("HomeViewModel", "Sensor streaming started via Repository")
     }
 
+    /**
+     * 센서 스트리밍 중지 (Repository를 통해 관리)
+     */
     fun stopSensorStreaming() {
-        sensorCollector.stopSensorStreaming()
+        homeRepository.stopSensorStreaming()
         _gpsData.postValue("GPS: 대기 중")
         _gnssData.postValue("GNSS: 대기 중")
         _imuData.postValue("IMU: 대기 중")
@@ -121,7 +132,8 @@ class HomeViewModel(
         synchronized(boundingBoxMap) { boundingBoxMap.clear() }
         lastGnssUpdateTime = 0L
         lastImuUpdateTime = 0L
-        Log.d("HomeViewModel", "Sensor streaming stopped")
+        _syncStatus.postValue("동기화 중지됨")
+        Log.d("HomeViewModel", "Sensor streaming stopped via Repository")
     }
 
     suspend fun fetchCameraData() {
@@ -209,15 +221,47 @@ class HomeViewModel(
         }
     }
 
+    /**
+     * 로그 저장 토글 (Repository를 통해 관리)
+     */
     fun toggleLogSaving(context: Context, enabled: Boolean) {
-        homeRepository.toggleLogSaving(context, enabled)          // ✨ context 넘김
-        _text.postValue(if (enabled) "실시간 로깅 시작" else "실시간 로깅 중지")
+        try {
+            homeRepository.toggleLogSaving(context, enabled)
+            _text.postValue(if (enabled) "실시간 로깅 시작" else "실시간 로깅 중지")
+            Log.d("HomeViewModel", "Log saving toggled via Repository: $enabled")
+        } catch (e: Exception) {
+            Log.e("HomeViewModel", "Failed to toggle log saving: ${e.message}", e)
+            _text.postValue("로깅 설정 실패: ${e.message}")
+        }
     }
 
+    /**
+     * 서버 스트리밍 설정 (Repository를 통해 관리)
+     */
     suspend fun setServerStreamingEnabled(context: Context, enabled: Boolean) {
-        homeRepository.setServerStreamingEnabled(context, enabled)
-        _isServerTransmissionEnabled.postValue(enabled)
-        _text.postValue(if (enabled) "서버 스트리밍 시작" else "서버 스트리밍 중지")
+        try {
+            homeRepository.setServerStreamingEnabled(context, enabled)
+            _isServerTransmissionEnabled.postValue(enabled)
+            _text.postValue(if (enabled) "서버 스트리밍 시작" else "서버 스트리밍 중지")
+            Log.d("HomeViewModel", "Server streaming set via Repository: $enabled")
+        } catch (e: Exception) {
+            Log.e("HomeViewModel", "Failed to set server streaming: ${e.message}", e)
+            _text.postValue("서버 스트리밍 설정 실패: ${e.message}")
+        }
+    }
+
+    /**
+     * HTTP 스트리밍 설정 (Company Streaming)
+     */
+    suspend fun setHttpStreamingEnabled(context: Context, enabled: Boolean) {
+        try {
+            homeRepository.setHttpStreamingEnabled(context, enabled)
+            _text.postValue(if (enabled) "HTTP 스트리밍 시작" else "HTTP 스트리밍 중지")
+            Log.d("HomeViewModel", "HTTP streaming set via Repository: $enabled")
+        } catch (e: Exception) {
+            Log.e("HomeViewModel", "Failed to set HTTP streaming: ${e.message}", e)
+            _text.postValue("HTTP 스트리밍 설정 실패: ${e.message}")
+        }
     }
 
     override fun onCleared() {
@@ -244,20 +288,20 @@ class HomeViewModel(
         val effectiveInterval = userFrameSkipInterval ?: newInterval
 
         if (effectiveInterval != currentSkipInterval) {
-            sensorCollector.setFrameSkipInterval(effectiveInterval)
+            homeRepository.setFrameSkipInterval(effectiveInterval)
             currentSkipInterval = effectiveInterval
             _effectiveInterval.postValue(effectiveInterval)
-            Log.d("HomeViewModel", "Frame skip interval set to $effectiveInterval (avg: $avg)")
+            Log.d("HomeViewModel", "Frame skip interval set to $effectiveInterval (avg: $avg) via Repository")
         }
     }
 
     fun setUserFrameSkipInterval(interval: Int) {
         if (interval in 2..15) {
             userFrameSkipInterval = interval
-            sensorCollector.setFrameSkipInterval(interval)
+            homeRepository.setFrameSkipInterval(interval)
             currentSkipInterval = interval
             _effectiveInterval.postValue(interval)
-            Log.d("HomeViewModel", "User set frame skip interval to $interval")
+            Log.d("HomeViewModel", "User set frame skip interval to $interval via Repository")
         } else {
             Log.w("HomeViewModel", "Invalid frame skip interval ignored: $interval")
         }
@@ -269,5 +313,17 @@ class HomeViewModel(
         Log.d("HomeViewModel", "User frame skip control cleared; auto-control enabled")
     }
 
-
+    /**
+     * 동기화 상태 업데이트
+     */
+    private fun updateSyncStatus() {
+        viewModelScope.launch {
+            try {
+                val status = homeRepository.getSyncStatus()
+                _syncStatus.postValue(status)
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "Failed to update sync status: ${e.message}", e)
+            }
+        }
+    }
 }

@@ -1,7 +1,6 @@
 package com.example.myapplication.data.sensor
 
 import android.Manifest
-import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -14,9 +13,6 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.hardware.camera2.*
-import android.hardware.camera2.params.MeteringRectangle
-import android.hardware.camera2.params.RggbChannelVector
-import android.hardware.camera2.params.TonemapCurve
 import android.location.GnssMeasurementsEvent
 import android.location.GnssStatus
 import android.location.Location
@@ -24,9 +20,7 @@ import android.location.LocationManager
 import android.media.Image
 import android.media.ImageReader
 import android.os.Build
-import android.os.Environment
 import android.os.Looper
-import android.provider.MediaStore
 import android.util.Log
 import android.util.Range
 import android.util.Size
@@ -46,7 +40,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -68,6 +61,7 @@ import com.example.myapplication.model.BoundingBoxLog
 
 private class YoloDetectorListener(
     private val context: Context,
+    private val dataSynchronizer: DataSynchronizer,
     private val detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)?
 ) : Detector.DetectorListener {
     private val TAG = "YoloDetectorListener"
@@ -91,13 +85,13 @@ private class YoloDetectorListener(
                 y2 = bbox.y2,
                 cnf = bbox.cnf,
                 clsName = bbox.clsName,
-                timestamp =  System.currentTimeMillis(),
+                timestamp = System.currentTimeMillis(),
                 monoTimestamp = System.nanoTime()
             )
         }
 
         if (boundingBoxLogs.isNotEmpty()) {
-            LoggerManager.getInstance(context).pushBoundingBox(boundingBoxLogs)
+            LoggerManager.getInstance(context, dataSynchronizer).pushBoundingBox(boundingBoxLogs)
         }
 
         detectionCallback?.invoke(boundingBoxes, inferenceTime, frameId)
@@ -115,7 +109,7 @@ class SensorCollector(private val context: Context) {
     private val cameraOpenCloseLock = Semaphore(1)
     private val isStreaming = AtomicBoolean(false)
     private val TAG = "SensorCollector"
-    private var frameSkipInterval = 10 // 기본값: 10프레임 간격으로 UI에 표시
+    private var frameSkipInterval = 10
     private var frameCount = 0
     private var detectorInitialized = false
     private var latestImuData: FloatArray? = null
@@ -131,12 +125,12 @@ class SensorCollector(private val context: Context) {
     private var detector: Detector? = null
     private var detectorExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private var latestAccelerometer = FloatArray(3) { 0f }
-    private var latestGyroscope     = FloatArray(3) { 0f }
-    private var latestMagnetometer  = FloatArray(3) { 0f }
+    private var latestGyroscope = FloatArray(3) { 0f }
+    private var latestMagnetometer = FloatArray(3) { 0f }
     private val MAX_DATA_SIZE = 1000
     private var isGnssCallbackRegistered = false
 
-    private lateinit var dataSynchronizer: DataSynchronizer  // 추가
+    private lateinit var dataSynchronizer: DataSynchronizer
 
     @Volatile
     private var isDetecting = false
@@ -175,7 +169,7 @@ class SensorCollector(private val context: Context) {
         samplingRateHz = 50,
     )
 
-    // 콜백 타입 수정: SensorData_String 사용
+    // 콜백 타입
     private var gpsCallback: ((SensorData_String) -> Unit)? = null
     private var imuCallback: ((SensorData_String) -> Unit)? = null
     private var gnssCallback: ((SensorData_String) -> Unit)? = null
@@ -184,17 +178,22 @@ class SensorCollector(private val context: Context) {
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
-        initializeDetector()
+        // Detector 초기화는 DataSynchronizer 설정 후에 수행
     }
 
     private fun initializeDetector() {
+        if (!::dataSynchronizer.isInitialized) {
+            Log.w(TAG, "DataSynchronizer가 설정되지 않아 Detector 초기화를 지연합니다.")
+            return
+        }
+
         detectorExecutor.submit {
             try {
                 detector = Detector(
                     context,
                     Constants.MODEL_PATH,
-                    Constants.LABELS_PATH, // labelPath를 null로 설정하여 모델 메타데이터 사용
-                    YoloDetectorListener(context,detectionCallback),
+                    Constants.LABELS_PATH,
+                    YoloDetectorListener(context, dataSynchronizer, detectionCallback),
                     { message -> Log.d(TAG, "Detector message: $message") }
                 )
                 detectorInitialized = true
@@ -218,7 +217,7 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    // GPS 콜백에서 실시간 타임스탬프 사용, SensorData_String 사용
+    // GPS 콜백 수정
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(locationResult: LocationResult) {
             locationResult.lastLocation?.let { location ->
@@ -233,9 +232,10 @@ class SensorCollector(private val context: Context) {
                     gpsCallback?.invoke(sensorData)
                     if (::dataSynchronizer.isInitialized) {
                         dataSynchronizer.addGpsData(location, systemTimestamp, monoTimestamp)
-
+                        LoggerManager.getInstance(context, dataSynchronizer).pushGps(location, systemTimestamp, monoTimestamp)
                     }
                 }
+            }
         }
     }
 
@@ -245,25 +245,29 @@ class SensorCollector(private val context: Context) {
             synchronized(this@SensorCollector) {
                 val values = event.values.clone()
                 latestAccelerometer = values
-                updateLatestImuData()
+
                 val systemTimestamp = System.currentTimeMillis()
                 val monoTimestamp = System.nanoTime()
+
+                updateLatestImuData(systemTimestamp, monoTimestamp)
+
                 val sensorData = SensorData_String(
                     value = latestImuData!!.joinToString(","),
                     timestamp = systemTimestamp,
                     monoTimestamp = monoTimestamp
                 )
                 imuCallback?.invoke(sensorData)
-                LoggerManager.getInstance(context).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
+
+                if (::dataSynchronizer.isInitialized) {
+                    LoggerManager.getInstance(context, dataSynchronizer).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
+                }
             }
         }
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
     }
 
-    // GNSS Measurements 콜백 (원시 측정 데이터)
     private val gnssMeasurementsCallback = object : GnssMeasurementsEvent.Callback() {
         override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
-            // GNSS 측정 데이터가 수신될 때마다 호출
             for (measurement in event.measurements) {
                 val type = when (measurement.constellationType) {
                     GnssStatus.CONSTELLATION_GPS -> "GPS"
@@ -278,8 +282,8 @@ class SensorCollector(private val context: Context) {
                 val carrierPhaseValue: Double? = measurement.carrierPhase
 
                 val gnssData = GnssData(
-                    timestamp = System.currentTimeMillis(), // 시스템 타임스탬프
-                    monoTimestamp = System.nanoTime(),      // 모노토닉 타임스탬프
+                    timestamp = System.currentTimeMillis(),
+                    monoTimestamp = System.nanoTime(),
                     gnssType = type,
                     satelliteId = measurement.svid,
                     signalStrength = measurement.cn0DbHz,
@@ -294,7 +298,9 @@ class SensorCollector(private val context: Context) {
                 )
 
                 gnssCallback?.invoke(sensorDataString)
-                LoggerManager.getInstance(context).pushGnss(gnssData)
+                if (::dataSynchronizer.isInitialized) {
+                    LoggerManager.getInstance(context, dataSynchronizer).pushGnss(gnssData)
+                }
             }
         }
 
@@ -303,7 +309,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    // 원천 측정 미지원 시 위성 상태 콜백 (폴백)
     private val gnssStatusFallbackCallback = object : GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(status: GnssStatus) {
             for (i in 0 until status.satelliteCount) {
@@ -330,7 +335,9 @@ class SensorCollector(private val context: Context) {
                     monoTimestamp = gnssData.monoTimestamp
                 )
                 gnssCallback?.invoke(sensorDataString)
-                LoggerManager.getInstance(context).pushGnss(gnssData)
+                if (::dataSynchronizer.isInitialized) {
+                    LoggerManager.getInstance(context, dataSynchronizer).pushGnss(gnssData)
+                }
             }
         }
     }
@@ -341,16 +348,22 @@ class SensorCollector(private val context: Context) {
             synchronized(this@SensorCollector) {
                 val values = event.values.clone()
                 latestGyroscope = values
-                updateLatestImuData()
+
                 val systemTimestamp = System.currentTimeMillis()
                 val monoTimestamp = System.nanoTime()
+
+                updateLatestImuData(systemTimestamp, monoTimestamp)
+
                 val sensorData = SensorData_String(
                     value = latestImuData!!.joinToString(","),
                     timestamp = systemTimestamp,
                     monoTimestamp = monoTimestamp
                 )
                 imuCallback?.invoke(sensorData)
-                LoggerManager.getInstance(context).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
+
+                if (::dataSynchronizer.isInitialized) {
+                    LoggerManager.getInstance(context, dataSynchronizer).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
+                }
             }
         }
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
@@ -362,56 +375,49 @@ class SensorCollector(private val context: Context) {
             synchronized(this@SensorCollector) {
                 val values = event.values.clone()
                 latestMagnetometer = values
-                updateLatestImuData()
+
                 val systemTimestamp = System.currentTimeMillis()
                 val monoTimestamp = System.nanoTime()
+
+                updateLatestImuData(systemTimestamp, monoTimestamp)
+
                 val sensorData = SensorData_String(
                     value = latestImuData!!.joinToString(","),
                     timestamp = systemTimestamp,
                     monoTimestamp = monoTimestamp
                 )
                 imuCallback?.invoke(sensorData)
-                LoggerManager.getInstance(context).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
+
+                if (::dataSynchronizer.isInitialized) {
+                    LoggerManager.getInstance(context, dataSynchronizer).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
+                }
             }
         }
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
     }
 
-    private fun updateLatestImuData() {
+    private fun updateLatestImuData(systemTimestamp: Long, monoTimestamp: Long) {
         latestImuData = FloatArray(9).apply {
             latestAccelerometer.copyInto(this, 0, 0, 3)
             latestGyroscope.copyInto(this, 3, 0, 3)
             latestMagnetometer.copyInto(this, 6, 0, 3)
         }
-        // LoggerManager 대신 공통 DataSynchronizer 사용
         if (::dataSynchronizer.isInitialized) {
-            dataSynchronizer.addImuData(latestImuData!!)
+            dataSynchronizer.addImuData(latestImuData!!, systemTimestamp, monoTimestamp)
         }
     }
 
-
-    private fun validateImageSize(cameraId: String, size: Size, format: Int): Size {
-        val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        try {
-            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
-            val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val supportedSizes = map?.getOutputSizes(format) ?: emptyArray()
-            return if (supportedSizes.any { it.width == size.width && it.height == size.height }) {
-                size
-            } else {
-                supportedSizes.find { it.width == 1080 && it.height == 1920 }
-                    ?: supportedSizes.find { it.width == 720 && it.height == 1280 }
-                    ?: supportedSizes.minByOrNull { abs(it.width - size.width) + abs(it.height - size.height) }
-                    ?: Size(720, 1280)
-            }
-        } catch (e: CameraAccessException) {
-            return Size(720, 1280)
-        }
+    // DataSynchronizer 설정 메서드
+    fun setDataSynchronizer(synchronizer: DataSynchronizer) {
+        this.dataSynchronizer = synchronizer
+        Log.d(TAG, "DataSynchronizer 설정 완료")
+        // DataSynchronizer 설정 후 Detector 초기화
+        initializeDetector()
     }
 
     fun collectCameraData(callback: (SensorData?) -> Unit) {
         if (isStreaming.get()) {
-            callback(null) // 스트리밍 중에는 단일 프레임 캡처 비활성화
+            callback(null)
             return
         }
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -435,7 +441,7 @@ class SensorCollector(private val context: Context) {
                                     val buffer = it.planes[0].buffer
                                     val bytes = ByteArray(buffer.remaining())
                                     buffer.get(bytes)
-                                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                                 }
                                 ImageFormat.YUV_420_888 -> yuvToBitmap(it)
                                 else -> null
@@ -452,7 +458,9 @@ class SensorCollector(private val context: Context) {
                                     monoTimestamp = monoTime,
                                     frameId = frameId
                                 )
-                                LoggerManager.getInstance(context).pushCamera(sensorData)
+                                if (::dataSynchronizer.isInitialized) {
+                                    LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+                                }
                                 callback(sensorData)
                                 ensureDetectorExecutor()
                                 detectorExecutor.submit {
@@ -548,7 +556,6 @@ class SensorCollector(private val context: Context) {
                 setOnImageAvailableListener({ reader ->
                     reader.acquireLatestImage()?.use { image ->
 
-                        // 1) 원본 bitmap
                         val rawBitmap: Bitmap? = when (cameraConfig.imageFormat) {
                             ImageFormat.JPEG -> {
                                 val buffer = image.planes[0].buffer
@@ -560,7 +567,6 @@ class SensorCollector(private val context: Context) {
                         }
 
                         rawBitmap?.let { bmp ->
-                            // 2) 스케일링
                             val scaledBitmap = if (bmp.width != 840 || bmp.height != 840) {
                                 Bitmap.createScaledBitmap(bmp, 840, 840, true)
                             } else {
@@ -569,7 +575,6 @@ class SensorCollector(private val context: Context) {
 
                             lastCapturedBitmap = scaledBitmap
 
-                            // 3) synchronized 블럭
                             synchronized(cameraFrameList) {
                                 if (cameraFrameList.size >= MAX_DATA_SIZE) {
                                     cameraFrameList.removeAt(0)
@@ -577,22 +582,22 @@ class SensorCollector(private val context: Context) {
                                 cameraFrameList.add(scaledBitmap)
                             }
 
-                            // 4) 회전
                             val rotatedBitmap = rotateBitmap(scaledBitmap, getRotationDegrees(cameraId))
 
-                            // 5) SensorData 생성
-                            val frameId    = System.currentTimeMillis()
+                            val frameId = System.currentTimeMillis()
                             val systemTime = System.currentTimeMillis()
-                            val monoTime   = System.nanoTime()
+                            val monoTime = System.nanoTime()
                             val sensorData = SensorData(
-                                value         = "Streaming: ${image.timestamp}",
-                                bitmap        = rotatedBitmap,
-                                timestamp     = systemTime,
+                                value = "Streaming: ${image.timestamp}",
+                                bitmap = rotatedBitmap,
+                                timestamp = systemTime,
                                 monoTimestamp = monoTime,
-                                frameId       = frameId
+                                frameId = frameId
                             )
 
-                            LoggerManager.getInstance(context).pushCamera(sensorData)
+                            if (::dataSynchronizer.isInitialized) {
+                                LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+                            }
                             frameCount++
 
                             if (frameCount % frameSkipInterval == 0) {
@@ -614,13 +619,11 @@ class SensorCollector(private val context: Context) {
                                         }
                                     }
                                 }
-
                             }
-                        } // end rawBitmap?.let
-
-                    } // end use { image ->
-                }, null) // end setOnImageAvailableListener
-            } // end apply
+                        }
+                    }
+                }, null)
+            }
 
             if (!cameraOpenCloseLock.tryAcquire(2, TimeUnit.SECONDS)) {
                 callback(null)
@@ -695,14 +698,12 @@ class SensorCollector(private val context: Context) {
         this.gnssCallback = gnssCallback
         this.detectionCallback = detectionCallback
 
-        // 1) 위치 권한 확인
         if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             Log.e(TAG, "ACCESS_FINE_LOCATION 권한 없음. GPS/GNSS 동작 불가.")
             Toast.makeText(context, "위치 권한을 허용해야 GNSS 데이터가 수집됩니다.", Toast.LENGTH_LONG).show()
             return
         }
 
-        // GNSS 콜백 등록 (중복 방지)
         if (!isGnssCallbackRegistered) {
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -720,8 +721,6 @@ class SensorCollector(private val context: Context) {
             Log.d(TAG, "GNSS 콜백 이미 등록됨")
         }
 
-
-        // 3) GPS (FusedLocation) 콜백 등록
         val locationRequest = LocationRequest.create().apply {
             interval = 1000L
             fastestInterval = 500L
@@ -729,45 +728,11 @@ class SensorCollector(private val context: Context) {
         }
         fusedLocationClient.requestLocationUpdates(
             locationRequest,
-            object : LocationCallback() {
-                override fun onLocationResult(locationResult: LocationResult) {
-                    locationResult.lastLocation?.let { loc ->
-                        val systemTime = System.currentTimeMillis()
-                        val monoTime = System.nanoTime()
-                        val data = SensorData_String(
-                            value = "Lat: ${loc.latitude}, Lon: ${loc.longitude}",
-                            timestamp = systemTime,
-                            monoTimestamp = monoTime
-                        )
-                        synchronized(this@SensorCollector) {
-                            gpsCallback?.invoke(data)
-                            LoggerManager.getInstance(context).pushGps(loc, systemTime, monoTime)
-                        }
-                    }
-                }
-            },
+            locationCallback,
             Looper.getMainLooper()
         ).addOnSuccessListener { Log.d(TAG, "GPS 콜백 등록 성공") }
             .addOnFailureListener { e -> Log.e(TAG, "GPS 콜백 등록 실패: ${e.message}", e) }
 
-        // GNSS 콜백 등록
-//        val registered = when {
-//            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-//                locationManager.registerGnssMeasurementsCallback(
-//                    context.mainExecutor,
-//                    gnssMeasurementsCallback
-//                )
-//            }
-//            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
-//                locationManager.registerGnssMeasurementsCallback(
-//                    context.mainExecutor,
-//                    gnssMeasurementsCallback
-//                )
-//            }
-//            else -> locationManager.registerGnssMeasurementsCallback(gnssMeasurementsCallback)
-//        }
-
-        // IMU 센서 등록
         val desiredHz = 50
         val samplingPeriodUs = 1_000_000 / desiredHz
         val samplingRate = if (context.checkSelfPermission(Manifest.permission.HIGH_SAMPLING_RATE_SENSORS) == PackageManager.PERMISSION_GRANTED) {
@@ -821,6 +786,27 @@ class SensorCollector(private val context: Context) {
         }
     }
 
+    // 나머지 메서드들은 동일하게 유지...
+
+    private fun validateImageSize(cameraId: String, size: Size, format: Int): Size {
+        val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        try {
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val supportedSizes = map?.getOutputSizes(format) ?: emptyArray()
+            return if (supportedSizes.any { it.width == size.width && it.height == size.height }) {
+                size
+            } else {
+                supportedSizes.find { it.width == 1080 && it.height == 1920 }
+                    ?: supportedSizes.find { it.width == 720 && it.height == 1280 }
+                    ?: supportedSizes.minByOrNull { abs(it.width - size.width) + abs(it.height - size.height) }
+                    ?: Size(720, 1280)
+            }
+        } catch (e: CameraAccessException) {
+            return Size(720, 1280)
+        }
+    }
+
     private fun yuvToBitmap(image: Image): Bitmap {
         if (image.format != ImageFormat.YUV_420_888) {
             throw IllegalArgumentException("이미지 형식이 YUV_420_888이어야 합니다, 현재: ${image.format}")
@@ -846,7 +832,7 @@ class SensorCollector(private val context: Context) {
         ByteArrayOutputStream().use { out ->
             yuvImage.compressToJpeg(android.graphics.Rect(0, 0, image.getWidth(), image.getHeight()), 90, out)
             val bytes: ByteArray = out.toByteArray()
-            return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 ?: throw IllegalStateException("비트맵 디코딩 실패")
         }
     }
@@ -978,22 +964,8 @@ class SensorCollector(private val context: Context) {
             frameSkipInterval = interval
             Log.d(TAG, "Frame skip interval set to $frameSkipInterval")
         } else {
-            frameSkipInterval = 10 // 기본값으로 복구
+            frameSkipInterval = 10
             Log.w(TAG, "Invalid frame skip interval: $interval, using default value 10")
-        }
-    }
-
-    // 외부에서 DataSynchronizer 설정하는 메서드 추가
-    fun setDataSynchronizer(synchronizer: DataSynchronizer) {
-        this.dataSynchronizer = synchronizer
-    }
-
-    suspend fun setServerStreamingEnabled(context: Context, enabled: Boolean) {
-        if (enabled) {
-            LoggerManager.getInstance(context).setTransportType("websocket") // ✅ 수정
-            LoggerManager.getInstance(context).enableStreaming() // ✅ 수정
-        } else {
-            LoggerManager.getInstance(context).disableStreaming() // ✅ 수정
         }
     }
 }
