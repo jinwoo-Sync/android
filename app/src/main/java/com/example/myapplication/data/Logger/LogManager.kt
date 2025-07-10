@@ -573,15 +573,18 @@ class LoggerManager private constructor(
 
             Log.d(TAG, "=== 하이브리드 텍스트 데이터 저장 시작 ===")
 
-            // 병렬 저장 실행
+            // ✅ 공통 배치 타임스탬프 생성 (모든 센서 파일이 같은 배치 ID 사용)
+            val batchTimestamp = SimpleDateFormat("HHmmss_SSS", Locale.getDefault()).format(Date())
+
+            // 병렬 저장 실행 (같은 배치 ID로)
             listOf(
-                async { saveIndependentGpsData(hourlyDir) },
-                async { saveIndependentImuData(hourlyDir) },
-                async { saveIndependentGnssData(hourlyDir) },
-                async { saveSynchronizedGpsData(hourlyDir) } // ← 동기화된 데이터만 이것
+                async { saveIndependentGpsData(hourlyDir, batchTimestamp) },
+                async { saveIndependentImuData(hourlyDir, batchTimestamp) },
+                async { saveIndependentGnssData(hourlyDir, batchTimestamp) },
+                async { saveSynchronizedGpsData(hourlyDir, batchTimestamp) }
             ).awaitAll()
 
-            Log.d(TAG, "=== 하이브리드 텍스트 데이터 저장 완료 ===")
+            Log.d(TAG, "=== 하이브리드 텍스트 데이터 저장 완료 (배치: $batchTimestamp) ===")
 
         } catch (e: Exception) {
             Log.e(TAG, "하이브리드 텍스트 저장 실패: ${e.message}", e)
@@ -589,10 +592,10 @@ class LoggerManager private constructor(
     }
 
     /**
-     * ✅ 독립 GPS Raw 데이터 저장
+     * ✅ 독립 GPS Raw 데이터 저장 - 배치별 개별 파일
      */
-    private suspend fun saveIndependentGpsData(dir: File) = withContext(Dispatchers.IO) {
-        val file = File(dir, "raw_gps.txt")
+    private suspend fun saveIndependentGpsData(dir: File, batchId: String) = withContext(Dispatchers.IO) {
+        val file = File(dir, "raw_gps_batch_${batchId}.txt")
 
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentGpsEntry>()
@@ -607,28 +610,26 @@ class LoggerManager private constructor(
             val gpsContent = buildIndependentGpsContent(dataToSave)
 
             try {
-                BufferedWriter(FileWriter(file, true), BUFFER_SIZE).use { writer ->
-                    if (!file.exists() || file.length() == 0L) {
-                        writer.write(RAW_GPS_HEADER)
-                        writer.newLine()
-                    }
+                BufferedWriter(FileWriter(file, false), BUFFER_SIZE).use { writer ->
+                    writer.write(RAW_GPS_HEADER)
+                    writer.newLine()
                     writer.write(gpsContent)
                     writer.flush()
                 }
 
-                Log.d(TAG, "독립 GPS 저장 완료: ${dataToSave.size}개 엔트리, ${file.length()} bytes")
+                Log.d(TAG, "✅ GPS 배치 저장: ${file.name}, ${dataToSave.size}개 엔트리, ${file.length()} bytes")
 
             } catch (e: Exception) {
-                Log.e(TAG, "독립 GPS 저장 실패: ${e.message}", e)
+                Log.e(TAG, "❌ GPS 배치 저장 실패: ${e.message}", e)
             }
         }
     }
 
     /**
-     * ✅ 독립 IMU Raw 데이터 저장
+     * ✅ 독립 IMU Raw 데이터 저장 - 배치별 개별 파일
      */
-    private suspend fun saveIndependentImuData(dir: File) = withContext(Dispatchers.IO) {
-        val file = File(dir, "raw_imu.txt")
+    private suspend fun saveIndependentImuData(dir: File, batchId: String) = withContext(Dispatchers.IO) {
+        val file = File(dir, "raw_imu_batch_${batchId}.txt")
 
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentImuEntry>()
@@ -643,28 +644,26 @@ class LoggerManager private constructor(
             val imuContent = buildIndependentImuContent(dataToSave)
 
             try {
-                BufferedWriter(FileWriter(file, true), BUFFER_SIZE).use { writer ->
-                    if (!file.exists() || file.length() == 0L) {
-                        writer.write(RAW_IMU_HEADER)
-                        writer.newLine()
-                    }
+                BufferedWriter(FileWriter(file, false), BUFFER_SIZE).use { writer ->
+                    writer.write(RAW_IMU_HEADER)
+                    writer.newLine()
                     writer.write(imuContent)
                     writer.flush()
                 }
 
-                Log.d(TAG, "독립 IMU 저장 완료: ${dataToSave.size}개 엔트리, ${file.length()} bytes")
+                Log.d(TAG, "✅ IMU 배치 저장: ${file.name}, ${dataToSave.size}개 엔트리, ${file.length()} bytes")
 
             } catch (e: Exception) {
-                Log.e(TAG, "독립 IMU 저장 실패: ${e.message}", e)
+                Log.e(TAG, "❌ IMU 배치 저장 실패: ${e.message}", e)
             }
         }
     }
 
     /**
-     * ✅ 독립 GNSS Raw 데이터 저장
+     * ✅ 독립 GNSS Raw 데이터 저장 - 배치별 개별 파일
      */
-    private suspend fun saveIndependentGnssData(dir: File) = withContext(Dispatchers.IO) {
-        val file = File(dir, "raw_gnss.txt")
+    private suspend fun saveIndependentGnssData(dir: File, batchId: String) = withContext(Dispatchers.IO) {
+        val file = File(dir, "raw_gnss_batch_${batchId}.txt")
 
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentGnssEntry>()
@@ -678,28 +677,26 @@ class LoggerManager private constructor(
             val gnssContent = buildIndependentGnssContent(dataToSave)
 
             try {
-                BufferedWriter(FileWriter(file, true), BUFFER_SIZE).use { writer ->
-                    if (!file.exists() || file.length() == 0L) {
-                        writer.write(RAW_GNSS_HEADER)
-                        writer.newLine()
-                    }
+                BufferedWriter(FileWriter(file, false), BUFFER_SIZE).use { writer ->
+                    writer.write(RAW_GNSS_HEADER)
+                    writer.newLine()
                     writer.write(gnssContent)
                     writer.flush()
                 }
 
-                Log.d(TAG, "독립 GNSS 저장 완료: ${dataToSave.size}개 엔트리, ${file.length()} bytes")
+                Log.d(TAG, "✅ GNSS 배치 저장: ${file.name}, ${dataToSave.size}개 엔트리, ${file.length()} bytes")
 
             } catch (e: Exception) {
-                Log.e(TAG, "독립 GNSS 저장 실패: ${e.message}", e)
+                Log.e(TAG, "❌ GNSS 배치 저장 실패: ${e.message}", e)
             }
         }
     }
 
     /**
-     * ✅ 동기화된 GPS 데이터 저장 (기존 함수 사용)
+     * ✅ 동기화된 GPS 데이터 저장 - 배치별 개별 파일
      */
-    private suspend fun saveSynchronizedGpsData(dir: File) = withContext(Dispatchers.IO) {
-        val file = File(dir, "gps_sync.txt")
+    private suspend fun saveSynchronizedGpsData(dir: File, batchId: String) = withContext(Dispatchers.IO) {
+        val file = File(dir, "gps_sync_batch_${batchId}.txt")
 
         // DataSynchronizer에서 동기화된 데이터 추출
         val syncData = dataSynchronizer.extractSynchronizedData(force = true)
@@ -709,19 +706,17 @@ class LoggerManager private constructor(
         val syncContent = buildGpsSyncContent(syncData)
 
         try {
-            BufferedWriter(FileWriter(file, true), BUFFER_SIZE).use { writer ->
-                if (!file.exists() || file.length() == 0L) {
-                    writer.write(GPS_SYNC_HEADER)
-                    writer.newLine()
-                }
+            BufferedWriter(FileWriter(file, false), BUFFER_SIZE).use { writer ->
+                writer.write(GPS_SYNC_HEADER)
+                writer.newLine()
                 writer.write(syncContent)
                 writer.flush()
             }
 
-            Log.d(TAG, "동기화 GPS 저장 완료: ${syncData.size}개 엔트리, ${file.length()} bytes")
+            Log.d(TAG, "✅ 동기화 GPS 배치 저장: ${file.name}, ${syncData.size}개 엔트리, ${file.length()} bytes")
 
         } catch (e: Exception) {
-            Log.e(TAG, "동기화 GPS 저장 실패: ${e.message}", e)
+            Log.e(TAG, "❌ 동기화 GPS 배치 저장 실패: ${e.message}", e)
         }
     }
 
@@ -884,34 +879,32 @@ class LoggerManager private constructor(
     private inline fun shouldSave() = isLogSavingEnabled
     private inline fun shouldLiveStream() = isLiveStreamingEnabled
 
-    // ========== 헤더 정의 ==========
-
     private val GPS_SYNC_HEADER = """
-        # GPS Synchronized Data (Hybrid Logical Clock) - Mathematical Time Alignment
-        # Theory: Kalman Filter + Binary Search O(log n) + Producer-Consumer Pattern
-        # Video: Movies/gnss/yyyyMMdd_HH/sensor_video_[timestamp].mp4  
-        # Raw Data: Documents/gnss/yyyyMMdd_HH/ (Independent Queue Management)
-        HYBRID_TIME	GPS_STATUS	LAT	LON	ALT	ACC_X	ACC_Y	ACC_Z	GYRO_X	GYRO_Y	GYRO_Z	MAG_X	MAG_Y	MAG_Z	GNSS_TYPE	SAT_ID	CN0	CAMERA_FRAME_ID	BBOX_COUNT
-    """.trimIndent()
+    # GPS Synchronized Data (Hybrid Logical Clock) - Mathematical Time Alignment
+    # Theory: Kalman Filter + Binary Search O(log n) + Producer-Consumer Pattern
+    # Video: Movies/gnss/yyyyMMdd_HH/sensor_video_[timestamp].mp4  
+    # Raw Data: Documents/gnss/yyyyMMdd_HH/ (Independent Queue Management)
+    HYBRID_TIME	GPS_STATUS	LAT	LON	ALT	ACC_X	ACC_Y	ACC_Z	GYRO_X	GYRO_Y	GYRO_Z	MAG_X	MAG_Y	MAG_Z	GNSS_TYPE	SAT_ID	CN0	CAMERA_FRAME_ID	BBOX_COUNT
+""".trimIndent()
 
     private val RAW_GPS_HEADER = """
-        # Raw GPS Data - Independent Queue Management (LogManager)
-        # Theory: M/M/1/K Queueing Model + ConcurrentLinkedQueue (Lock-free)
-        # Memory: Deep Copy Semantics + Bounded Queue (K=${MAX_GPS_QUEUE})
-        CAPTURE_TIME	SYS_TIME	MONO_TIME	GPS_TIME	LATITUDE	LONGITUDE	ALTITUDE	ACCURACY	SPEED	BEARING	PROVIDER	GPS_STATUS
-    """.trimIndent()
+    # Raw GPS Data - Independent Queue Management (LogManager)
+    # Theory: M/M/1/K Queueing Model + ConcurrentLinkedQueue (Lock-free)
+    # Memory: Deep Copy Semantics + Bounded Queue (K=${MAX_GPS_QUEUE})
+    CAPTURE_TIME	SYS_TIME	MONO_TIME	GPS_TIME	LATITUDE	LONGITUDE	ALTITUDE	ACCURACY	SPEED	BEARING	PROVIDER	GPS_STATUS
+""".trimIndent()
 
     private val RAW_IMU_HEADER = """
-        # Raw IMU Data - Independent Queue Management (9DOF Sensor Fusion)
-        # Theory: High Frequency Sampling (f=100Hz) + Optimal Buffer Management
-        # Memory: Clone-based Storage + Queue Capacity (K=${MAX_IMU_QUEUE})
-        CAPTURE_TIME	SYS_TIME	MONO_TIME	ACC_X	ACC_Y	ACC_Z	GYRO_X	GYRO_Y	GYRO_Z	MAG_X	MAG_Y	MAG_Z	GPS_STATUS
-    """.trimIndent()
+    # Raw IMU Data - Independent Queue Management (9DOF Sensor Fusion)
+    # Theory: High Frequency Sampling (f=100Hz) + Optimal Buffer Management
+    # Memory: Clone-based Storage + Queue Capacity (K=${MAX_IMU_QUEUE})
+    CAPTURE_TIME	SYS_TIME	MONO_TIME	ACC_X	ACC_Y	ACC_Z	GYRO_X	GYRO_Y	GYRO_Z	MAG_X	MAG_Y	MAG_Z	GPS_STATUS
+""".trimIndent()
 
     private val RAW_GNSS_HEADER = """
-        # Raw GNSS Measurements - Independent Queue Management
-        # Theory: Satellite Signal Processing + Statistical Analysis
-        # Memory: Bounded Queue Management (K=${MAX_GNSS_QUEUE})
-        CAPTURE_TIME	SYS_TIME	MONO_TIME	GNSS_TYPE	SAT_ID	CN0_DB_HZ	PSEUDORANGE_RATE	CARRIER_PHASE	ADDITIONAL_INFO	GPS_STATUS
-    """.trimIndent()
+    # Raw GNSS Measurements - Independent Queue Management
+    # Theory: Satellite Signal Processing + Statistical Analysis
+    # Memory: Bounded Queue Management (K=${MAX_GNSS_QUEUE})
+    CAPTURE_TIME	SYS_TIME	MONO_TIME	GNSS_TYPE	SAT_ID	CN0_DB_HZ	PSEUDORANGE_RATE	CARRIER_PHASE	ADDITIONAL_INFO	GPS_STATUS
+""".trimIndent()
 }
