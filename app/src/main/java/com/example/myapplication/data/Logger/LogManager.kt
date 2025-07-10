@@ -1,33 +1,27 @@
 package com.example.myapplication.data.logging
 
-import android.content.ContentValues
 import android.content.Context
-import android.graphics.*
+import android.graphics.Bitmap
 import android.location.Location
-import android.media.*
-import android.media.MediaCodec.BufferInfo
-import android.media.MediaMuxer.OutputFormat
 import android.os.Environment
-import android.provider.MediaStore
 import android.util.Log
-import com.example.myapplication.model.GnssData
-import com.example.myapplication.model.SensorData
-import com.example.myapplication.model.BoundingBoxLog
+import com.example.myapplication.data.VideoEncoder.SimpleVideoEncoder
 import com.example.myapplication.data.streaming.StreamingClient
 import com.example.myapplication.data.streaming.StreamingClientFactory
 import com.example.myapplication.data.sync.DataSynchronizer
 import com.example.myapplication.data.sync.HybridSynchronizedDataEntry
+import com.example.myapplication.model.BoundingBoxLog
+import com.example.myapplication.model.GnssData
+import com.example.myapplication.model.SensorData
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.*
-import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 수학적 기반 멀티미디어 로깅 시스템 - Independent Queue Management
@@ -67,6 +61,8 @@ class LoggerManager private constructor(
 
         // File I/O Optimization Parameters
         private const val BUFFER_SIZE = 8192              // 8KB optimal buffer size
+
+        private val videoSessionMutex = Mutex()
 
         @Volatile
         private var INSTANCE: LoggerManager? = null
@@ -165,9 +161,9 @@ class LoggerManager private constructor(
     private lateinit var liveStreamingClient: StreamingClient
     private var currentTransportType: String? = null
 
-    // Video encoder (기존 StableVideoEncoder 클래스 유지)
+    // Video encoder using SimpleVideoEncoder
     private val lastBatchTime = AtomicLong(System.currentTimeMillis())
-    private var currentEncoder: StableVideoEncoder? = null
+    private var videoEncoder: SimpleVideoEncoder? = null
     private val encoderMutex = Mutex()
     private var currentSessionTimestamp: String? = null
 
@@ -371,7 +367,7 @@ class LoggerManager private constructor(
     }
 
     /**
-     * 배치 처리 - Hybrid Data Management
+     * 배치 처리 - Hybrid Data Management with SimpleVideoEncoder
      * 수학적 모델: Video Encoding ∩ Text Data Persistence
      */
     private suspend fun processBatch(reason: String) {
@@ -379,22 +375,21 @@ class LoggerManager private constructor(
 
         encoderMutex.withLock {
             try {
-                // 1. Video Encoding (기존 로직 유지)
+                // 1. Video Encoding with SimpleVideoEncoder
                 val currentHourlyId = SimpleDateFormat("yyyyMMdd_HH", Locale.getDefault()).format(Date())
-                if (currentEncoder != null && currentEncoder!!.getSessionId() != currentHourlyId) {
-                    currentEncoder?.finalizeEncoding()
-                    currentEncoder = null
+                if (videoEncoder != null && videoEncoder!!.getSessionId() != currentHourlyId) {
+                    videoEncoder?.stopRecording()
+                    videoEncoder = null
                 }
 
-                val shouldInitialize = currentEncoder?.isActive() != true
-                if (shouldInitialize) {
-                    currentEncoder = StableVideoEncoder()
-                    val initialized = currentEncoder!!.initializeEncoder()
-                    if (!initialized) {
-                        Log.e(TAG, "비디오 인코더 초기화 실패")
-                        return
+                if (videoEncoder == null || !videoEncoder!!.isRecording()) {
+                    videoEncoder = SimpleVideoEncoder(context)
+                    val started = videoEncoder!!.startRecording()
+                    if (!started) {
+                        Log.e(TAG, "비디오 인코더 시작 실패")
+                        return@withLock
                     }
-                    currentSessionTimestamp = currentEncoder!!.getSessionId()
+                    currentSessionTimestamp = videoEncoder!!.getSessionId()
                 }
 
                 val framesToProcess = mutableListOf<SensorData>()
@@ -405,7 +400,7 @@ class LoggerManager private constructor(
                 var encodedFrames = 0
                 for (frame in framesToProcess) {
                     frame.bitmap?.let { bitmap ->
-                        if (currentEncoder?.encodeFrame(bitmap) == true) {
+                        if (videoEncoder?.addFrame(bitmap) == true) {
                             encodedFrames++
                         }
                     }
@@ -420,6 +415,144 @@ class LoggerManager private constructor(
             } catch (e: Exception) {
                 Log.e(TAG, "배치 처리 실패: ${e.message}", e)
             }
+        }
+    }
+
+    /**
+     * 로그 저장 활성화 (HomeRepository 호환)
+     */
+    fun enableLogSaving() {
+        isLogSavingEnabled = true
+
+        // 비디오 인코더 시작
+        if (videoEncoder == null) {
+            videoEncoder = SimpleVideoEncoder(context)
+            val started = videoEncoder!!.startRecording()
+
+            if (started) {
+                Log.d(TAG, "📁 로그 저장 및 비디오 녹화 활성화")
+            } else {
+                Log.e(TAG, "❌ 비디오 인코더 시작 실패")
+                videoEncoder = null
+            }
+        }
+
+        Log.d(TAG, "✅ enableLogSaving() 완료")
+    }
+
+    /**
+     * 로그 저장 비활성화 (HomeRepository 호환)
+     */
+    fun disableLogSaving() {
+        isLogSavingEnabled = false
+
+        // 비디오 인코더 중지
+        videoEncoder?.stopRecording()
+        videoEncoder = null
+
+        Log.d(TAG, "📁 로그 저장 및 비디오 녹화 비활성화")
+        Log.d(TAG, "✅ disableLogSaving() 완료")
+    }
+
+    /**
+     * 전송 타입 설정 (HomeRepository 호환)
+     */
+    fun setTransportType(transportType: String) {
+        try {
+            currentTransportType = transportType
+            liveStreamingClient = StreamingClientFactory.createStreamingClient(transportType)
+            Log.d(TAG, "✅ 전송 타입 설정: $transportType")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 전송 타입 설정 실패: ${e.message}", e)
+            throw e
+        }
+    }
+
+    /**
+     * 스트리밍 활성화 (HomeRepository 호환)
+     */
+    suspend fun enableStreaming() {
+        if (!::liveStreamingClient.isInitialized) {
+            Log.e(TAG, "❌ StreamingClient가 초기화되지 않음. setTransportType()을 먼저 호출하세요.")
+            throw IllegalStateException("StreamingClient가 초기화되지 않음")
+        }
+
+        try {
+            liveStreamingClient.startStreaming(context)
+            isLiveStreamingEnabled = true
+            Log.d(TAG, "✅ 라이브 스트리밍 활성화: $currentTransportType")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 스트리밍 활성화 실패: ${e.message}", e)
+            throw e
+        }
+    }
+
+    /**
+     * 스트리밍 비활성화 (HomeRepository 호환)
+     */
+    suspend fun disableStreaming() {
+        if (!isLiveStreamingEnabled) {
+            Log.d(TAG, "이미 스트리밍이 비활성화됨")
+            return
+        }
+
+        try {
+            if (::liveStreamingClient.isInitialized) {
+                liveStreamingClient.stopStreaming()
+            }
+            isLiveStreamingEnabled = false
+            Log.d(TAG, "✅ 라이브 스트리밍 비활성화")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 스트리밍 비활성화 실패: ${e.message}", e)
+            throw e
+        }
+    }
+
+    /**
+     * 현재 스트리밍 상태 확인
+     */
+    fun isStreamingEnabled(): Boolean = isLiveStreamingEnabled
+
+    /**
+     * 현재 로그 저장 상태 확인
+     */
+    fun isLogSavingEnabled(): Boolean = isLogSavingEnabled
+
+    /**
+     * 현재 전송 타입 확인
+     */
+    fun getCurrentTransportType(): String? = currentTransportType
+
+    /**
+     * 비디오 인코더 상태 확인
+     */
+    fun getVideoEncoderStatus(): String {
+        return when {
+            videoEncoder == null -> "비디오 인코더 없음"
+            videoEncoder!!.isRecording() -> "녹화 중 (${videoEncoder!!.getFrameCount()}프레임)"
+            else -> "비디오 인코더 대기 중"
+        }
+    }
+
+    /**
+     * 전체 상태 정보 제공
+     */
+    fun getSystemStatus(): String {
+        return buildString {
+            append("=== LoggerManager 상태 ===\n")
+            append("로그 저장: ${if (isLogSavingEnabled) "활성화" else "비활성화"}\n")
+            append("라이브 스트리밍: ${if (isLiveStreamingEnabled) "활성화" else "비활성화"}\n")
+            append("전송 타입: ${currentTransportType ?: "설정되지 않음"}\n")
+            append("비디오 상태: ${getVideoEncoderStatus()}\n")
+
+            val queueStatus = getIndependentQueueStatus()
+            append("=== 큐 상태 ===\n")
+            append("GPS: ${queueStatus.gpsQueueSize}/${MAX_GPS_QUEUE}\n")
+            append("IMU: ${queueStatus.imuQueueSize}/${MAX_IMU_QUEUE}\n")
+            append("GNSS: ${queueStatus.gnssQueueSize}/${MAX_GNSS_QUEUE}\n")
+            append("BBOX: ${queueStatus.bboxQueueSize}/${MAX_BBOX_QUEUE}\n")
+            append("CAMERA: ${queueStatus.cameraQueueSize}/${MAX_CAMERA_QUEUE}\n")
+            append("총 데이터 포인트: ${queueStatus.totalDataPoints}")
         }
     }
 
@@ -703,6 +836,20 @@ class LoggerManager private constructor(
         }
     }
 
+    /**
+     * FFmpeg 기반 배치 처리 (Refactored with Pipe) - 이 부분은 사용하지 않음
+     */
+    private suspend fun processVideoBatch(reason: String) {
+        // 이 메서드는 원래 코드에 남아있지만, SimpleVideoEncoder로 대체되었으므로 사용되지 않음
+    }
+
+    /**
+     * 시간대를 확인하고 비디오 파일을 새로 생성 (동시성 문제 해결) - 이 부분은 SimpleVideoEncoder에서 처리
+     */
+    private suspend fun checkAndRotateVideoFile() {
+        // SimpleVideoEncoder 내부에서 파일 경로를 관리하므로 이 메서드는 불필요
+    }
+
     // ========== 상태 정보 및 모니터링 ==========
 
     /**
@@ -732,12 +879,7 @@ class LoggerManager private constructor(
         )
     }
 
-    // ========== 나머지 기존 함수들 (Video Encoder, Live Streaming 등) ==========
-
-    // StableVideoEncoder inner class (기존과 동일)
-    // 설정 함수들 (enableLogSaving, disableLogSaving 등)
-    // 라이브 스트리밍 함수들
-    // 헤더 정의들 (RAW_GPS_HEADER, RAW_IMU_HEADER 등)
+    // ========== 설정 함수들 ==========
 
     private inline fun shouldSave() = isLogSavingEnabled
     private inline fun shouldLiveStream() = isLiveStreamingEnabled

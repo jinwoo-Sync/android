@@ -184,12 +184,13 @@ class DataSynchronizer {
      * 큐 크기 관리 (메모리 누수 방지)
      */
     fun maintainQueueSizes(
-        gpsCapacity: Int,
-        gnssCapacity: Int,
-        imuCapacity: Int,
-        cameraCapacity: Int,
-        bboxCapacity: Int
+        gpsCapacity: Int = 500,
+        gnssCapacity: Int = 500,
+        imuCapacity: Int = 1000,
+        cameraCapacity: Int = 100,
+        bboxCapacity: Int = 200
     ) {
+        // 큐가 너무 커지면 오래된 데이터만 제거
         maintainSingleQueueSize(gpsTimeOrderedQueue, gpsCapacity)
         maintainSingleQueueSize(gnssTimeOrderedQueue, gnssCapacity)
         maintainSingleQueueSize(imuTimeOrderedQueue, imuCapacity)
@@ -201,7 +202,10 @@ class DataSynchronizer {
         synchronized(queue) {
             while (queue.size > capacity) {
                 val firstKey = queue.keys.minOrNull()
-                firstKey?.let { queue.remove(it) }
+                firstKey?.let {
+                    queue.remove(it)
+                    Log.d(TAG, "오래된 데이터 제거: hybridTime=$it")
+                }
             }
         }
     }
@@ -220,7 +224,7 @@ class DataSynchronizer {
 
         Log.d(TAG, "하이브리드 시간 기반 데이터 동기화 시작... GPS상태: $isGpsAvailable")
 
-        // 동기화할 시간 범위 결정
+        // 동기화할 시간 범위 결정 (제거하지 않고 복사만)
         val timeRange = synchronized(gpsTimeOrderedQueue) {
             if (gpsTimeOrderedQueue.isEmpty()) return emptyList()
 
@@ -231,7 +235,7 @@ class DataSynchronizer {
             Pair(startTime, endTime)
         }
 
-        // 동기화된 데이터 생성
+        // 동기화된 데이터 생성 (원본 데이터는 그대로 두고 복사만)
         val synchronizedData = mutableListOf<HybridSynchronizedDataEntry>()
 
         synchronized(gpsTimeOrderedQueue) {
@@ -241,18 +245,13 @@ class DataSynchronizer {
                 val syncEntry = createHybridSynchronizedEntry(hybridTime, gpsData)
                 synchronizedData.add(syncEntry)
 
-                // 처리된 데이터는 큐에서 제거
-                if (!force) {
-                    gpsTimeOrderedQueue.remove(hybridTime)
-                    removeDataFromOtherQueues(hybridTime)
-                }
+                // ✅ 데이터 제거하지 않음! LoggerManager가 따로 관리
             }
         }
 
-        Log.d(TAG, "${synchronizedData.size}개 항목 동기화 완료")
+        Log.d(TAG, "${synchronizedData.size}개 항목 동기화 완료 (원본 데이터 보존)")
         return synchronizedData
     }
-
     /**
      * 하이브리드 시간 기준 동기화된 데이터 엔트리 생성
      * 수학적 원리: 최근접 이웃 검색 + 허용 오차 범위 내 매칭
@@ -311,7 +310,7 @@ class DataSynchronizer {
     /**
      * 처리된 시간 주변 데이터 제거 (메모리 관리)
      */
-    private fun removeDataFromOtherQueues(hybridTime: Long) {
+ /*   private fun removeDataFromOtherQueues(hybridTime: Long) {
         val tolerance = 1000L
 
         synchronized(gnssTimeOrderedQueue) {
@@ -337,7 +336,7 @@ class DataSynchronizer {
                 bboxTimeOrderedQueue.remove(it)
             }
         }
-    }
+    }*/
 
     /**
      * 선형 보간을 이용한 IMU 데이터 보간

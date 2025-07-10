@@ -1,3 +1,4 @@
+// app/build.gradle.kts
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -47,7 +48,20 @@ android {
     }
     bundle {
         storeArchive {
-            enable = false // AAB 생성을 비활성화합니다.
+            enable = false
+        }
+    }
+
+    // FFmpeg 네이티브 라이브러리 지원
+    packaging {
+        jniLibs {
+            // 여러 ABI 중 특정 ABI만 포함하고 싶을 때 사용 (선택 사항)
+            // useLegacyPackaging = true // 필요 시 사용
+        }
+        resources {
+            // pickFirst를 resources 블록 안으로 이동
+            pickFirsts += "**/libc++_shared.so"
+            pickFirsts += "**/libjsc.so"
         }
     }
 }
@@ -68,13 +82,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     // Google Play Services - Location
-    // libs.versions.toml 파일에서 play-services-location의 버전을 21.0.1 (또는 최신)로 업데이트하는 것을 권장합니다.
     implementation(libs.google.play.services.location)
 
-    // TensorFlow Lite (필요한 것만 남기는 것을 고려하세요)
-    // 예: GPU를 사용한다면 아래 두 줄만 있어도 될 수 있습니다.
-    // implementation(libs.tensorflow.lite.gpu)
-    // implementation(libs.tensorflow.lite.support)
+    // TensorFlow Lite
     implementation(libs.tensorflow.lite)
     implementation(libs.tensorflow.lite.support)
     implementation(libs.tensorflow.lite.gpu.delegate.plugin)
@@ -88,6 +98,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     implementation("com.squareup.retrofit2:converter-moshi:2.9.0")
+
 
     // 테스트 라이브러리
     testImplementation(libs.junit)
