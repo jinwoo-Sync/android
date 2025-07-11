@@ -376,8 +376,8 @@ class LoggerManager private constructor(
         encoderMutex.withLock {
             try {
                 // 1. Video Encoding with SimpleVideoEncoder
-                val currentHourlyId = SimpleDateFormat("yyyyMMdd_HH", Locale.getDefault()).format(Date())
-                if (videoEncoder != null && videoEncoder!!.getSessionId() != currentHourlyId) {
+                val currentMinuteId = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
+                if (videoEncoder != null && videoEncoder!!.getSessionId() != currentMinuteId) {
                     videoEncoder?.stopRecording()
                     videoEncoder = null
                 }
@@ -573,18 +573,15 @@ class LoggerManager private constructor(
 
             Log.d(TAG, "=== 하이브리드 텍스트 데이터 저장 시작 ===")
 
-            // ✅ 공통 배치 타임스탬프 생성 (모든 센서 파일이 같은 배치 ID 사용)
-            val batchTimestamp = SimpleDateFormat("HHmmss_SSS", Locale.getDefault()).format(Date())
-
-            // 병렬 저장 실행 (같은 배치 ID로)
+            // 병렬 저장 실행 (단일 파일에 append 모드)
             listOf(
-                async { saveIndependentGpsData(hourlyDir, batchTimestamp) },
-                async { saveIndependentImuData(hourlyDir, batchTimestamp) },
-                async { saveIndependentGnssData(hourlyDir, batchTimestamp) },
-                async { saveSynchronizedGpsData(hourlyDir, batchTimestamp) }
+                async { saveIndependentGpsData(hourlyDir) },
+                async { saveIndependentImuData(hourlyDir) },
+                async { saveIndependentGnssData(hourlyDir) },
+                async { saveSynchronizedGpsData(hourlyDir) }
             ).awaitAll()
 
-            Log.d(TAG, "=== 하이브리드 텍스트 데이터 저장 완료 (배치: $batchTimestamp) ===")
+            Log.d(TAG, "=== 하이브리드 텍스트 데이터 저장 완료 ===")
 
         } catch (e: Exception) {
             Log.e(TAG, "하이브리드 텍스트 저장 실패: ${e.message}", e)
@@ -592,16 +589,16 @@ class LoggerManager private constructor(
     }
 
     /**
-     * ✅ 독립 GPS Raw 데이터 저장 - 배치별 개별 파일
+     * ✅ 독립 GPS Raw 데이터 저장 - 단일 파일에 append (Hz에 맞게 배치 크기 조정)
+     * - GPS Hz: 일반적으로 1Hz, 배치 크기 작게 (e.g., 5)
      */
-    private suspend fun saveIndependentGpsData(dir: File, batchId: String) = withContext(Dispatchers.IO) {
-        val file = File(dir, "raw_gps_batch_${batchId}.txt")
-
+    private suspend fun saveIndependentGpsData(dir: File) = withContext(Dispatchers.IO) {
+        val file = File(dir, "raw_gps.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentGpsEntry>()
 
-            // 배치 크기만큼 데이터 추출
-            repeat(BATCH_SIZE) {
+            // GPS Hz에 맞춰 작은 배치 (e.g., 5개)
+            repeat(5.coerceAtMost(independentGpsQueue.size)) {
                 independentGpsQueue.poll()?.let { dataToSave.add(it) }
             }
 
@@ -610,32 +607,35 @@ class LoggerManager private constructor(
             val gpsContent = buildIndependentGpsContent(dataToSave)
 
             try {
-                BufferedWriter(FileWriter(file, false), BUFFER_SIZE).use { writer ->
-                    writer.write(RAW_GPS_HEADER)
-                    writer.newLine()
+                val append = file.exists()
+                BufferedWriter(FileWriter(file, append), BUFFER_SIZE).use { writer ->
+                    if (!append) {
+                        writer.write(RAW_GPS_HEADER)
+                        writer.newLine()
+                    }
                     writer.write(gpsContent)
                     writer.flush()
                 }
 
-                Log.d(TAG, "✅ GPS 배치 저장: ${file.name}, ${dataToSave.size}개 엔트리, ${file.length()} bytes")
+                Log.d(TAG, "✅ GPS 데이터 append: ${file.name}, +${dataToSave.size}개 엔트리, 총 ${file.length()} bytes")
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ GPS 배치 저장 실패: ${e.message}", e)
+                Log.e(TAG, "❌ GPS 데이터 저장 실패: ${e.message}", e)
             }
         }
     }
 
     /**
-     * ✅ 독립 IMU Raw 데이터 저장 - 배치별 개별 파일
+     * ✅ 독립 IMU Raw 데이터 저장 - 단일 파일에 append (Hz에 맞게 배치 크기 조정)
+     * - IMU Hz: 50-100Hz, 배치 크기 크게 (e.g., BATCH_SIZE * 5 ~ 75개)
      */
-    private suspend fun saveIndependentImuData(dir: File, batchId: String) = withContext(Dispatchers.IO) {
-        val file = File(dir, "raw_imu_batch_${batchId}.txt")
-
+    private suspend fun saveIndependentImuData(dir: File) = withContext(Dispatchers.IO) {
+        val file = File(dir, "raw_imu.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentImuEntry>()
 
-            // IMU는 고주파 센서이므로 더 많은 데이터 처리
-            repeat(BATCH_SIZE * 3) {
+            // IMU Hz에 맞춰 큰 배치 (e.g., 75개)
+            repeat((BATCH_SIZE * 5).coerceAtMost(independentImuQueue.size)) {
                 independentImuQueue.poll()?.let { dataToSave.add(it) }
             }
 
@@ -644,31 +644,35 @@ class LoggerManager private constructor(
             val imuContent = buildIndependentImuContent(dataToSave)
 
             try {
-                BufferedWriter(FileWriter(file, false), BUFFER_SIZE).use { writer ->
-                    writer.write(RAW_IMU_HEADER)
-                    writer.newLine()
+                val append = file.exists()
+                BufferedWriter(FileWriter(file, append), BUFFER_SIZE).use { writer ->
+                    if (!append) {
+                        writer.write(RAW_IMU_HEADER)
+                        writer.newLine()
+                    }
                     writer.write(imuContent)
                     writer.flush()
                 }
 
-                Log.d(TAG, "✅ IMU 배치 저장: ${file.name}, ${dataToSave.size}개 엔트리, ${file.length()} bytes")
+                Log.d(TAG, "✅ IMU 데이터 append: ${file.name}, +${dataToSave.size}개 엔트리, 총 ${file.length()} bytes")
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ IMU 배치 저장 실패: ${e.message}", e)
+                Log.e(TAG, "❌ IMU 데이터 저장 실패: ${e.message}", e)
             }
         }
     }
 
     /**
-     * ✅ 독립 GNSS Raw 데이터 저장 - 배치별 개별 파일
+     * ✅ 독립 GNSS Raw 데이터 저장 - 단일 파일에 append (Hz에 맞게 배치 크기 조정)
+     * - GNSS Hz: 1-10Hz, 배치 크기 중간 (e.g., 10개)
      */
-    private suspend fun saveIndependentGnssData(dir: File, batchId: String) = withContext(Dispatchers.IO) {
-        val file = File(dir, "raw_gnss_batch_${batchId}.txt")
-
+    private suspend fun saveIndependentGnssData(dir: File) = withContext(Dispatchers.IO) {
+        val file = File(dir, "raw_gnss.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentGnssEntry>()
 
-            repeat(BATCH_SIZE) {
+            // GNSS Hz에 맞춰 중간 배치 (e.g., 10개)
+            repeat(10.coerceAtMost(independentGnssQueue.size)) {
                 independentGnssQueue.poll()?.let { dataToSave.add(it) }
             }
 
@@ -677,28 +681,32 @@ class LoggerManager private constructor(
             val gnssContent = buildIndependentGnssContent(dataToSave)
 
             try {
-                BufferedWriter(FileWriter(file, false), BUFFER_SIZE).use { writer ->
-                    writer.write(RAW_GNSS_HEADER)
-                    writer.newLine()
+                val append = file.exists()
+                BufferedWriter(FileWriter(file, append), BUFFER_SIZE).use { writer ->
+                    if (!append) {
+                        writer.write(RAW_GNSS_HEADER)
+                        writer.newLine()
+                    }
                     writer.write(gnssContent)
                     writer.flush()
                 }
 
-                Log.d(TAG, "✅ GNSS 배치 저장: ${file.name}, ${dataToSave.size}개 엔트리, ${file.length()} bytes")
+                Log.d(TAG, "✅ GNSS 데이터 append: ${file.name}, +${dataToSave.size}개 엔트리, 총 ${file.length()} bytes")
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ GNSS 배치 저장 실패: ${e.message}", e)
+                Log.e(TAG, "❌ GNSS 데이터 저장 실패: ${e.message}", e)
             }
         }
     }
 
     /**
-     * ✅ 동기화된 GPS 데이터 저장 - 배치별 개별 파일
+     * ✅ 동기화된 GPS 데이터 저장 - 단일 파일에 append (GPS Hz 따라감)
+     * - DataSynchronizer에서 추출된 데이터만, GPS Hz 기반 (force=true로 추출 시 GPS 기반 데이터만)
      */
-    private suspend fun saveSynchronizedGpsData(dir: File, batchId: String) = withContext(Dispatchers.IO) {
-        val file = File(dir, "gps_sync_batch_${batchId}.txt")
+    private suspend fun saveSynchronizedGpsData(dir: File) = withContext(Dispatchers.IO) {
+        val file = File(dir, "gps_sync.txt")
 
-        // DataSynchronizer에서 동기화된 데이터 추출
+        // DataSynchronizer에서 동기화된 데이터 추출 (GPS Hz 기반)
         val syncData = dataSynchronizer.extractSynchronizedData(force = true)
 
         if (syncData.isEmpty()) return@withContext
@@ -706,17 +714,20 @@ class LoggerManager private constructor(
         val syncContent = buildGpsSyncContent(syncData)
 
         try {
-            BufferedWriter(FileWriter(file, false), BUFFER_SIZE).use { writer ->
-                writer.write(GPS_SYNC_HEADER)
-                writer.newLine()
+            val append = file.exists()
+            BufferedWriter(FileWriter(file, append), BUFFER_SIZE).use { writer ->
+                if (!append) {
+                    writer.write(GPS_SYNC_HEADER)
+                    writer.newLine()
+                }
                 writer.write(syncContent)
                 writer.flush()
             }
 
-            Log.d(TAG, "✅ 동기화 GPS 배치 저장: ${file.name}, ${syncData.size}개 엔트리, ${file.length()} bytes")
+            Log.d(TAG, "✅ 동기화 GPS 데이터 append: ${file.name}, +${syncData.size}개 엔트리, 총 ${file.length()} bytes")
 
         } catch (e: Exception) {
-            Log.e(TAG, "❌ 동기화 GPS 배치 저장 실패: ${e.message}", e)
+            Log.e(TAG, "❌ 동기화 GPS 데이터 저장 실패: ${e.message}", e)
         }
     }
 

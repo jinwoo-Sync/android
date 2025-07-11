@@ -2,7 +2,10 @@ package com.example.myapplication.data.VideoEncoder
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.media.*
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.os.Environment
 import android.util.Log
 import java.io.File
@@ -52,7 +55,7 @@ class SimpleVideoEncoder(private val context: Context) {
         }
 
         return try {
-            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+            val timestamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
             currentSessionId = timestamp
             currentOutputFile = createOutputFile(timestamp)
 
