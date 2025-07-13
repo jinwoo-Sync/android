@@ -221,8 +221,8 @@ class SensorCollector(private val context: Context) {
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(locationResult: LocationResult) {
             locationResult.lastLocation?.let { location ->
-                val systemTimestamp = System.currentTimeMillis()
-                val monoTimestamp = System.nanoTime()
+                val gpsTimestamp = location.time // GPS 시간 (밀리초 단위)
+                val monoTimestamp = System.nanoTime() // 로컬 모노토닉 시간 (나노초 단위)
                 val sensorData = SensorData_String(
                     value = "Lat: ${location.latitude}, Lon: ${location.longitude}",
                     timestamp = systemTimestamp,
@@ -268,6 +268,10 @@ class SensorCollector(private val context: Context) {
 
     private val gnssMeasurementsCallback = object : GnssMeasurementsEvent.Callback() {
         override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
+            val clock = event.clock
+            val gpsTimestamp = clock.timeNanos / 1_000_000 // 나노초를 밀리초로 변환
+            val monoTimestamp = System.nanoTime() // 로컬 모노토닉 시간 (나노초 단위)
+
             for (measurement in event.measurements) {
                 val type = when (measurement.constellationType) {
                     GnssStatus.CONSTELLATION_GPS -> "GPS"
@@ -282,8 +286,8 @@ class SensorCollector(private val context: Context) {
                 val carrierPhaseValue: Double? = measurement.carrierPhase
 
                 val gnssData = GnssData(
-                    timestamp = System.currentTimeMillis(),
-                    monoTimestamp = System.nanoTime(),
+                    timestamp = gpsTimestamp,
+                    monoTimestamp = monoTimestamp,
                     gnssType = type,
                     satelliteId = measurement.svid,
                     signalStrength = measurement.cn0DbHz,
@@ -293,8 +297,8 @@ class SensorCollector(private val context: Context) {
                 )
                 val sensorDataString = SensorData_String(
                     value = "GNSS Type: ${gnssData.gnssType}, Sat ID: ${gnssData.satelliteId}, C/N0: ${gnssData.signalStrength}, PseudoRate: ${gnssData.pseudorangeRate ?: "N/A"}, CarrierPhase: ${gnssData.carrierPhase ?: "N/A"}",
-                    timestamp = gnssData.timestamp,
-                    monoTimestamp = gnssData.monoTimestamp
+                    timestamp = gpsTimestamp,
+                    monoTimestamp = monoTimestamp
                 )
 
                 gnssCallback?.invoke(sensorDataString)
@@ -302,12 +306,10 @@ class SensorCollector(private val context: Context) {
                     LoggerManager.getInstance(context, dataSynchronizer).pushGnss(gnssData)
                 }
             }
+            override fun onStatusChanged(status: Int) {
+                Log.d(TAG, "GNSS measurements status changed: $status")
+            }
         }
-
-        override fun onStatusChanged(status: Int) {
-            Log.d(TAG, "GNSS measurements status changed: $status")
-        }
-    }
 
     private val gnssStatusFallbackCallback = object : GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(status: GnssStatus) {
