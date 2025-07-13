@@ -153,7 +153,8 @@ class SensorCollector(private val context: Context) {
         }
 
     private val gpsConfig = GpsConfig(
-        timestamp = 0L,
+        gpsTimestamp = 0L,
+        localTimestamp = 0L,
         monoTimestamp = 0L,
         provider = LocationManager.GPS_PROVIDER,
         minTimeMs = 1000L,
@@ -217,27 +218,106 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    // GPS 콜백 수정
+    /**
+     * ✅ GPS 콜백 수정 - GPS 시간과 로컬 시간 매핑
+     */
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(locationResult: LocationResult) {
             locationResult.lastLocation?.let { location ->
-                val gpsTimestamp = location.time // GPS 시간 (밀리초 단위)
-                val monoTimestamp = System.nanoTime() // 로컬 모노토닉 시간 (나노초 단위)
+                val gpsTimestamp = location.time // GPS 시간 (밀리초)
+                val localTimestamp = System.currentTimeMillis() // 로컬 시간 (밀리초)
+                val monoTimestamp = System.nanoTime() // Monotonic 시간 (나노초)
+
+                // ✅ GPS 시간 유효성 검사
+                val isGpsTimeValid = gpsTimestamp > 0 &&
+                        abs(gpsTimestamp - localTimestamp) < 86400000L // 24시간 이내 차이
+
                 val sensorData = SensorData_String(
                     value = "Lat: ${location.latitude}, Lon: ${location.longitude}",
-                    timestamp = systemTimestamp,
+                    timestamp = localTimestamp,
                     monoTimestamp = monoTimestamp
                 )
+
                 synchronized(this@SensorCollector) {
                     gpsCallback?.invoke(sensorData)
                     if (::dataSynchronizer.isInitialized) {
-                        dataSynchronizer.addGpsData(location, systemTimestamp, monoTimestamp)
-                        LoggerManager.getInstance(context, dataSynchronizer).pushGps(location, systemTimestamp, monoTimestamp)
+                        // ✅ GPS와 로컬 시간 매핑 정보 전달
+                        dataSynchronizer.addGpsData(
+                            location = location,
+                            gpsTimestamp = gpsTimestamp,
+                            localTimestamp = localTimestamp,
+                            monoTimestamp = monoTimestamp,
+                            isGpsTimeValid = isGpsTimeValid
+                        )
+                        LoggerManager.getInstance(context, dataSynchronizer).pushGps(
+                            location, localTimestamp, monoTimestamp
+                        )
                     }
                 }
+
+                Log.d(TAG, "📍 GPS 매핑: GPS=${gpsTimestamp}, Local=${localTimestamp}, Valid=${isGpsTimeValid}")
             }
         }
     }
+
+    /**
+     * ✅ GNSS 콜백 수정 - GPS 시간과 로컬 시간 구분
+     */
+    private val gnssMeasurementsCallback = object : GnssMeasurementsEvent.Callback() {
+        override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
+            val clock = event.clock
+            val gpsTimestamp = clock.timeNanos / 1_000_000 // GPS 시간 (밀리초)
+            val localTimestamp = System.currentTimeMillis() // 로컬 시간 (밀리초)
+            val monoTimestamp = System.nanoTime() // Monotonic 시간 (나노초)
+
+            // ✅ GPS 시간 유효성 검사
+            val isGpsTimeValid = gpsTimestamp > 0 &&
+                    abs(gpsTimestamp - localTimestamp) < 86400000L
+
+            for (measurement in event.measurements) {
+                val type = when (measurement.constellationType) {
+                    GnssStatus.CONSTELLATION_GPS -> "GPS"
+                    GnssStatus.CONSTELLATION_GLONASS -> "GLONASS"
+                    GnssStatus.CONSTELLATION_BEIDOU -> "BeiDou"
+                    GnssStatus.CONSTELLATION_GALILEO -> "Galileo"
+                    GnssStatus.CONSTELLATION_QZSS -> "QZSS"
+                    else -> "Unknown"
+                }
+
+                val gnssData = GnssData(
+                    gpsTimestamp = gpsTimestamp,
+                    localTimestamp = localTimestamp,
+                    monoTimestamp = monoTimestamp,
+                    gnssType = type,
+                    satelliteId = measurement.svid,
+                    signalStrength = measurement.cn0DbHz,
+                    pseudorangeRate = measurement.pseudorangeRateMetersPerSecond,
+                    carrierPhase = measurement.carrierPhase,
+                    additionalInfo = "State=${measurement.state}, TimeOffsetNanos=${measurement.timeOffsetNanos}",
+                    isGpsTimeValid = isGpsTimeValid
+                )
+
+                val sensorDataString = SensorData_String(
+                    value = "GNSS Type: ${gnssData.gnssType}, Sat ID: ${gnssData.satelliteId}, C/N0: ${gnssData.signalStrength}, GPS_Valid: ${isGpsTimeValid}",
+                    timestamp = localTimestamp,
+                    monoTimestamp = monoTimestamp
+                )
+
+                gnssCallback?.invoke(sensorDataString)
+                if (::dataSynchronizer.isInitialized) {
+                    dataSynchronizer.addGnssData(gnssData)
+                    LoggerManager.getInstance(context, dataSynchronizer).pushGnss(gnssData)
+                }
+
+                Log.d(TAG, "🛰️ GNSS 매핑: GPS=${gpsTimestamp}, Local=${localTimestamp}, Valid=${isGpsTimeValid}")
+            }
+        }
+
+        override fun onStatusChanged(status: Int) {
+            Log.d(TAG, "GNSS measurements status changed: $status")
+        }
+    }
+
 
     private val accelerometerListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
@@ -264,84 +344,6 @@ class SensorCollector(private val context: Context) {
             }
         }
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
-    }
-
-    private val gnssMeasurementsCallback = object : GnssMeasurementsEvent.Callback() {
-        override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
-            val clock = event.clock
-            val gpsTimestamp = clock.timeNanos / 1_000_000 // 나노초를 밀리초로 변환
-            val monoTimestamp = System.nanoTime() // 로컬 모노토닉 시간 (나노초 단위)
-
-            for (measurement in event.measurements) {
-                val type = when (measurement.constellationType) {
-                    GnssStatus.CONSTELLATION_GPS -> "GPS"
-                    GnssStatus.CONSTELLATION_GLONASS -> "GLONASS"
-                    GnssStatus.CONSTELLATION_BEIDOU -> "BeiDou"
-                    GnssStatus.CONSTELLATION_GALILEO -> "Galileo"
-                    GnssStatus.CONSTELLATION_QZSS -> "QZSS"
-                    else -> "Unknown"
-                }
-
-                val pseudorangeRateValue: Double? = measurement.pseudorangeRateMetersPerSecond
-                val carrierPhaseValue: Double? = measurement.carrierPhase
-
-                val gnssData = GnssData(
-                    timestamp = gpsTimestamp,
-                    monoTimestamp = monoTimestamp,
-                    gnssType = type,
-                    satelliteId = measurement.svid,
-                    signalStrength = measurement.cn0DbHz,
-                    pseudorangeRate = pseudorangeRateValue,
-                    carrierPhase = carrierPhaseValue,
-                    additionalInfo = "State=${measurement.state}, TimeOffsetNanos=${measurement.timeOffsetNanos}"
-                )
-                val sensorDataString = SensorData_String(
-                    value = "GNSS Type: ${gnssData.gnssType}, Sat ID: ${gnssData.satelliteId}, C/N0: ${gnssData.signalStrength}, PseudoRate: ${gnssData.pseudorangeRate ?: "N/A"}, CarrierPhase: ${gnssData.carrierPhase ?: "N/A"}",
-                    timestamp = gpsTimestamp,
-                    monoTimestamp = monoTimestamp
-                )
-
-                gnssCallback?.invoke(sensorDataString)
-                if (::dataSynchronizer.isInitialized) {
-                    LoggerManager.getInstance(context, dataSynchronizer).pushGnss(gnssData)
-                }
-            }
-            override fun onStatusChanged(status: Int) {
-                Log.d(TAG, "GNSS measurements status changed: $status")
-            }
-        }
-
-    private val gnssStatusFallbackCallback = object : GnssStatus.Callback() {
-        override fun onSatelliteStatusChanged(status: GnssStatus) {
-            for (i in 0 until status.satelliteCount) {
-                val gnssData = GnssData(
-                    timestamp = System.currentTimeMillis(),
-                    monoTimestamp = System.nanoTime(),
-                    gnssType = when (status.getConstellationType(i)) {
-                        GnssStatus.CONSTELLATION_GPS -> "GPS"
-                        GnssStatus.CONSTELLATION_GLONASS -> "GLONASS"
-                        GnssStatus.CONSTELLATION_BEIDOU -> "BeiDou"
-                        GnssStatus.CONSTELLATION_GALILEO -> "Galileo"
-                        GnssStatus.CONSTELLATION_QZSS -> "QZSS"
-                        else -> "Other"
-                    },
-                    satelliteId = status.getSvid(i),
-                    signalStrength = status.getCn0DbHz(i).toDouble(),
-                    pseudorangeRate = null,
-                    carrierPhase = null,
-                    additionalInfo = "elev=${status.getElevationDegrees(i)}, azimuth=${status.getAzimuthDegrees(i)}"
-                )
-                val sensorDataString = SensorData_String(
-                    value = "GNSS Type (Fallback): ${gnssData.gnssType}, Sat ID: ${gnssData.satelliteId}, C/N0: ${gnssData.signalStrength}, Elev: ${status.getElevationDegrees(i)}, Azim: ${status.getAzimuthDegrees(i)}",
-                    timestamp = gnssData.timestamp,
-                    monoTimestamp = gnssData.monoTimestamp
-                )
-                gnssCallback?.invoke(sensorDataString)
-                if (::dataSynchronizer.isInitialized) {
-                    LoggerManager.getInstance(context, dataSynchronizer).pushGnss(gnssData)
-                }
-            }
-        }
     }
 
     private val gyroscopeListener = object : SensorEventListener {

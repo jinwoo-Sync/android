@@ -54,13 +54,17 @@ class LoggerManager private constructor(
 
         // Independent Queue Capacities (Memory Management)
         private const val MAX_GPS_QUEUE = 100             // GPS 큐 최대 크기
-        private const val MAX_IMU_QUEUE = 200             // IMU 큐 최대 크기 (high frequency)
+        private const val MAX_IMU_QUEUE = 5000             // IMU 큐 최대 크기 (high frequency)
         private const val MAX_GNSS_QUEUE = 100            // GNSS 큐 최대 크기
         private const val MAX_BBOX_QUEUE = 50             // Bounding Box 큐 최대 크기
         private const val MAX_CAMERA_QUEUE = 45           // Camera 큐 최대 크기
 
         // File I/O Optimization Parameters
         private const val BUFFER_SIZE = 8192              // 8KB optimal buffer size
+
+        // ✅ GPS 기준 배치 타이밍으로 통일
+        private const val GPS_BASED_BATCH_INTERVAL = 1000L   // 1초마다 GPS 기준 배치
+        private const val GPS_BATCH_SIZE = 10                // GPS 기준 배치 크기
 
         private val videoSessionMutex = Mutex()
 
@@ -71,6 +75,54 @@ class LoggerManager private constructor(
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: LoggerManager(context.applicationContext, dataSynchronizer).also { INSTANCE = it }
             }
+        }
+
+
+        /**
+         * 중앙 집중식 경로 관리
+         * .mp4와 .txt 파일을 모두 저장할 수 있는 공통 디렉토리
+         */
+        fun createCommonDataDirectory(context: Context): File {
+            return try {
+                // 1차 시도: Documents/gnss (읽기/쓰기 모두 가능)
+                val documentsDir = File(Environment.getExternalStorageDirectory(), "Documents/gnss")
+                val hourlyDir = File(documentsDir, SimpleDateFormat("yyyyMMdd_HH", Locale.getDefault()).format(Date()))
+
+                if (documentsDir.exists() || documentsDir.mkdirs()) {
+                    if (!hourlyDir.exists()) {
+                        hourlyDir.mkdirs()
+                    }
+                    Log.d("LoggerManager", "✅ Documents/gnss 디렉토리 사용: ${hourlyDir.absolutePath}")
+                    return hourlyDir
+                }
+
+                // 2차 시도: 앱 전용 외부 저장소
+                val appExternalDir = File(context.getExternalFilesDir(null), "gnss_data")
+                val fallbackHourlyDir = File(appExternalDir, SimpleDateFormat("yyyyMMdd_HH", Locale.getDefault()).format(Date()))
+
+                if (!fallbackHourlyDir.exists()) {
+                    fallbackHourlyDir.mkdirs()
+                }
+                Log.d("LoggerManager", "✅ 앱 전용 외부 저장소 사용: ${fallbackHourlyDir.absolutePath}")
+                return fallbackHourlyDir
+
+            } catch (e: Exception) {
+                Log.e("LoggerManager", "❌ 디렉토리 생성 실패: ${e.message}", e)
+
+                // 3차 시도: 앱 내부 저장소 (최후의 수단)
+                val internalDir = File(context.filesDir, "gnss_data")
+                val emergencyHourlyDir = File(internalDir, SimpleDateFormat("yyyyMMdd_HH", Locale.getDefault()).format(Date()))
+                emergencyHourlyDir.mkdirs()
+                Log.w("LoggerManager", "🚨 내부 저장소 사용: ${emergencyHourlyDir.absolutePath}")
+                return emergencyHourlyDir
+            }
+        }
+
+        /**
+         * 현재 시간 기준 공통 디렉토리 경로 반환
+         */
+        fun getCurrentDataDirectory(context: Context): File {
+            return createCommonDataDirectory(context)
         }
     }
 
@@ -367,23 +419,28 @@ class LoggerManager private constructor(
     }
 
     /**
-     * 배치 처리 - Hybrid Data Management with SimpleVideoEncoder
-     * 수학적 모델: Video Encoding ∩ Text Data Persistence
+     * ✅ 메모리 정리 강화된 배치 처리
      */
     private suspend fun processBatch(reason: String) {
         if (frameBuffer.isEmpty()) return
 
         encoderMutex.withLock {
             try {
-                // 1. Video Encoding with SimpleVideoEncoder
+                val commonDirectory = getCurrentDataDirectory(context)
+
+                // 비디오 인코더 처리 (기존 로직)
                 val currentMinuteId = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
                 if (videoEncoder != null && videoEncoder!!.getSessionId() != currentMinuteId) {
                     videoEncoder?.stopRecording()
                     videoEncoder = null
+                    // ✅ 명시적 GC 힌트 (메모리 압박 시)
+                    System.gc()
                 }
 
                 if (videoEncoder == null || !videoEncoder!!.isRecording()) {
                     videoEncoder = SimpleVideoEncoder(context)
+                    videoEncoder!!.setOutputDirectory(commonDirectory)
+
                     val started = videoEncoder!!.startRecording()
                     if (!started) {
                         Log.e(TAG, "비디오 인코더 시작 실패")
@@ -392,6 +449,7 @@ class LoggerManager private constructor(
                     currentSessionTimestamp = videoEncoder!!.getSessionId()
                 }
 
+                // ✅ 프레임 처리 및 즉시 메모리 해제
                 val framesToProcess = mutableListOf<SensorData>()
                 while (frameBuffer.isNotEmpty() && framesToProcess.size < BATCH_SIZE) {
                     frameBuffer.poll()?.let { framesToProcess.add(it) }
@@ -403,34 +461,51 @@ class LoggerManager private constructor(
                         if (videoEncoder?.addFrame(bitmap) == true) {
                             encodedFrames++
                         }
+                        // ✅ 비트맵 즉시 해제
+                        if (!bitmap.isRecycled) {
+                            bitmap.recycle()
+                        }
                     }
                 }
 
-                // 2. ✅ Text Data 저장 - Hybrid Approach
+                // ✅ 프레임 리스트 즉시 정리
+                framesToProcess.clear()
+
+                // 텍스트 데이터 저장
                 saveHybridTextData()
 
+                // ✅ DataSynchronizer 큐 정리 강화
+                dataSynchronizer.forceCleanOldData()
+
                 lastBatchTime.set(System.currentTimeMillis())
-                Log.d(TAG, "$reason 완료: ${encodedFrames}/${framesToProcess.size}프레임, 독립 큐 데이터 저장 완료")
+                Log.d(TAG, "$reason 완료: ${encodedFrames}프레임, 메모리 정리 완료")
 
             } catch (e: Exception) {
                 Log.e(TAG, "배치 처리 실패: ${e.message}", e)
+                // ✅ 오류 시에도 메모리 정리
+                System.gc()
             }
         }
     }
 
     /**
-     * 로그 저장 활성화 (HomeRepository 호환)
+     * ✅ 로그 저장 활성화 시에도 경로 주입
      */
     fun enableLogSaving() {
         isLogSavingEnabled = true
 
-        // 비디오 인코더 시작
+        // 비디오 인코더 시작 + 경로 주입
         if (videoEncoder == null) {
+            val commonDirectory = getCurrentDataDirectory(context)
+
             videoEncoder = SimpleVideoEncoder(context)
+            videoEncoder!!.setOutputDirectory(commonDirectory)  // 🔥 경로 주입
+
             val started = videoEncoder!!.startRecording()
 
             if (started) {
                 Log.d(TAG, "📁 로그 저장 및 비디오 녹화 활성화")
+                Log.d(TAG, "📁 저장 위치: ${commonDirectory.absolutePath}")
             } else {
                 Log.e(TAG, "❌ 비디오 인코더 시작 실패")
                 videoEncoder = null
@@ -557,28 +632,22 @@ class LoggerManager private constructor(
     }
 
     /**
-     * ✅ 하이브리드 텍스트 데이터 저장
-     * - Raw 데이터: 독립 큐에서 추출
-     * - GPS Sync 데이터: DataSynchronizer에서 추출
+     * ✅ 하이브리드 텍스트 데이터 저장 - 공통 디렉토리 사용
      */
     private suspend fun saveHybridTextData() = withContext(Dispatchers.IO) {
         try {
-            val baseDir = File(Environment.getExternalStorageDirectory(), "Documents/gnss")
-            val hourlyDir = File(baseDir, SimpleDateFormat("yyyyMMdd_HH", Locale.getDefault()).format(Date()))
+            // 공통 디렉토리 사용 (mp4와 같은 위치)
+            val commonDir = getCurrentDataDirectory(context)
 
-            if (!hourlyDir.exists()) {
-                val created = hourlyDir.mkdirs()
-                Log.d(TAG, "디렉토리 생성: ${hourlyDir.absolutePath}, 성공: $created")
-            }
+            Log.d(TAG, "=== 하이브리드 텍스트 데이터 저장 시작 (공통 디렉토리) ===")
+            Log.d(TAG, "📁 저장 위치: ${commonDir.absolutePath}")
 
-            Log.d(TAG, "=== 하이브리드 텍스트 데이터 저장 시작 ===")
-
-            // 병렬 저장 실행 (단일 파일에 append 모드)
+            // 병렬 저장 실행 (공통 디렉토리에 저장)
             listOf(
-                async { saveIndependentGpsData(hourlyDir) },
-                async { saveIndependentImuData(hourlyDir) },
-                async { saveIndependentGnssData(hourlyDir) },
-                async { saveSynchronizedGpsData(hourlyDir) }
+                async { saveIndependentGpsData(commonDir) },
+                async { saveIndependentImuData(commonDir) },
+                async { saveIndependentGnssData(commonDir) },
+                async { saveSynchronizedGpsData(commonDir) }
             ).awaitAll()
 
             Log.d(TAG, "=== 하이브리드 텍스트 데이터 저장 완료 ===")
@@ -586,6 +655,13 @@ class LoggerManager private constructor(
         } catch (e: Exception) {
             Log.e(TAG, "하이브리드 텍스트 저장 실패: ${e.message}", e)
         }
+    }
+
+    /**
+     * SimpleVideoEncoder에 경로 주입하는 함수
+     */
+    fun getVideoOutputDirectory(): File {
+        return getCurrentDataDirectory(context)
     }
 
     /**

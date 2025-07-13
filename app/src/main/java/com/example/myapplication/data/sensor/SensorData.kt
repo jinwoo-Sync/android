@@ -20,12 +20,47 @@ data class SensorData(
     val frameId: Long = -1L
 )
 
+/**
+ * ✅ GPS 설정 - GPS 시간과 로컬 시간 매핑 정보 추가
+ */
 data class GpsConfig(
-    val timestamp: Long,
-    val monoTimestamp: Long,
+    val gpsTimestamp: Long,         // GPS 제공 시간
+    val localTimestamp: Long,       // 로컬 시스템 시간
+    val monoTimestamp: Long,        // Monotonic 시간
     val provider: String = LocationManager.GPS_PROVIDER,
     val minTimeMs: Long = 1000L,
     val minDistanceMeters: Float = 1.0f,
+    val isGpsTimeValid: Boolean = true  // GPS 시간 유효성
+)
+
+/*data class GnssData(
+    val gpsTimestamp: Long,         // GNSS 제공 GPS 시간
+    val localTimestamp: Long,       // 로컬 시스템 시간
+    val monoTimestamp: Long,        // Monotonic 시간
+    val gnssType: String,
+    val satelliteId: Int,
+    val signalStrength: Double,
+    val pseudorangeRate: Double?,
+    val carrierPhase: Double?,
+    val additionalInfo: String,
+    val isGpsTimeValid: Boolean = true  // GPS 시간 유효성
+)*/
+
+enum class TimeSyncMode {
+    GPS_BASED,      // GPS 시간 기준 동기화
+    LOCAL_BASED     // 로컬 시간 기준 동기화
+}
+
+/**
+ * ✅ 시간 매핑 정보
+ */
+data class TimeMapping(
+    val gpsTime: Long,
+    val localTime: Long,
+    val monoTime: Long,
+    val syncMode: TimeSyncMode,
+    val gpsOffset: Long,        // GPS - Local 시간 차이
+    val confidence: Double      // 매핑 신뢰도 (0.0 ~ 1.0)
 )
 
 data class ImuConfig(
@@ -35,17 +70,6 @@ data class ImuConfig(
     val gyroscopeEnabled: Boolean = true,
     val magnetometerEnabled: Boolean = true,
     val samplingRateHz: Int = 50,
-)
-
-data class GnssData(
-    val monoTimestamp: Long,
-    val timestamp: Long,
-    val gnssType: String,
-    val satelliteId: Int,
-    val signalStrength: Double,
-    val pseudorangeRate: Double?,
-    val carrierPhase: Double?,
-    val additionalInfo: String
 )
 
 data class SensorData_String(
