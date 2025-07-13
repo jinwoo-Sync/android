@@ -114,8 +114,6 @@ class SensorCollector(private val context: Context) {
 
     // GNSS 콜백 등록 상태
     private var isGnssCallbackRegistered = AtomicBoolean(false)
-
-    // ✅ GNSS 세션 추적 변수들
     private var gnssSessionStartTime: Long = 0L
     private var firstFixTime: Long? = null
 
@@ -233,7 +231,7 @@ class SensorCollector(private val context: Context) {
                         )
                     }
                 }
-                Log.d(TAG, "📍 GPS Location: GPS=${gpsTimestamp}, Local=${localTimestamp}, Valid=${isGpsTimeValid}")
+                Log.d(TAG, "📍 GPS Location: ${location.latitude}, ${location.longitude}")
             }
         }
     }
@@ -249,16 +247,70 @@ class SensorCollector(private val context: Context) {
             val monoTimestamp = System.nanoTime()
             val isGpsTimeValid = gpsTimestamp > 0 && abs(gpsTimestamp - localTimestamp) < 86400000L
 
-            val clockData = extractGnssClockData(clock, gpsTimestamp, localTimestamp, monoTimestamp)
+            val clockData = GnssClockData(
+                gpsTimestamp = gpsTimestamp,
+                localTimestamp = localTimestamp,
+                monoTimestamp = monoTimestamp,
+                timeNanos = clock.timeNanos,
+                timeUncertaintyNanos = if (clock.hasTimeUncertaintyNanos()) clock.timeUncertaintyNanos else null,
+                leapSecond = if (clock.hasLeapSecond()) clock.leapSecond else null,
+                biasNanos = if (clock.hasBiasNanos()) clock.biasNanos else null,
+                biasUncertaintyNanos = if (clock.hasBiasUncertaintyNanos()) clock.biasUncertaintyNanos else null,
+                driftNanosPerSecond = if (clock.hasDriftNanosPerSecond()) clock.driftNanosPerSecond else null,
+                driftUncertaintyNanosPerSecond = if (clock.hasDriftUncertaintyNanosPerSecond()) clock.driftUncertaintyNanosPerSecond else null,
+                hardwareClockDiscontinuityCount = clock.hardwareClockDiscontinuityCount,
+                fullBiasNanos = if (clock.hasFullBiasNanos()) clock.fullBiasNanos else null,
+                additionalInfo = "TimeNanos=${clock.timeNanos}"
+            )
 
             for (measurement in event.measurements) {
-                val comprehensiveData = extractComprehensiveGnssData(
-                    measurement, gpsTimestamp, localTimestamp, monoTimestamp, isGpsTimeValid
+                val gnssType = when (measurement.constellationType) {
+                    GnssStatus.CONSTELLATION_GPS -> "GPS"
+                    GnssStatus.CONSTELLATION_GLONASS -> "GLONASS"
+                    GnssStatus.CONSTELLATION_BEIDOU -> "BeiDou"
+                    GnssStatus.CONSTELLATION_GALILEO -> "Galileo"
+                    GnssStatus.CONSTELLATION_QZSS -> "QZSS"
+                    GnssStatus.CONSTELLATION_IRNSS -> "IRNSS"
+                    GnssStatus.CONSTELLATION_SBAS -> "SBAS"
+                    else -> "Unknown"
+                }
+
+                val comprehensiveData = ComprehensiveGnssData(
+                    gpsTimestamp = gpsTimestamp,
+                    localTimestamp = localTimestamp,
+                    monoTimestamp = monoTimestamp,
+                    isGpsTimeValid = isGpsTimeValid,
+                    gnssType = gnssType,
+                    constellationType = measurement.constellationType,
+                    satelliteId = measurement.svid,
+                    svid = measurement.svid,
+                    signalStrength = measurement.cn0DbHz,
+                    carrierFrequencyHz = if (measurement.hasCarrierFrequencyHz()) measurement.carrierFrequencyHz else null,
+                    multipathIndicator = measurement.multipathIndicator,
+                    pseudorangeRate = if (measurement.hasPseudorangeRateMetersPerSecond()) measurement.pseudorangeRateMetersPerSecond else null,
+                    pseudorangeRateUncertainty = if (measurement.hasPseudorangeRateUncertaintyMetersPerSecond()) measurement.pseudorangeRateUncertaintyMetersPerSecond else null,
+                    accumulatedDeltaRange = if (measurement.hasAccumulatedDeltaRangeMeters()) measurement.accumulatedDeltaRangeMeters else null,
+                    accumulatedDeltaRangeState = measurement.accumulatedDeltaRangeState,
+                    accumulatedDeltaRangeUncertainty = if (measurement.hasAccumulatedDeltaRangeUncertaintyMeters()) measurement.accumulatedDeltaRangeUncertaintyMeters else null,
+                    carrierPhase = if (measurement.hasCarrierPhase()) measurement.carrierPhase else null,
+                    carrierPhaseUncertainty = if (measurement.hasCarrierPhaseUncertainty()) measurement.carrierPhaseUncertainty else null,
+                    carrierCycles = if (measurement.hasCarrierCycles()) measurement.carrierCycles else null,
+                    receivedSvTimeNanos = measurement.receivedSvTimeNanos,
+                    receivedSvTimeUncertainty = measurement.receivedSvTimeUncertaintyNanos,
+                    timeOffsetNanos = measurement.timeOffsetNanos,
+                    state = measurement.state,
+                    automaticGainControl = if (measurement.hasAutomaticGainControlLevelDb()) measurement.automaticGainControlLevelDb else null,
+                    basebandCn0DbHz = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasBasebandCn0DbHz()) measurement.basebandCn0DbHz else null,
+                    fullInterSignalBiasNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasFullInterSignalBiasNanos()) measurement.fullInterSignalBiasNanos else null,
+                    fullInterSignalBiasUncertaintyNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasFullInterSignalBiasUncertaintyNanos()) measurement.fullInterSignalBiasUncertaintyNanos else null,
+                    satelliteInterSignalBiasNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasSatelliteInterSignalBiasNanos()) measurement.satelliteInterSignalBiasNanos else null,
+                    satelliteInterSignalBiasUncertaintyNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasSatelliteInterSignalBiasUncertaintyNanos()) measurement.satelliteInterSignalBiasUncertaintyNanos else null,
+                    codeType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && measurement.hasCodeType()) measurement.codeType else null,
+                    additionalInfo = "State=0x${measurement.state.toString(16)}, MP=${measurement.multipathIndicator}"
                 )
 
-                // UI 콜백용 간단한 데이터
                 gnssCallback?.invoke(SensorData_String(
-                    value = "GNSS: ${comprehensiveData.gnssType}, Sat: ${comprehensiveData.satelliteId}, C/N0: ${comprehensiveData.signalStrength}, MP: ${comprehensiveData.multipathIndicator}",
+                    value = "GNSS: ${comprehensiveData.gnssType}, Sat: ${comprehensiveData.satelliteId}, C/N0: ${comprehensiveData.signalStrength}",
                     timestamp = localTimestamp,
                     monoTimestamp = monoTimestamp
                 ))
@@ -269,10 +321,6 @@ class SensorCollector(private val context: Context) {
                     )
                 }
             }
-        }
-
-        override fun onStatusChanged(status: Int) {
-            Log.d(TAG, "GNSS measurements status changed: $status")
         }
     }
 
@@ -290,6 +338,7 @@ class SensorCollector(private val context: Context) {
 
             for (i in 0 until totalSatellites) {
                 val satelliteStatus = GnssSatelliteStatus(
+                    gpsTimestamp = 0L,
                     localTimestamp = localTimestamp,
                     monoTimestamp = monoTimestamp,
                     satelliteIndex = i,
@@ -311,28 +360,24 @@ class SensorCollector(private val context: Context) {
                     LoggerManager.getInstance(context, dataSynchronizer).pushSatelliteStatus(satelliteStatus)
                 }
             }
-            Log.d(TAG, "🛰️ Satellite Status: Total=${totalSatellites}, Used=${usedSatellites}")
         }
 
         override fun onFirstFix(ttffMillis: Int) {
             firstFixTime = ttffMillis.toLong()
-            Log.d(TAG, "🎯 First Fix (TTFF): ${ttffMillis}ms")
-                if (::dataSynchronizer.isInitialized) {
+            if (::dataSynchronizer.isInitialized) {
                 LoggerManager.getInstance(context, dataSynchronizer).recordFirstFix(ttffMillis.toLong())
             }
         }
 
         override fun onStarted() {
             gnssSessionStartTime = System.currentTimeMillis()
-            Log.d(TAG, "🚀 GNSS Session Started")
         }
 
         override fun onStopped() {
             val sessionDuration = if (gnssSessionStartTime > 0) System.currentTimeMillis() - gnssSessionStartTime else 0L
-            Log.d(TAG, "🛑 GNSS Session Stopped (Duration: ${sessionDuration}ms)")
             if (::dataSynchronizer.isInitialized) {
                 LoggerManager.getInstance(context, dataSynchronizer).recordSessionEnd(sessionDuration, firstFixTime)
-                }
+            }
             gnssSessionStartTime = 0L
             firstFixTime = null
         }
@@ -341,12 +386,14 @@ class SensorCollector(private val context: Context) {
     /**
      * ✅ GNSS 내비게이션 메시지 콜백 - 위성 궤도 정보 등 방송 메시지를 처리합니다.
      */
-    private val gnssNavigationMessageCallback = @RequiresApi(Build.VERSION_CODES.N) object : GnssNavigationMessage.Callback() {
+    @RequiresApi(Build.VERSION_CODES.N)
+    private val gnssNavigationMessageCallback = object : GnssNavigationMessage.Callback() {
         override fun onGnssNavigationMessageReceived(message: GnssNavigationMessage) {
             val localTimestamp = System.currentTimeMillis()
             val monoTimestamp = System.nanoTime()
 
             val navigationData = GnssNavigationData(
+                gpsTimestamp = 0L,
                 localTimestamp = localTimestamp,
                 monoTimestamp = monoTimestamp,
                 messageId = message.messageId,
@@ -362,11 +409,6 @@ class SensorCollector(private val context: Context) {
             if (::dataSynchronizer.isInitialized) {
                 LoggerManager.getInstance(context, dataSynchronizer).pushNavigationMessage(navigationData)
             }
-            Log.d(TAG, "📡 Navigation Message: SV=${message.svid}, Type=${message.type}, Length=${message.data.size}")
-        }
-
-        override fun onStatusChanged(status: Int) {
-            Log.d(TAG, "Navigation message status changed: $status")
         }
     }
 
@@ -381,6 +423,7 @@ class SensorCollector(private val context: Context) {
 
             for (antennaInfo in antennaInfos) {
                 val antennaData = GnssAntennaData(
+                    gpsTimestamp = 0L,
                     localTimestamp = localTimestamp,
                     monoTimestamp = monoTimestamp,
                     carrierFrequencyMHz = antennaInfo.carrierFrequencyMHz,
@@ -390,7 +433,6 @@ class SensorCollector(private val context: Context) {
                     phaseCenterOffsetUncertaintyX = antennaInfo.phaseCenterOffset.xOffsetUncertaintyMm,
                     phaseCenterOffsetUncertaintyY = antennaInfo.phaseCenterOffset.yOffsetUncertaintyMm,
                     phaseCenterOffsetUncertaintyZ = antennaInfo.phaseCenterOffset.zOffsetUncertaintyMm,
-                    // 이중 배열을 직렬화하여 저장 (필요시 파싱하여 사용)
                     phaseCenterVariationCorrections = antennaInfo.phaseCenterVariationCorrections?.corrections?.flatMap { it.toList() }?.toDoubleArray(),
                     phaseCenterVariationUncertainties = antennaInfo.phaseCenterVariationCorrections?.correctionUncertainties?.flatMap { it.toList() }?.toDoubleArray(),
                     signalGainCorrections = antennaInfo.signalGainCorrections?.corrections?.flatMap { it.toList() }?.toDoubleArray(),
@@ -402,71 +444,8 @@ class SensorCollector(private val context: Context) {
                     LoggerManager.getInstance(context, dataSynchronizer).pushAntennaInfo(antennaData)
                 }
             }
-            Log.d(TAG, "📶 Antenna Info Updated: ${antennaInfos.size} antennas")
         }
     }
-
-    // ========== GNSS 데이터 추출 헬퍼 함수들 ==========
-
-    private fun extractComprehensiveGnssData(
-        measurement: GnssMeasurement, gpsTimestamp: Long, localTimestamp: Long, monoTimestamp: Long, isGpsTimeValid: Boolean
-    ): ComprehensiveGnssData {
-        val gnssType = when (measurement.constellationType) {
-            GnssStatus.CONSTELLATION_GPS -> "GPS"
-            GnssStatus.CONSTELLATION_GLONASS -> "GLONASS"
-            GnssStatus.CONSTELLATION_BEIDOU -> "BeiDou"
-            GnssStatus.CONSTELLATION_GALILEO -> "Galileo"
-            GnssStatus.CONSTELLATION_QZSS -> "QZSS"
-            GnssStatus.CONSTELLATION_IRNSS -> "IRNSS"
-            GnssStatus.CONSTELLATION_SBAS -> "SBAS"
-            else -> "Unknown"
-        }
-
-        return ComprehensiveGnssData(
-            gpsTimestamp = gpsTimestamp, localTimestamp = localTimestamp, monoTimestamp = monoTimestamp, isGpsTimeValid = isGpsTimeValid,
-            gnssType = gnssType, constellationType = measurement.constellationType, satelliteId = measurement.svid, svid = measurement.svid,
-            signalStrength = measurement.cn0DbHz,
-            carrierFrequencyHz = if (measurement.hasCarrierFrequencyHz()) measurement.carrierFrequencyHz else null,
-            multipathIndicator = measurement.multipathIndicator,
-            pseudorangeRate = if (measurement.hasPseudorangeRateMetersPerSecond()) measurement.pseudorangeRateMetersPerSecond else null,
-            pseudorangeRateUncertainty = if (measurement.hasPseudorangeRateUncertaintyMetersPerSecond()) measurement.pseudorangeRateUncertaintyMetersPerSecond else null,
-            accumulatedDeltaRange = if (measurement.hasAccumulatedDeltaRangeMeters()) measurement.accumulatedDeltaRangeMeters else null,
-            accumulatedDeltaRangeState = measurement.accumulatedDeltaRangeState,
-            accumulatedDeltaRangeUncertainty = if (measurement.hasAccumulatedDeltaRangeUncertaintyMeters()) measurement.accumulatedDeltaRangeUncertaintyMeters else null,
-            carrierPhase = if (measurement.hasCarrierPhase()) measurement.carrierPhase else null,
-            carrierPhaseUncertainty = if (measurement.hasCarrierPhaseUncertainty()) measurement.carrierPhaseUncertainty else null,
-            carrierCycles = if (measurement.hasCarrierCycles()) measurement.carrierCycles else null,
-            receivedSvTimeNanos = measurement.receivedSvTimeNanos, receivedSvTimeUncertainty = measurement.receivedSvTimeUncertaintyNanos,
-            timeOffsetNanos = measurement.timeOffsetNanos, state = measurement.state,
-            automaticGainControl = if (measurement.hasAutomaticGainControlLevelDb()) measurement.automaticGainControlLevelDb else null,
-            basebandCn0DbHz = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasBasebandCn0DbHz()) measurement.basebandCn0DbHz else null,
-            fullInterSignalBiasNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasFullInterSignalBiasNanos()) measurement.fullInterSignalBiasNanos else null,
-            fullInterSignalBiasUncertaintyNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasFullInterSignalBiasUncertaintyNanos()) measurement.fullInterSignalBiasUncertaintyNanos else null,
-            satelliteInterSignalBiasNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasSatelliteInterSignalBiasNanos()) measurement.satelliteInterSignalBiasNanos else null,
-            satelliteInterSignalBiasUncertaintyNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasSatelliteInterSignalBiasUncertaintyNanos()) measurement.satelliteInterSignalBiasUncertaintyNanos else null,
-            codeType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && measurement.hasCodeType()) measurement.codeType else null,
-            additionalInfo = "State=0x${measurement.state.toString(16)}, MP=${measurement.multipathIndicator}"
-        )
-    }
-
-    private fun extractGnssClockData(
-        clock: GnssClock, gpsTimestamp: Long, localTimestamp: Long, monoTimestamp: Long
-    ): GnssClockData {
-        return GnssClockData(
-            gpsTimestamp = gpsTimestamp, localTimestamp = localTimestamp, monoTimestamp = monoTimestamp,
-            timeNanos = clock.timeNanos,
-            timeUncertaintyNanos = if (clock.hasTimeUncertaintyNanos()) clock.timeUncertaintyNanos else null,
-            leapSecond = if (clock.hasLeapSecond()) clock.leapSecond else null,
-            biasNanos = if (clock.hasBiasNanos()) clock.biasNanos else null,
-            biasUncertaintyNanos = if (clock.hasBiasUncertaintyNanos()) clock.biasUncertaintyNanos else null,
-            driftNanosPerSecond = if (clock.hasDriftNanosPerSecond()) clock.driftNanosPerSecond else null,
-            driftUncertaintyNanosPerSecond = if (clock.hasDriftUncertaintyNanosPerSecond()) clock.driftUncertaintyNanosPerSecond else null,
-            hardwareClockDiscontinuityCount = clock.hardwareClockDiscontinuityCount,
-            fullBiasNanos = if (clock.hasFullBiasNanos()) clock.fullBiasNanos else null,
-            additionalInfo = "TimeNanos=${clock.timeNanos}"
-        )
-    }
-
     // ========== IMU 센서 리스너들 (기존과 동일) ==========
 
     private val accelerometerListener = object : SensorEventListener {
@@ -803,91 +782,68 @@ class SensorCollector(private val context: Context) {
      /**
      * ✅ startSensorStreaming 함수 업데이트 - 모든 GNSS 콜백 등록
      */
-    fun startSensorStreaming(
-        gpsCallback: ((SensorData_String) -> Unit)? = null,
-        imuCallback: ((SensorData_String) -> Unit)? = null,
-        gnssCallback: ((SensorData_String) -> Unit)? = null,
-        detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
-    ) {
-        this.gpsCallback = gpsCallback
-        this.imuCallback = imuCallback
-        this.gnssCallback = gnssCallback
-        this.detectionCallback = detectionCallback
+     fun startSensorStreaming(
+         gpsCallback: ((SensorData_String) -> Unit)? = null,
+         imuCallback: ((SensorData_String) -> Unit)? = null,
+         gnssCallback: ((SensorData_String) -> Unit)? = null,
+         detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
+     ) {
+         this.gpsCallback = gpsCallback
+         this.imuCallback = imuCallback
+         this.gnssCallback = gnssCallback
+         this.detectionCallback = detectionCallback
 
-        if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "ACCESS_FINE_LOCATION 권한 없음. GPS/GNSS 동작 불가.")
-            Toast.makeText(context, "위치 권한을 허용해야 GNSS 데이터가 수집됩니다.", Toast.LENGTH_LONG).show()
-            return
-        }
+         if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+             Log.e(TAG, "ACCESS_FINE_LOCATION 권한 없음")
+             return
+         }
 
-        // ✅ 모든 GNSS 콜백 등록
-        if (!isGnssCallbackRegistered.getAndSet(true)) {
-            try {
-                // 1. GNSS 측정값 콜백
-                locationManager.registerGnssMeasurementsCallback(context.mainExecutor, comprehensiveGnssMeasurementsCallback)
-                Log.d(TAG, "✅ GNSS MeasurementsCallback 등록 성공")
+         if (!isGnssCallbackRegistered.getAndSet(true)) {
+             try {
+                 locationManager.registerGnssMeasurementsCallback(context.mainExecutor, comprehensiveGnssMeasurementsCallback)
+                 locationManager.registerGnssStatusCallback(context.mainExecutor, gnssStatusCallback)
 
-                // 2. GNSS 상태 콜백
-                locationManager.registerGnssStatusCallback(context.mainExecutor, gnssStatusCallback)
-                Log.d(TAG, "✅ GNSS StatusCallback 등록 성공")
+                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                     locationManager.registerGnssNavigationMessageCallback(context.mainExecutor, gnssNavigationMessageCallback)
+                 }
 
-                // 3. GNSS 내비게이션 메시지 콜백 (API 24+)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    try {
-                        locationManager.registerGnssNavigationMessageCallback(context.mainExecutor, gnssNavigationMessageCallback)
-                        Log.d(TAG, "✅ GNSS NavigationMessageCallback 등록 성공")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "GNSS NavigationMessageCallback 등록 실패 (기기 미지원 가능): ${e.message}")
-                    }
-                }
+                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                     locationManager.registerAntennaInfoCallback(context.mainExecutor, gnssAntennaInfoCallback)
+                 }
 
-                // 4. GNSS 안테나 정보 콜백 (API 30+)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    try {
-                        locationManager.registerAntennaInfoCallback(context.mainExecutor, gnssAntennaInfoCallback)
-                        Log.d(TAG, "✅ GNSS AntennaInfoCallback 등록 성공")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "GNSS AntennaInfoCallback 등록 실패 (기기 미지원 가능): ${e.message}")
-                    }
-                }
-            } catch (e: Exception) {
-                isGnssCallbackRegistered.set(false)
-                Log.e(TAG, "GNSS 콜백 등록 실패: ${e.message}", e)
-            }
-        } else {
-            Log.d(TAG, "GNSS 콜백들이 이미 등록됨")
-        }
+                 Log.d(TAG, "✅ 모든 GNSS 콜백 등록 성공")
+             } catch (e: Exception) {
+                 Log.e(TAG, "GNSS 콜백 등록 실패: ${e.message}", e)
+                 isGnssCallbackRegistered.set(false)
+             }
+         }
 
-        // 기존 GPS 위치 콜백 등록
-        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
-            .setMinUpdateIntervalMillis(500L)
-            .build()
-        fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
-            .addOnSuccessListener { Log.d(TAG, "GPS 콜백 등록 성공") }
-            .addOnFailureListener { e -> Log.e(TAG, "GPS 콜백 등록 실패: ${e.message}", e) }
+         val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
+             .setMinUpdateIntervalMillis(500L)
+             .build()
+         fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
 
-        // IMU 센서 등록
-        val desiredHz = 50
-        val samplingPeriodUs = 1_000_000 / desiredHz
-        val samplingRate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && context.checkSelfPermission(Manifest.permission.HIGH_SAMPLING_RATE_SENSORS) == PackageManager.PERMISSION_GRANTED) {
-            samplingPeriodUs
-        } else {
-            SensorManager.SENSOR_DELAY_GAME
-        }
+         val desiredHz = 50
+         val samplingPeriodUs = 1_000_000 / desiredHz
+         val samplingRate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+             context.checkSelfPermission(Manifest.permission.HIGH_SAMPLING_RATE_SENSORS) == PackageManager.PERMISSION_GRANTED) {
+             samplingPeriodUs
+         } else {
+             SensorManager.SENSOR_DELAY_GAME
+         }
 
-        sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
-            sensorManager.registerListener(accelerometerListener, it, samplingRate)
-            Log.d(TAG, "가속도계 리스너 등록 완료")
-        }
-        sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let {
-            sensorManager.registerListener(gyroscopeListener, it, samplingRate)
-            Log.d(TAG, "자이로스코프 리스너 등록 완료")
-        }
-        sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)?.let {
-            sensorManager.registerListener(magnetometerListener, it, samplingRate)
-            Log.d(TAG, "자력계 리스너 등록 완료")
-        }
-    }
+         sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+             sensorManager.registerListener(accelerometerListener, it, samplingRate)
+         }
+         sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let {
+             sensorManager.registerListener(gyroscopeListener, it, samplingRate)
+         }
+         sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)?.let {
+             sensorManager.registerListener(magnetometerListener, it, samplingRate)
+         }
+
+         Log.d(TAG, "✅ 모든 센서 스트리밍 시작 완료")
+     }
 
     /**
      * ✅ stopSensorStreaming 함수 업데이트 - 모든 GNSS 콜백 해제
@@ -903,13 +859,8 @@ class SensorCollector(private val context: Context) {
                     locationManager.unregisterGnssNavigationMessageCallback(gnssNavigationMessageCallback)
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    try {
-                        locationManager.unregisterAntennaInfoCallback(gnssAntennaInfoCallback)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "안테나 정보 콜백 해제 실패: ${e.message}")
-                    }
+                    locationManager.unregisterAntennaInfoCallback(gnssAntennaInfoCallback)
                 }
-                Log.d(TAG, "✅ 모든 GNSS 콜백 해제 성공")
             }
 
             sensorManager.unregisterListener(accelerometerListener)

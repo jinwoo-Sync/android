@@ -22,15 +22,6 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-/**
- * 고급 멀티미디어 로깅 시스템 - Complete GNSS Data Management
- *
- * 아키텍처 설계 원칙:
- * 1. Memory-Optimized Queue Management: 큐별 독립적 용량 제한
- * 2. Thread-Safe Operations: ConcurrentLinkedQueue + Mutex 조합
- * 3. Real-time Data Processing: 배치 단위 I/O 최적화
- * 4. Complete GNSS Coverage: Measurements, Status, Navigation, Antenna, Clock
- */
 class LoggerManager private constructor(
     private val context: Context,
     private val dataSynchronizer: DataSynchronizer
@@ -57,7 +48,7 @@ class LoggerManager private constructor(
         private const val MAX_BBOX_QUEUE = 50
         private const val MAX_CAMERA_QUEUE = 45
 
-        // ✅ 새로운 GNSS 데이터 큐 용량
+        // ✅ 새로운 완전한 GNSS 데이터 큐 용량
         private const val MAX_COMPREHENSIVE_GNSS_QUEUE = 1000
         private const val MAX_SATELLITE_STATUS_QUEUE = 500
         private const val MAX_NAVIGATION_QUEUE = 200
@@ -362,7 +353,7 @@ class LoggerManager private constructor(
         maintainQueueSize(gnssSessionQueue, MAX_GNSS_SESSION_QUEUE)
     }
 
-    // ========== 기존 데이터 저장 메서드들 (변경 없음) ==========
+    // ========== 기존 데이터 저장 메서드들 ==========
 
     fun pushGps(loc: Location, sysTs: Long = System.currentTimeMillis(), monoTs: Long = System.nanoTime()) {
         if (shouldSave()) {
@@ -410,7 +401,7 @@ class LoggerManager private constructor(
         }
 
         if (shouldLiveStream()) {
-            liveStreamingClient.sendGnssData(g)
+            // liveStreamingClient.sendGnssData(g) // 필요시 스트리밍 클라이언트에 추가
         }
     }
 
@@ -823,7 +814,7 @@ class LoggerManager private constructor(
                     writer.flush()
                 }
 
-                Log.d(TAG, "✅ GPS 데이터 append: ${file.name}, +${dataToSave.size}개 엔트리, 총 ${file.length()} bytes")
+                Log.d(TAG, "✅ GPS 데이터 저장: ${file.name}, +${dataToSave.size}개")
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ GPS 데이터 저장 실패: ${e.message}", e)
@@ -855,7 +846,7 @@ class LoggerManager private constructor(
                     writer.flush()
                 }
 
-                Log.d(TAG, "✅ IMU 데이터 append: ${file.name}, +${dataToSave.size}개 엔트리, 총 ${file.length()} bytes")
+                Log.d(TAG, "✅ IMU 데이터 저장: ${file.name}, +${dataToSave.size}개")
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ IMU 데이터 저장 실패: ${e.message}", e)
@@ -887,7 +878,7 @@ class LoggerManager private constructor(
                     writer.flush()
                 }
 
-                Log.d(TAG, "✅ GNSS 데이터 append: ${file.name}, +${dataToSave.size}개 엔트리, 총 ${file.length()} bytes")
+                Log.d(TAG, "✅ GNSS 데이터 저장: ${file.name}, +${dataToSave.size}개")
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ GNSS 데이터 저장 실패: ${e.message}", e)
@@ -898,7 +889,6 @@ class LoggerManager private constructor(
     private suspend fun saveSynchronizedGpsData(dir: File) = withContext(Dispatchers.IO) {
         val file = File(dir, "gps_sync.txt")
 
-        // DataSynchronizer에서 동기화된 데이터 추출
         val syncData = try {
             dataSynchronizer.extractSynchronizedData(force = true)
         } catch (e: Exception) {
@@ -921,7 +911,7 @@ class LoggerManager private constructor(
                 writer.flush()
             }
 
-            Log.d(TAG, "✅ 동기화 GPS 데이터 append: ${file.name}, +${syncData.size}개 엔트리, 총 ${file.length()} bytes")
+            Log.d(TAG, "✅ 동기화 GPS 데이터 저장: ${file.name}, +${syncData.size}개")
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ 동기화 GPS 데이터 저장 실패: ${e.message}", e)
@@ -1084,7 +1074,7 @@ class LoggerManager private constructor(
                 val gnss = entry.gnssData
 
                 append("${entry.captureTime}\t")
-                append("${gnss.timestamp}\t")
+                append("${gnss.gpsTimestamp}\t")
                 append("${gnss.monoTimestamp}\t")
                 append("${gnss.gnssType}\t")
                 append("${gnss.satelliteId}\t")
