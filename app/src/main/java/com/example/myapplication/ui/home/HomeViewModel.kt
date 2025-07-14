@@ -48,6 +48,10 @@ class HomeViewModel(
     private val _isStreaming = MutableLiveData<Boolean>(false)
     val isStreaming: LiveData<Boolean> = _isStreaming
 
+    // ✅ 센서 스트리밍 상태 분리
+    private val _isSensorStreaming = MutableLiveData<Boolean>(false)
+    val isSensorStreaming: LiveData<Boolean> = _isSensorStreaming
+
     private var lastGnssUpdateTime = 0L
     private var lastImuUpdateTime = 0L
     private val IMU_UPDATE_INTERVAL_MS = 1000L
@@ -65,15 +69,16 @@ class HomeViewModel(
     private val _syncStatus = MutableLiveData<String>()
     val syncStatus: LiveData<String> = _syncStatus
 
-    // ✅ 센서 스트리밍 시작 - 앱 시작 시 자동으로 백그라운드에서 실행
+    // ✅ 센서 스트리밍 상태 관리 분리
     private var isSensorStreamingStarted = false
+    private var isCameraStreamingJob: kotlinx.coroutines.Job? = null
 
     fun setServerTransmissionEnabled(enabled: Boolean) {
         _isServerTransmissionEnabled.postValue(enabled)
     }
 
     /**
-     * ✅ 센서 스트리밍 시작 (백그라운드 - GPS, IMU, GNSS)
+     * ✅ 센서 스트리밍 시작 (백그라운드 - GPS, IMU, GNSS) - 독립적으로 동작
      */
     fun startSensorStreaming() {
         if (isSensorStreamingStarted) {
@@ -81,26 +86,32 @@ class HomeViewModel(
             return
         }
 
+        Log.d("HomeViewModel", "🚀 센서 스트리밍 시작")
         isSensorStreamingStarted = true
+        _isSensorStreaming.postValue(true)
+
         homeRepository.startSensorStreaming(
             gpsCallback = { sensorDataString ->
                 val gpsInfo = buildString {
-                    append(sensorDataString.value)
-                    append(", SysTS: ${sensorDataString.timestamp}, MonoTS: ${sensorDataString.monoTimestamp}")
+                    append("GPS: ${sensorDataString.value}")
+                    append("\nSysTS: ${sensorDataString.timestamp}")
+                    append("\nMonoTS: ${sensorDataString.monoTimestamp}")
                 }
                 _gpsData.postValue(gpsInfo)
+                Log.d("HomeViewModel", "✅ GPS 데이터 UI 업데이트: ${sensorDataString.value}")
                 updateSyncStatus()
             },
             imuCallback = { sensorDataString ->
                 val currentTime = System.currentTimeMillis()
                 if (currentTime - lastImuUpdateTime >= IMU_UPDATE_INTERVAL_MS) {
-                    _imuData.postValue(
-                        """
-                        IMU: ${sensorDataString.value}
-                        SysTS: ${sensorDataString.timestamp}, MonoTS: ${sensorDataString.monoTimestamp}
-                        """.trimIndent()
-                    )
+                    val imuInfo = buildString {
+                        append("IMU: ${sensorDataString.value}")
+                        append("\nSysTS: ${sensorDataString.timestamp}")
+                        append("\nMonoTS: ${sensorDataString.monoTimestamp}")
+                    }
+                    _imuData.postValue(imuInfo)
                     lastImuUpdateTime = currentTime
+                    Log.d("HomeViewModel", "✅ IMU 데이터 UI 업데이트")
                     updateSyncStatus()
                 }
             },
@@ -110,25 +121,31 @@ class HomeViewModel(
                     val gnssInfo = "GNSS: ${sensorDataString.value}"
                     _gnssData.postValue(gnssInfo)
                     lastGnssUpdateTime = currentTime
+                    Log.d("HomeViewModel", "✅ GNSS 데이터 UI 업데이트: ${sensorDataString.value}")
                     updateSyncStatus()
                 }
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
-                if (frameId != -1L) {
-                    synchronized(boundingBoxMap) {
-                        boundingBoxMap[frameId] = Pair(boundingBoxes, inferenceTime)
-                        Log.d("HomeViewModel", "Stored bounding boxes for frameId: $frameId, boxes: ${boundingBoxes.size}")
+                // ✅ Detection 결과를 메인 스레드에서 처리
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    if (frameId != -1L) {
+                        synchronized(boundingBoxMap) {
+                            boundingBoxMap[frameId] = Pair(boundingBoxes, inferenceTime)
+                            Log.d("HomeViewModel", "🎯 Detection 결과 저장: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
+                        }
+                        onNewInference(inferenceTime)
+
+                        // ✅ 즉시 UI 업데이트 시도
+                        checkAndUpdateDetectionUI(frameId)
                     }
                 }
-                onNewInference(inferenceTime)
-                checkAndUpdateUI(frameId)
             }
         )
-        Log.d("HomeViewModel", "센서 스트리밍 시작 완료")
+        Log.d("HomeViewModel", "✅ 센서 스트리밍 시작 완료")
     }
 
     /**
-     * ✅ 센서 스트리밍 중지 (백그라운드 센서)
+     * ✅ 센서 스트리밍 중지 (백그라운드 센서) - 독립적으로 동작
      */
     fun stopSensorStreaming() {
         if (!isSensorStreamingStarted) {
@@ -136,22 +153,26 @@ class HomeViewModel(
             return
         }
 
+        Log.d("HomeViewModel", "🛑 센서 스트리밍 중지")
         homeRepository.stopSensorStreaming()
         isSensorStreamingStarted = false
+        _isSensorStreaming.postValue(false)
+
+        // ✅ 센서 데이터 UI 초기화
         _gpsData.postValue("GPS: 대기 중")
         _gnssData.postValue("GNSS: 대기 중")
         _imuData.postValue("IMU: 대기 중")
-        _boundingBoxes.postValue(emptyList())
-        _inferenceTime.postValue("0ms")
         _syncStatus.postValue("동기화 중지됨")
+
+        // ✅ Detection 관련 데이터 초기화
         synchronized(boundingBoxMap) { boundingBoxMap.clear() }
         lastGnssUpdateTime = 0L
         lastImuUpdateTime = 0L
-        Log.d("HomeViewModel", "센서 스트리밍 중지 완료")
+        Log.d("HomeViewModel", "✅ 센서 스트리밍 중지 완료")
     }
 
     /**
-     * ✅ 카메라 스트리밍 시작 (UI 버튼용)
+     * ✅ 카메라 스트리밍 시작 (UI 버튼용) - 독립적으로 동작
      */
     private fun startCameraStreaming() {
         if (_isStreaming.value == true) {
@@ -159,24 +180,31 @@ class HomeViewModel(
             return
         }
 
+        Log.d("HomeViewModel", "📹 카메라 스트리밍 시작")
         _text.value = "카메라 스트리밍 중..."
         homeRepository.startCameraStreaming()
 
-        // ✅ Flow 구독 강화 - 새로운 Job으로 시작
-        viewModelScope.launch {
-            Log.d("HomeViewModel", "✅ Starting Flow collection...")
+        // ✅ 이전 Job 취소
+        isCameraStreamingJob?.cancel()
+
+        // ✅ 새로운 Flow 구독
+        isCameraStreamingJob = viewModelScope.launch {
+            Log.d("HomeViewModel", "✅ Camera Flow 구독 시작...")
             try {
                 homeRepository.cameraStreamFlow.collect { sensorData ->
                     if (sensorData != null) {
+                        // ✅ 카메라 프레임 즉시 업데이트
                         _cameraFrame.postValue(sensorData.bitmap)
-                        checkAndUpdateUI(sensorData.frameId)
-                        Log.d("HomeViewModel", "✅ Camera frame received and posted: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
+                        Log.d("HomeViewModel", "✅ Camera frame received: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
+
+                        // ✅ Detection 결과와 매칭 시도
+                        checkAndUpdateDetectionUI(sensorData.frameId)
                     } else {
-                        Log.w("HomeViewModel", "⚠️ Received null sensor data from flow")
+                        Log.w("HomeViewModel", "⚠️ Received null sensor data from camera flow")
                     }
                 }
             } catch (e: Exception) {
-                Log.e("HomeViewModel", "❌ Error in Flow collection: ${e.message}", e)
+                Log.e("HomeViewModel", "❌ Camera Flow 구독 오류: ${e.message}", e)
                 _text.postValue("카메라 스트리밍 오류: ${e.message}")
             }
         }
@@ -191,21 +219,32 @@ class HomeViewModel(
             return
         }
 
+        Log.d("HomeViewModel", "📹 카메라 스트리밍 중지")
+
+        // ✅ Flow 구독 취소
+        isCameraStreamingJob?.cancel()
+        isCameraStreamingJob = null
+
         homeRepository.stopCameraStreaming()
         _text.value = "카메라 스트리밍 중지됨"
+
+        // ✅ 카메라 관련 UI만 초기화
         _cameraFrame.postValue(null)
         _boundingBoxes.postValue(emptyList())
         _inferenceTime.postValue("0ms")
+
+        // ✅ Detection 맵만 초기화 (센서 데이터는 유지)
         synchronized(boundingBoxMap) { boundingBoxMap.clear() }
     }
 
     /**
-     * ✅ 스트리밍 토글 (UI 버튼 전용)
+     * ✅ 스트리밍 토글 (카메라만) - 센서 스트리밍과 독립적
      */
     suspend fun toggleStreaming(context: Context) {
         if (_isStreaming.value == true) {
             stopCameraStreaming()
             _isStreaming.value = false
+            // ✅ 카메라 중지 시 서버 스트리밍도 중지
             setServerStreamingEnabled(context, false)
             Log.d("HomeViewModel", "Camera streaming stopped")
         } else {
@@ -216,7 +255,36 @@ class HomeViewModel(
     }
 
     /**
-     * ✅ 프레임 캡처 (단일 프레임)
+     * ✅ Detection UI 업데이트 최적화
+     */
+    private fun checkAndUpdateDetectionUI(frameId: Long) {
+        viewModelScope.launch {
+            synchronized(boundingBoxMap) {
+                if (boundingBoxMap.containsKey(frameId)) {
+                    val (boxes, inferenceTime) = boundingBoxMap[frameId]!!
+
+                    // ✅ UI 업데이트
+                    _boundingBoxes.postValue(boxes)
+                    _inferenceTime.postValue("${inferenceTime}ms")
+
+                    Log.d("HomeViewModel", "🎯 UI 업데이트 완료: frameId=$frameId, boxes=${boxes.size}, inference=${inferenceTime}ms")
+
+                    // ✅ 사용된 데이터 제거
+                    boundingBoxMap.remove(frameId)
+
+                    // ✅ 오래된 데이터 정리 (메모리 누수 방지)
+                    val currentTime = System.currentTimeMillis()
+                    boundingBoxMap.entries.removeIf { (fId, _) ->
+                        currentTime - fId > 5000L // 5초 이상 된 데이터 제거
+                    }
+                }
+            }
+        }
+    }
+
+
+    /**
+     * ✅ 프레임 캡처 (단일 프레임) - 기존 스트리밍과 독립적
      */
     suspend fun fetchCameraData() {
         if (_isStreaming.value == true) {
@@ -239,18 +307,6 @@ class HomeViewModel(
                 _text.postValue("프레임 저장 실패")
             } else {
                 _text.postValue("프레임 캡처 실패")
-            }
-        }
-    }
-
-    private fun checkAndUpdateUI(frameId: Long) {
-        synchronized(boundingBoxMap) {
-            if (boundingBoxMap.containsKey(frameId) && _cameraFrame.value != null) {
-                val (boxes, inferenceTime) = boundingBoxMap[frameId]!!
-                _boundingBoxes.postValue(boxes)
-                _inferenceTime.postValue("${inferenceTime}ms")
-                Log.d("HomeViewModel", "UI updated for frameId: $frameId, boxes: ${boxes.size}")
-                boundingBoxMap.remove(frameId)
             }
         }
     }
@@ -300,10 +356,20 @@ class HomeViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        Log.d("HomeViewModel", "🧹 ViewModel 정리 시작")
+
+        // ✅ 카메라 스트리밍 정지
+        isCameraStreamingJob?.cancel()
         homeRepository.stopCameraStreaming()
-        sensorCollector.closeCamera()
+
+        // ✅ 센서 스트리밍 정지
         stopSensorStreaming()
+
+        // ✅ 리소스 정리
+        sensorCollector.closeCamera()
         _isStreaming.value = false
+
+        Log.d("HomeViewModel", "✅ ViewModel 정리 완료")
     }
 
     fun onNewInference(timeMs: Long) {

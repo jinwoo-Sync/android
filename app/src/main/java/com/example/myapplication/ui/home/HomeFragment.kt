@@ -99,7 +99,7 @@ class HomeFragment : Fragment() {
     }
 
     /**
-     * ✅ UI 관찰자 설정
+ * ✅ UI 관찰자 설정 - 센서와 카메라 분리
      */
     private fun setupObservers() {
         // 상태 메시지 관찰
@@ -120,11 +120,15 @@ class HomeFragment : Fragment() {
             }
         }
 
-        // 바운딩 박스 관찰
+    // ✅ 바운딩 박스 관찰 - 강화된 로깅
         viewModel.boundingBoxes.observe(viewLifecycleOwner) { boundingBoxes ->
-            Log.d("HomeFragment", "Received bounding boxes: ${boundingBoxes.size}")
+        Log.d("HomeFragment", "🎯 바운딩 박스 수신: ${boundingBoxes.size}개")
             binding.overlayView.setResults(boundingBoxes)
             binding.overlayView.invalidate()
+
+        if (boundingBoxes.isNotEmpty()) {
+            Log.d("HomeFragment", "🎯 바운딩 박스 표시: ${boundingBoxes.map { "${it.clsName}(${it.cnf})" }}")
+        }
         }
 
         // 추론 시간 관찰
@@ -142,29 +146,29 @@ class HomeFragment : Fragment() {
             }
         }
 
-        // GPS 데이터 관찰
+    // ✅ GPS 데이터 관찰 - 강화된 로깅
         viewModel.gpsData.observe(viewLifecycleOwner) { data ->
             binding.gpsLogText.text = data
-            Log.d("HomeFragment", "GPS 데이터 UI 업데이트: $data")
+        Log.d("HomeFragment", "📍 GPS 데이터 UI 업데이트: $data")
         }
 
-        // GNSS 데이터 관찰
+    // ✅ GNSS 데이터 관찰 - 강화된 로깅
         viewModel.gnssData.observe(viewLifecycleOwner) { data ->
             if (data == "GNSS: 대기 중") {
                 binding.gnssLogText.text = "GNSS 데이터가 수신되지 않습니다."
             } else {
                 binding.gnssLogText.text = data
             }
-            Log.d("HomeFragment", "GNSS 데이터 UI 업데이트: $data")
+        Log.d("HomeFragment", "🛰️ GNSS 데이터 UI 업데이트: $data")
         }
 
-        // IMU 데이터 관찰
+    // ✅ IMU 데이터 관찰 - 강화된 로깅
         viewModel.imuData.observe(viewLifecycleOwner) { data ->
             binding.imuLogText.text = data
-            Log.d("HomeFragment", "IMU 데이터 UI 업데이트: $data")
+        Log.d("HomeFragment", "📊 IMU 데이터 UI 업데이트: $data")
         }
 
-        // ✅ 스트리밍 상태 관찰
+    // ✅ 카메라 스트리밍 상태 관찰
         viewModel.isStreaming.observe(viewLifecycleOwner) { isStreaming ->
             binding.buttonOpenCamera.text = if (isStreaming) "스트리밍 중지" else "스트리밍 시작"
             binding.buttonCaptureFrame.text = if (isStreaming) "현재 프레임 저장" else "프레임 캡처"
@@ -173,12 +177,24 @@ class HomeFragment : Fragment() {
                 binding.overlayView.clear()
                 binding.inferenceTime.text = "Inference: 0ms"
                 binding.imageView.setImageBitmap(null)
-                Log.d("HomeFragment", "🔴 Streaming stopped - UI cleared")
+            Log.d("HomeFragment", "🔴 Camera streaming stopped - UI cleared")
             } else {
-                Log.d("HomeFragment", "🟢 Streaming started - UI ready for frames")
+            Log.d("HomeFragment", "🟢 Camera streaming started - UI ready for frames")
             }
 
-            Log.d("HomeFragment", "✅ Streaming status changed: $isStreaming")
+        Log.d("HomeFragment", "✅ Camera streaming status changed: $isStreaming")
+    }
+
+    // ✅ 센서 스트리밍 상태 관찰 (추가)
+    viewModel.isSensorStreaming.observe(viewLifecycleOwner) { isSensorStreaming ->
+        Log.d("HomeFragment", "🔧 Sensor streaming status: $isSensorStreaming")
+
+        if (!isSensorStreaming) {
+            // 센서 스트리밍이 중지되면 센서 데이터 UI 초기화
+            binding.gpsLogText.text = "GPS: 대기 중"
+            binding.gnssLogText.text = "GNSS: 대기 중"
+            binding.imuLogText.text = "IMU: 대기 중"
+        }
         }
 
         // 서버 전송 상태 관찰
@@ -291,22 +307,22 @@ class HomeFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        Log.d("HomeFragment", "📱 Fragment resumed - starting sensor streaming")
-        // ✅ 센서 스트리밍만 재시작 (카메라는 버튼으로 제어)
+    Log.d("HomeFragment", "📱 Fragment resumed - starting sensor streaming only")
+    // ✅ 센서 스트리밍만 자동 시작 (카메라는 수동 제어)
         viewModel.startSensorStreaming()
     }
 
     override fun onPause() {
         super.onPause()
-        Log.d("HomeFragment", "📱 Fragment paused - stopping sensor streaming")
-        // ✅ 센서 스트리밍만 중지 (카메라는 계속 유지)
-        viewModel.stopSensorStreaming()
+    Log.d("HomeFragment", "📱 Fragment paused - sensor streaming continues")
+    // ✅ Fragment pause 시 센서 스트리밍은 유지 (백그라운드 동작)
+    // 필요시에만 중지: viewModel.stopSensorStreaming()
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
         Log.d("HomeFragment", "📱 Fragment destroying - cleaning up")
-        // ✅ 모든 스트리밍 정지
+    // ✅ Fragment 완전 종료 시에만 센서 스트리밍 중지
         viewModel.stopSensorStreaming()
         _binding = null
     }

@@ -134,7 +134,7 @@ class DataSynchronizer {
                 currentSyncMode = TimeSyncMode.LOCAL_BASED
                 isGpsAvailable = false
                 timeKalmanFilter.reset() // 필터 리셋
-                Log.w(TAG, "🔄 로컬 시간 기반으로 동기화 모드 전환")
+                //Log.w(TAG, "🔄 로컬 시간 기반으로 동기화 모드 전환")
             }
 
             val hybridKey = when (currentSyncMode) {

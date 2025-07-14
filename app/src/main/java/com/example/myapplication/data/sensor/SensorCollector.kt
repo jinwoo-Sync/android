@@ -217,21 +217,25 @@ class SensorCollector(private val context: Context) {
                 val isGpsTimeValid = gpsTimestamp > 0 && abs(gpsTimestamp - localTimestamp) < 86400000L
 
                 val sensorData = SensorData_String(
-                    value = "Lat: ${location.latitude}, Lon: ${location.longitude}",
+                    value = "Lat: ${location.latitude}, Lon: ${location.longitude}, Alt: ${if(location.hasAltitude()) location.altitude else "N/A"}, Acc: ${if(location.hasAccuracy()) location.accuracy else "N/A"}m",
                     timestamp = localTimestamp,
                     monoTimestamp = monoTimestamp
                 )
 
-                synchronized(this@SensorCollector) {
-                    gpsCallback?.invoke(sensorData)
-                    if (::dataSynchronizer.isInitialized) {
-                        dataSynchronizer.updateTimeSync(gpsTimestamp, localTimestamp, monoTimestamp, isGpsTimeValid)
-                        LoggerManager.getInstance(context, dataSynchronizer).pushGps(
-                            location, localTimestamp, monoTimestamp
-                        )
+                // ✅ 메인 스레드에서 콜백 호출
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    synchronized(this@SensorCollector) {
+                        gpsCallback?.invoke(sensorData)
+                        Log.d(TAG, "✅ GPS 콜백 호출: Lat=${location.latitude}, Lon=${location.longitude}")
                     }
                 }
-                Log.d(TAG, "📍 GPS Location: ${location.latitude}, ${location.longitude}")
+
+                if (::dataSynchronizer.isInitialized) {
+                    dataSynchronizer.updateTimeSync(gpsTimestamp, localTimestamp, monoTimestamp, isGpsTimeValid)
+                    LoggerManager.getInstance(context, dataSynchronizer).pushGps(
+                        location, localTimestamp, monoTimestamp
+                    )
+                }
             }
         }
     }
@@ -465,12 +469,20 @@ class SensorCollector(private val context: Context) {
             latestGyroscope.copyInto(this, 3, 0, 3)
             latestMagnetometer.copyInto(this, 6, 0, 3)
         }
+
+        // ✅ IMU 콜백 강화
         val sensorData = SensorData_String(
-            value = latestImuData!!.joinToString(","),
+            value = "ACC[${latestAccelerometer.joinToString(",")}] GYRO[${latestGyroscope.joinToString(",")}] MAG[${latestMagnetometer.joinToString(",")}]",
             timestamp = systemTimestamp,
             monoTimestamp = monoTimestamp
         )
-        imuCallback?.invoke(sensorData)
+
+        // ✅ 메인 스레드에서 콜백 호출
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            imuCallback?.invoke(sensorData)
+            //Log.d(TAG, "✅ IMU 콜백 호출: ${sensorData.value}")
+        }
+
         if (::dataSynchronizer.isInitialized) {
             LoggerManager.getInstance(context, dataSynchronizer).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
             dataSynchronizer.updateTimeSync(null, systemTimestamp, monoTimestamp, false)
@@ -791,6 +803,7 @@ class SensorCollector(private val context: Context) {
             return
         }
 
+        // ✅ GNSS 콜백 등록 (기존 로직 유지)
         if (!isGnssCallbackRegistered.getAndSet(true)) {
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -805,6 +818,7 @@ class SensorCollector(private val context: Context) {
             }
         }
 
+        // ✅ GPS 위치 요청
         val locationRequest = com.google.android.gms.location.LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
             .setMinUpdateIntervalMillis(500L)
             .setMaxUpdateDelayMillis(2000L)
@@ -814,26 +828,49 @@ class SensorCollector(private val context: Context) {
         fusedLocationClient.requestLocationUpdates(
             locationRequest,
             locationCallback,
-            Looper.getMainLooper()
+            Looper.getMainLooper() // ✅ 메인 루퍼 사용
         )
 
-        val desiredHz = 50
-        val samplingPeriodUs = 1_000_000 / desiredHz
-        val samplingRate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            context.checkSelfPermission(Manifest.permission.HIGH_SAMPLING_RATE_SENSORS) == PackageManager.PERMISSION_GRANTED) {
-            samplingPeriodUs
-        } else {
-            SensorManager.SENSOR_DELAY_GAME
-        }
+        // ✅ IMU 센서 등록 개선 - 더 안전한 방법
+        try {
+            // 센서 등록 전에 기존 리스너 해제
+            sensorManager.unregisterListener(accelerometerListener)
+            sensorManager.unregisterListener(gyroscopeListener)
+            sensorManager.unregisterListener(magnetometerListener)
 
-        sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
-            sensorManager.registerListener(accelerometerListener, it, samplingRate)
-        }
-        sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let {
-            sensorManager.registerListener(gyroscopeListener, it, samplingRate)
-        }
-        sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)?.let {
-            sensorManager.registerListener(magnetometerListener, it, samplingRate)
+            val accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            val gyroSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+            val magSensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+
+            if (accelSensor != null) {
+                val success = sensorManager.registerListener(
+                    accelerometerListener,
+                    accelSensor,
+                    SensorManager.SENSOR_DELAY_GAME // ✅ 더 안정적인 레이트 사용
+                )
+                Log.d(TAG, "가속도계 등록 ${if (success) "성공" else "실패"}")
+            }
+
+            if (gyroSensor != null) {
+                val success = sensorManager.registerListener(
+                    gyroscopeListener,
+                    gyroSensor,
+                    SensorManager.SENSOR_DELAY_GAME
+                )
+                Log.d(TAG, "자이로스코프 등록 ${if (success) "성공" else "실패"}")
+            }
+
+            if (magSensor != null) {
+                val success = sensorManager.registerListener(
+                    magnetometerListener,
+                    magSensor,
+                    SensorManager.SENSOR_DELAY_GAME
+                )
+                Log.d(TAG, "자기계 등록 ${if (success) "성공" else "실패"}")
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "센서 등록 중 오류: ${e.message}", e)
         }
 
         Log.d(TAG, "✅ 모든 센서 스트리밍 시작 완료")
