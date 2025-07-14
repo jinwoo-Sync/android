@@ -41,14 +41,14 @@ class LoggerManager private constructor(
         private const val BATCH_TIMEOUT_MS = 4000L
         private const val MAX_FRAME_BUFFER = 45
 
-        // ✅ 완전한 GNSS 큐 용량 관리
+        // ✅ 적응형 큐 용량 관리
         private const val MAX_GPS_QUEUE = 100
         private const val MAX_IMU_QUEUE = 5000
         private const val MAX_GNSS_QUEUE = 100
         private const val MAX_BBOX_QUEUE = 50
         private const val MAX_CAMERA_QUEUE = 45
 
-        // ✅ 새로운 완전한 GNSS 데이터 큐 용량
+        // ✅ 완전한 GNSS 데이터 큐 용량
         private const val MAX_COMPREHENSIVE_GNSS_QUEUE = 1000
         private const val MAX_SATELLITE_STATUS_QUEUE = 500
         private const val MAX_NAVIGATION_QUEUE = 200
@@ -128,12 +128,28 @@ class LoggerManager private constructor(
     // Video encoding queue
     private val frameBuffer = ConcurrentLinkedQueue<SensorData>()
 
+    // ✅ 메모리 압박 상황 모니터링
+    private val memoryMonitor = MemoryMonitor()
+
     // 큐 접근 동기화
     private val queueAccessMutex = Mutex()
 
     // GPS 상태 추적
     @Volatile
     private var currentGpsStatus = false
+
+    // ========== ✅ 메모리 모니터링 클래스 ==========
+
+    private inner class MemoryMonitor {
+        fun getMemoryPressure(): Float {
+            val runtime = Runtime.getRuntime()
+            val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+            val maxMemory = runtime.maxMemory()
+            return (usedMemory.toFloat() / maxMemory.toFloat()).coerceIn(0f, 1f)
+        }
+
+        fun isMemoryPressureHigh(): Boolean = getMemoryPressure() > 0.8f
+    }
 
     // ========== ✅ 완전한 GNSS 데이터 엔트리 정의 ==========
 
@@ -235,6 +251,27 @@ class LoggerManager private constructor(
         startQueueMonitoring()
     }
 
+    // ========== ✅ 개선된 큐 관리 시스템 ==========
+
+    /**
+     * ✅ 적응형 큐 크기 관리
+     */
+    private fun <T> maintainAdaptiveQueueSize(
+        queue: ConcurrentLinkedQueue<T>,
+        baseSize: Int,
+        memoryPressure: Float
+    ) {
+        val adaptiveSize = (baseSize * (1.0f - memoryPressure * 0.5f)).toInt()
+        while (queue.size > adaptiveSize) {
+            queue.poll()
+        }
+    }
+
+    private fun <T> maintainQueueSize(queue: ConcurrentLinkedQueue<T>, maxSize: Int) {
+        val memoryPressure = memoryMonitor.getMemoryPressure()
+        maintainAdaptiveQueueSize(queue, maxSize, memoryPressure)
+    }
+
     // ========== ✅ 완전한 GNSS 데이터 저장 메서드들 ==========
 
     /**
@@ -261,7 +298,7 @@ class LoggerManager private constructor(
     }
 
     /**
-     * ✅ 위성 상태 데이터 저장
+     * ✅ 위성 상태 데이터 저장 (단일)
      */
     fun pushSatelliteStatus(satelliteStatus: GnssSatelliteStatus) {
         if (shouldSave()) {
@@ -270,6 +307,21 @@ class LoggerManager private constructor(
             maintainQueueSize(satelliteStatusQueue, MAX_SATELLITE_STATUS_QUEUE)
 
             Log.d(TAG, "위성 상태 추가: SV=${satelliteStatus.svid}, Used=${satelliteStatus.usedInFix}, C/N0=${satelliteStatus.cn0DbHz}")
+        }
+    }
+
+    /**
+     * ✅ 위성 상태 데이터 배치 저장 (벌크 삽입 최적화)
+     */
+    fun pushSatelliteStatusBatch(satelliteStatuses: List<GnssSatelliteStatus>) {
+        if (shouldSave() && satelliteStatuses.isNotEmpty()) {
+            satelliteStatuses.forEach { status ->
+                val statusEntry = IndependentSatelliteStatusEntry(satelliteStatus = status)
+                satelliteStatusQueue.offer(statusEntry)
+            }
+            maintainQueueSize(satelliteStatusQueue, MAX_SATELLITE_STATUS_QUEUE)
+
+            Log.d(TAG, "위성 상태 배치 추가: ${satelliteStatuses.size}개, 총 큐 크기=${satelliteStatusQueue.size}")
         }
     }
 
@@ -435,24 +487,23 @@ class LoggerManager private constructor(
         }
     }
 
-    // ========== 큐 관리 시스템 ==========
-
-    private fun <T> maintainQueueSize(queue: ConcurrentLinkedQueue<T>, maxSize: Int) {
-        while (queue.size > maxSize) {
-            queue.poll()
-        }
-    }
-
     private fun startQueueMonitoring() {
         ioScope.launch {
             while (isActive) {
                 try {
                     val status = getIndependentQueueStatus()
+                    val memoryPressure = memoryMonitor.getMemoryPressure()
 
                     if (status.totalDataPoints > 500) {
                         Log.d(TAG, "큐 상태: GPS=${status.gpsQueueSize}, IMU=${status.imuQueueSize}, " +
                                 "GNSS=${status.gnssQueueSize}, CompGNSS=${status.comprehensiveGnssQueueSize}, " +
-                                "Sat=${status.satelliteStatusQueueSize}, Nav=${status.navigationQueueSize}")
+                                "Sat=${status.satelliteStatusQueueSize}, Nav=${status.navigationQueueSize}, " +
+                                "Memory=${(memoryPressure * 100).toInt()}%")
+                    }
+
+                    // ✅ 메모리 압박 시 강제 정리
+                    if (memoryMonitor.isMemoryPressureHigh()) {
+                        performEmergencyCleanup()
                     }
 
                     currentGpsStatus = dataSynchronizer.getGpsStatus().isGpsAvailable
@@ -465,7 +516,32 @@ class LoggerManager private constructor(
         }
     }
 
-    // ========== 배치 처리 시스템 ==========
+    /**
+     * ✅ 메모리 압박 시 응급 정리
+     */
+    private suspend fun performEmergencyCleanup() {
+        Log.w(TAG, "⚠️ 메모리 압박 감지, 응급 정리 수행")
+
+        queueAccessMutex.withLock {
+            // 큐 크기를 절반으로 줄임
+            while (independentImuQueue.size > MAX_IMU_QUEUE / 2) {
+                independentImuQueue.poll()
+            }
+            while (comprehensiveGnssQueue.size > MAX_COMPREHENSIVE_GNSS_QUEUE / 2) {
+                comprehensiveGnssQueue.poll()
+            }
+            while (satelliteStatusQueue.size > MAX_SATELLITE_STATUS_QUEUE / 2) {
+                satelliteStatusQueue.poll()
+            }
+        }
+
+        // 가비지 컬렉션 강제 실행
+        System.gc()
+
+        Log.d(TAG, "✅ 응급 정리 완료")
+    }
+
+    // ========== ✅ 개선된 배치 처리 시스템 ==========
 
     private fun startBatchProcessor() {
         ioScope.launch {
@@ -532,8 +608,8 @@ class LoggerManager private constructor(
 
                 framesToProcess.clear()
 
-                // ✅ 완전한 GNSS 데이터 저장
-                saveCompleteGnssData()
+                // ✅ 비동기 배치 처리 최적화
+                saveCompleteGnssDataOptimized()
 
                 lastBatchTime.set(System.currentTimeMillis())
                 Log.d(TAG, "$reason 완료: ${encodedFrames}프레임, 메모리 정리 완료")
@@ -545,33 +621,35 @@ class LoggerManager private constructor(
         }
     }
 
-    // ========== ✅ 완전한 GNSS 데이터 저장 시스템 ==========
+    // ========== ✅ 비동기 배치 처리 최적화 ==========
 
     /**
-     * ✅ 모든 GNSS 데이터를 병렬로 저장
+     * ✅ 모든 GNSS 데이터를 병렬로 저장 - 최적화된 버전
      */
-    private suspend fun saveCompleteGnssData() = withContext(Dispatchers.IO) {
+    private suspend fun saveCompleteGnssDataOptimized() = withContext(Dispatchers.IO) {
         try {
             val commonDir = getCurrentDataDirectory(context)
 
-            Log.d(TAG, "=== 완전한 GNSS 데이터 저장 시작 ===")
+            Log.d(TAG, "=== 최적화된 완전한 GNSS 데이터 저장 시작 ===")
             Log.d(TAG, "📁 저장 위치: ${commonDir.absolutePath}")
 
-            // ✅ 모든 GNSS 데이터 병렬 저장
-            listOf(
+            // ✅ 병렬 처리로 I/O 대기 시간 최소화
+            val jobs = listOf(
+                async { processComprehensiveGnssQueue(commonDir) },
+                async { processSatelliteStatusQueue(commonDir) },
+                async { processNavigationMessageQueue(commonDir) },
+                async { processAntennaInfoQueue(commonDir) },
+                async { processGnssClockQueue(commonDir) },
+                async { processGnssSessionQueue(commonDir) },
                 async { saveIndependentGpsData(commonDir) },
                 async { saveIndependentImuData(commonDir) },
                 async { saveIndependentGnssData(commonDir) },
-                async { saveComprehensiveGnssData(commonDir) },
-                async { saveSatelliteStatusData(commonDir) },
-                async { saveNavigationMessageData(commonDir) },
-                async { saveAntennaInfoData(commonDir) },
-                async { saveGnssClockData(commonDir) },
-                async { saveGnssSessionData(commonDir) },
                 async { saveSynchronizedGpsData(commonDir) }
-            ).awaitAll()
+            )
 
-            Log.d(TAG, "=== 완전한 GNSS 데이터 저장 완료 ===")
+            jobs.awaitAll()
+
+            Log.d(TAG, "=== 최적화된 완전한 GNSS 데이터 저장 완료 ===")
 
         } catch (e: Exception) {
             Log.e(TAG, "완전한 GNSS 데이터 저장 실패: ${e.message}", e)
@@ -579,9 +657,9 @@ class LoggerManager private constructor(
     }
 
     /**
-     * ✅ 완전한 GNSS 측정 데이터 저장
+     * ✅ 개별 큐 처리 메서드들
      */
-    private suspend fun saveComprehensiveGnssData(dir: File) = withContext(Dispatchers.IO) {
+    private suspend fun processComprehensiveGnssQueue(dir: File) = withContext(Dispatchers.IO) {
         val file = File(dir, "comprehensive_gnss.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentComprehensiveGnssEntry>()
@@ -613,10 +691,7 @@ class LoggerManager private constructor(
         }
     }
 
-    /**
-     * ✅ 위성 상태 데이터 저장
-     */
-    private suspend fun saveSatelliteStatusData(dir: File) = withContext(Dispatchers.IO) {
+    private suspend fun processSatelliteStatusQueue(dir: File) = withContext(Dispatchers.IO) {
         val file = File(dir, "satellite_status.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentSatelliteStatusEntry>()
@@ -648,10 +723,7 @@ class LoggerManager private constructor(
         }
     }
 
-    /**
-     * ✅ 내비게이션 메시지 데이터 저장
-     */
-    private suspend fun saveNavigationMessageData(dir: File) = withContext(Dispatchers.IO) {
+    private suspend fun processNavigationMessageQueue(dir: File) = withContext(Dispatchers.IO) {
         val file = File(dir, "navigation_messages.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentNavigationEntry>()
@@ -683,10 +755,7 @@ class LoggerManager private constructor(
         }
     }
 
-    /**
-     * ✅ 안테나 정보 데이터 저장
-     */
-    private suspend fun saveAntennaInfoData(dir: File) = withContext(Dispatchers.IO) {
+    private suspend fun processAntennaInfoQueue(dir: File) = withContext(Dispatchers.IO) {
         val file = File(dir, "antenna_info.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentAntennaEntry>()
@@ -718,10 +787,7 @@ class LoggerManager private constructor(
         }
     }
 
-    /**
-     * ✅ GNSS 클럭 데이터 저장
-     */
-    private suspend fun saveGnssClockData(dir: File) = withContext(Dispatchers.IO) {
+    private suspend fun processGnssClockQueue(dir: File) = withContext(Dispatchers.IO) {
         val file = File(dir, "gnss_clock.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentGnssClockEntry>()
@@ -753,10 +819,7 @@ class LoggerManager private constructor(
         }
     }
 
-    /**
-     * ✅ GNSS 세션 데이터 저장
-     */
-    private suspend fun saveGnssSessionData(dir: File) = withContext(Dispatchers.IO) {
+    private suspend fun processGnssSessionQueue(dir: File) = withContext(Dispatchers.IO) {
         val file = File(dir, "gnss_sessions.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentGnssSessionEntry>()
@@ -1219,7 +1282,8 @@ class LoggerManager private constructor(
         val gnssClockQueueSize: Int,
         val gnssSessionQueueSize: Int,
         val totalDataPoints: Int,
-        val gpsStatus: Boolean
+        val gpsStatus: Boolean,
+        val memoryPressure: Float
     )
 
     fun getIndependentQueueStatus(): IndependentQueueStatusInfo {
@@ -1240,7 +1304,8 @@ class LoggerManager private constructor(
                     independentCameraQueue.size + comprehensiveGnssQueue.size +
                     satelliteStatusQueue.size + navigationMessageQueue.size +
                     antennaInfoQueue.size + gnssClockQueue.size + gnssSessionQueue.size,
-            gpsStatus = currentGpsStatus
+            gpsStatus = currentGpsStatus,
+            memoryPressure = memoryMonitor.getMemoryPressure()
         )
     }
 
@@ -1280,14 +1345,14 @@ class LoggerManager private constructor(
             append("클럭: ${queueStatus.gnssClockQueueSize}/${MAX_GNSS_CLOCK_QUEUE}\n")
             append("세션: ${queueStatus.gnssSessionQueueSize}/${MAX_GNSS_SESSION_QUEUE}\n")
 
-            append("총 데이터 포인트: ${queueStatus.totalDataPoints}")
+            append("총 데이터 포인트: ${queueStatus.totalDataPoints}\n")
+            append("메모리 사용률: ${(queueStatus.memoryPressure * 100).toInt()}%")
         }
     }
 
     fun getVideoOutputDirectory(): File {
         return getCurrentDataDirectory(context)
     }
-
     // ========== 유틸리티 메서드들 ==========
 
     private inline fun shouldSave() = isLogSavingEnabled
