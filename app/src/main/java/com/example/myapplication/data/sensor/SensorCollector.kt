@@ -529,7 +529,7 @@ class SensorCollector(private val context: Context) {
                                 else -> null
                             }
                             bitmap?.let { bmp ->
-                                val rotatedBitmap = rotateBitmap(bmp, getRotationDegrees(cameraId))
+                                val rotatedBitmap = safeRotateBitmap(bmp, getRotationDegrees(cameraId))
                                 val frameId = System.currentTimeMillis()
                                 val systemTime = System.currentTimeMillis()
                                 val monoTime = System.nanoTime()
@@ -616,6 +616,7 @@ class SensorCollector(private val context: Context) {
             Log.d(TAG, "Streaming already in progress")
             return
         }
+
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         try {
             if (context.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -638,80 +639,127 @@ class SensorCollector(private val context: Context) {
             ).apply {
                 setOnImageAvailableListener({ reader ->
                     reader.acquireLatestImage()?.use { image ->
-
-                        val rawBitmap: Bitmap? = when (cameraConfig.imageFormat) {
-                            ImageFormat.JPEG -> {
-                                val buffer = image.planes[0].buffer
-                                val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
-                                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                            }
-                            ImageFormat.YUV_420_888 -> yuvToBitmap(image)
-                            else -> null
-                        }
-
-                        rawBitmap?.let { bmp ->
-                            val scaledBitmap = if (bmp.width != 840 || bmp.height != 840) {
-                                Bitmap.createScaledBitmap(bmp, 840, 840, true)
-                            } else {
-                                bmp
+                        try {
+                            // ✅ 1단계: 원본 비트맵 생성
+                            val originalBitmap: Bitmap? = when (cameraConfig.imageFormat) {
+                                ImageFormat.JPEG -> {
+                                    val buffer = image.planes[0].buffer
+                                    val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
+                                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                }
+                                ImageFormat.YUV_420_888 -> yuvToBitmap(image)
+                                else -> null
                             }
 
-                            lastCapturedBitmap = scaledBitmap
+                            originalBitmap?.let { original ->
+                                var currentBitmap = original
 
-                            val rotatedBitmap = rotateBitmap(scaledBitmap, getRotationDegrees(cameraId))
+                                try {
+                                    // ✅ 2단계: 스케일링 (필요한 경우만)
+                                    if (currentBitmap.width != 840 || currentBitmap.height != 840) {
+                                        val scaledBitmap = Bitmap.createScaledBitmap(currentBitmap, 840, 840, true)
+                                        if (scaledBitmap != currentBitmap) {
+                                            currentBitmap.recycle() // 원본 해제
+                                        }
+                                        currentBitmap = scaledBitmap
+                                    }
 
-                            val frameId = System.currentTimeMillis()
-                            val systemTime = System.currentTimeMillis()
-                            val monoTime = System.nanoTime()
-                            val sensorData = SensorData(
-                                value = "Streaming: ${image.timestamp}",
-                                bitmap = rotatedBitmap, // ✅ 회전된 비트맵 사용
-                                timestamp = systemTime,
-                                monoTimestamp = monoTime,
-                                frameId = frameId
-                            )
+                                    // ✅ 3단계: 회전 처리 (안전하게)
+                                    val rotationDegrees = getRotationDegrees(cameraId)
+                                    if (rotationDegrees != 0) {
+                                        val rotatedBitmap = safeRotateBitmap(currentBitmap, rotationDegrees)
+                                        if (rotatedBitmap != null && rotatedBitmap != currentBitmap) {
+                                            currentBitmap.recycle() // 이전 비트맵 해제
+                                            currentBitmap = rotatedBitmap
+                                        }
+                                    }
 
-                            // ✅ 핵심: 로그매니저 먼저, 콜백 나중에
-                            if (::dataSynchronizer.isInitialized) {
-                                LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
-                            }
+                                    val frameId = System.currentTimeMillis()
+                                    val systemTime = System.currentTimeMillis()
+                                    val monoTime = System.nanoTime()
 
-                            frameCount++
+                                    // ✅ 4단계: 최종 UI/LoggerManager용 비트맵 생성
+                                    val finalBitmap = if (!currentBitmap.isRecycled) {
+                                        currentBitmap.copy(currentBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                                    } else {
+                                        null
+                                    }
 
-                            // ✅ 매 프레임마다 콜백 호출 (frameSkipInterval 무시하고 UI 업데이트)
-                            coroutineScope.launch(Dispatchers.Main) {
-                                callback(sensorData) // ✅ UI 콜백 항상 호출
-                                Log.d(TAG, "✅ UI callback called with frameId: $frameId, bitmap: ${sensorData.bitmap != null}")
-                            }
+                                    if (finalBitmap != null) {
+                                        val sensorData = SensorData(
+                                            value = "Streaming: ${image.timestamp}",
+                                            bitmap = finalBitmap,
+                                            timestamp = systemTime,
+                                            monoTimestamp = monoTime,
+                                            frameId = frameId
+                                        )
 
-                            // ✅ Detection은 별도로 frameSkipInterval 적용
-                            if (frameCount % frameSkipInterval == 0) {
-                                ensureDetectorExecutor()
-                                rotatedBitmap?.let { bitmap ->
-                                    if (detectorInitialized && !isDetecting) {
-                                        isDetecting = true
-                                        detectorExecutor.submit {
-                                            try {
-                                                detector?.detect(bitmap, frameId)
-                                            } catch (e: Exception) {
-                                                Log.e(TAG, "Error in Detector.detect: ${e.message}", e)
-                                            } finally {
-                                                isDetecting = false
+                                        // LoggerManager에 전달
+                                        if (::dataSynchronizer.isInitialized) {
+                                            LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+                                        }
+
+                                        frameCount++
+
+                                        // UI 콜백 (메인 스레드)
+                                        coroutineScope.launch(Dispatchers.Main) {
+                                            callback(sensorData)
+                                            Log.d(TAG, "✅ UI callback called with frameId: $frameId")
+                                        }
+
+                                        // ✅ 5단계: Detection 처리 (별도 복사본)
+                                        if (frameCount % frameSkipInterval == 0) {
+                                            ensureDetectorExecutor()
+                                            if (detectorInitialized && !isDetecting) {
+                                                isDetecting = true
+                                                detectorExecutor.submit {
+                                                    var detectionBitmap: Bitmap? = null
+                                                    try {
+                                                        // Detection용 별도 복사본 생성
+                                                        detectionBitmap = finalBitmap.copy(finalBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                                                        detector?.detect(detectionBitmap, frameId)
+                                                    } catch (e: Exception) {
+                                                        Log.e(TAG, "Error in Detector.detect: ${e.message}", e)
+                                                    } finally {
+                                                        // Detection 비트맵 해제
+                                                        detectionBitmap?.recycle()
+                                                        isDetecting = false
+                                                    }
+                                                }
                                             }
                                         }
                                     }
+
+                                    // ✅ 6단계: 작업용 비트맵 해제
+                                    currentBitmap.recycle()
+
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Error processing bitmap: ${e.message}", e)
+                                    // 에러 시 모든 비트맵 해제
+                                    if (!currentBitmap.isRecycled) {
+                                        currentBitmap.recycle()
+                                    }
+                                    coroutineScope.launch(Dispatchers.Main) {
+                                        callback(null)
+                                    }
+                                }
+                            } ?: run {
+                                Log.e(TAG, "❌ Failed to create bitmap from camera frame")
+                                coroutineScope.launch(Dispatchers.Main) {
+                                    callback(null)
                                 }
                             }
-                        } ?: run {
-                            Log.e(TAG, "❌ Failed to create bitmap from camera frame")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error processing camera frame: ${e.message}", e)
                             coroutineScope.launch(Dispatchers.Main) {
                                 callback(null)
                             }
                         }
                     }
-                }, null) // ✅ 백그라운드 스레드에서 처리
+                }, null)
             }
 
+            // 나머지 카메라 설정 코드는 동일...
             if (!cameraOpenCloseLock.tryAcquire(2, TimeUnit.SECONDS)) {
                 callback(null)
                 return
@@ -1073,14 +1121,34 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    private fun rotateBitmap(bitmap: Bitmap?, degrees: Int): Bitmap? {
+    private fun safeRotateBitmap(bitmap: Bitmap?, degrees: Int): Bitmap? {
         if (bitmap == null || degrees == 0) return bitmap
+        if (bitmap.isRecycled) {
+            Log.w(TAG, "Cannot rotate recycled bitmap")
+            return null
+        }
+
         val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
         return try {
+            // ✅ 메모리 체크
+            val runtime = Runtime.getRuntime()
+            val availableMemory = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+            val requiredMemory = bitmap.width * bitmap.height * 4L // ARGB_8888 기준
+
+            if (availableMemory < requiredMemory * 2) { // 안전 마진 2배
+                Log.w(TAG, "Insufficient memory for bitmap rotation, skipping")
+                return bitmap // 회전하지 않고 원본 반환
+            }
+
             Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
         } catch (e: OutOfMemoryError) {
             Log.e(TAG, "OutOfMemoryError rotating bitmap", e)
-            null
+            // 메모리 부족 시 원본 반환 (해제하지 않음)
+            System.gc()
+            bitmap
+        } catch (e: Exception) {
+            Log.e(TAG, "Error rotating bitmap: ${e.message}", e)
+            bitmap // 에러 시 원본 반환
         }
     }
 

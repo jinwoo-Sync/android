@@ -10,12 +10,16 @@ import androidx.lifecycle.viewModelScope
 import com.example.myapplication.data.repository.HomeRepository
 import com.example.myapplication.data.sensor.SensorCollector
 import com.example.myapplication.learning.yolo.BoundingBox
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 class HomeViewModel(
     private val sensorCollector: SensorCollector,
     private val homeRepository: HomeRepository
 ) : ViewModel() {
+    // ✅ TAG 추가
+    private val TAG = "HomeViewModel"
+
     private val _cameraFrame = MutableLiveData<Bitmap?>()
     val cameraFrame: LiveData<Bitmap?> = _cameraFrame
 
@@ -126,23 +130,29 @@ class HomeViewModel(
                 }
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
-                // ✅ 메인 스레드에서 즉시 UI 업데이트
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    Log.d("HomeViewModel", "🎯 ViewModel Detection 콜백: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
+                Log.d(TAG, "🎯🎯🎯 ViewModel Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
 
-                    // ✅ 바로 UI 업데이트
-                    _boundingBoxes.postValue(boundingBoxes)
-                    _inferenceTime.postValue("${inferenceTime}ms")
-
-                    // ✅ 추가 로깅
-                    if (boundingBoxes.isNotEmpty()) {
-                        Log.d("HomeViewModel", "🎯 ViewModel에서 처리할 객체들: ${boundingBoxes.map { "${it.clsName}(conf=${it.cnf})" }}")
-                    } else {
-                        Log.d("HomeViewModel", "🎯 ViewModel: 감지된 객체 없음")
+                if (boundingBoxes.isNotEmpty()) {
+                    Log.d(TAG, "🎯 ViewModel에서 처리할 객체들: ${boundingBoxes.map { "${it.clsName}(conf=${it.cnf})" }}")
+                    boundingBoxes.forEachIndexed { index, bbox ->
+                        Log.d(TAG, "🎯 BBOX $index: ${bbox.clsName} at (${bbox.x1}, ${bbox.y1}) - (${bbox.x2}, ${bbox.y2})")
                     }
-
-                    onNewInference(inferenceTime)
+                } else {
+                    Log.d(TAG, "🎯 ViewModel: 감지된 객체 없음")
                 }
+
+                // ✅ 즉시 메인 스레드에서 UI 업데이트
+                viewModelScope.launch(Dispatchers.Main.immediate) {
+                    try {
+                        _boundingBoxes.value = boundingBoxes  // postValue 대신 value 사용
+                        _inferenceTime.value = "${inferenceTime}ms"
+                        Log.d(TAG, "🎯 UI 업데이트 완료: ${boundingBoxes.size}개 바운딩박스")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "🎯 UI 업데이트 실패: ${e.message}", e)
+                    }
+                }
+
+                onNewInference(inferenceTime)
             }
         )
         Log.d("HomeViewModel", "✅ 센서 스트리밍 시작 완료")
@@ -180,12 +190,41 @@ class HomeViewModel(
      */
     private fun startCameraStreaming() {
         if (_isStreaming.value == true) {
-            Log.d("HomeViewModel", "Camera streaming already active")
+            Log.d(TAG, "Camera streaming already active")
             return
         }
 
-        Log.d("HomeViewModel", "📹 카메라 스트리밍 시작")
+        Log.d(TAG, "📹 카메라 스트리밍 시작")
         _text.value = "카메라 스트리밍 중..."
+
+        // ✅ 핵심 수정: Detection 콜백을 Repository에 설정
+        homeRepository.detectionCallback = { boundingBoxes, inferenceTime, frameId ->
+            Log.d(TAG, "🎯🎯🎯 ViewModel Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
+
+            if (boundingBoxes.isNotEmpty()) {
+                Log.d(TAG, "🎯 ViewModel에서 처리할 객체들: ${boundingBoxes.map { "${it.clsName}(conf=${it.cnf})" }}")
+                boundingBoxes.forEachIndexed { index, bbox ->
+                    Log.d(TAG, "🎯 UI BBOX $index: ${bbox.clsName} at (${bbox.x1}, ${bbox.y1}) - (${bbox.x2}, ${bbox.y2})")
+                }
+            } else {
+                Log.d(TAG, "🎯 ViewModel: 감지된 객체 없음")
+            }
+
+            // ✅ 메인 스레드에서 즉시 UI 업데이트
+            viewModelScope.launch(Dispatchers.Main.immediate) {
+                try {
+                    _boundingBoxes.value = boundingBoxes
+                    _inferenceTime.value = "${inferenceTime}ms"
+                    Log.d(TAG, "🎯 UI 업데이트 완료: ${boundingBoxes.size}개 바운딩박스, ${inferenceTime}ms")
+                } catch (e: Exception) {
+                    Log.e(TAG, "🎯 UI 업데이트 실패: ${e.message}", e)
+                }
+            }
+
+            onNewInference(inferenceTime)
+        }
+
+        // ✅ 카메라 스트리밍 시작
         homeRepository.startCameraStreaming()
 
         // ✅ 이전 Job 취소
@@ -193,19 +232,19 @@ class HomeViewModel(
 
         // ✅ 새로운 Flow 구독
         isCameraStreamingJob = viewModelScope.launch {
-            Log.d("HomeViewModel", "✅ Camera Flow 구독 시작...")
+            Log.d(TAG, "✅ Camera Flow 구독 시작...")
             try {
                 homeRepository.cameraStreamFlow.collect { sensorData ->
                     if (sensorData != null) {
                         // ✅ 카메라 프레임 즉시 업데이트
                         _cameraFrame.postValue(sensorData.bitmap)
-                        Log.d("HomeViewModel", "✅ Camera frame received: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
+                        Log.d(TAG, "✅ Camera frame received: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
                     } else {
-                        Log.w("HomeViewModel", "⚠️ Received null sensor data from camera flow")
+                        Log.w(TAG, "⚠️ Received null sensor data from camera flow")
                     }
                 }
             } catch (e: Exception) {
-                Log.e("HomeViewModel", "❌ Camera Flow 구독 오류: ${e.message}", e)
+                Log.e(TAG, "❌ Camera Flow 구독 오류: ${e.message}", e)
                 _text.postValue("카메라 스트리밍 오류: ${e.message}")
             }
         }

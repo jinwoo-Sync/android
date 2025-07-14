@@ -111,12 +111,26 @@ class HomeFragment : Fragment() {
 
         // ✅ 카메라 프레임 관찰
         viewModel.cameraFrame.observe(viewLifecycleOwner) { bitmap ->
-            if (bitmap != null) {
-                binding.imageView.setImageBitmap(bitmap)
-                Log.d("HomeFragment", "✅✅✅ Camera frame SUCCESSFULLY updated in UI! Size: ${bitmap.width}x${bitmap.height}")
-            } else {
+            try {
+                // ✅ 이전 비트맵 정리
+                val currentDrawable = binding.imageView.drawable
+                if (currentDrawable is android.graphics.drawable.BitmapDrawable) {
+                    val currentBitmap = currentDrawable.bitmap
+                    if (currentBitmap != null && !currentBitmap.isRecycled && currentBitmap != bitmap) {
+                        currentBitmap.recycle()
+                    }
+                }
+
+                if (bitmap != null && !bitmap.isRecycled) {
+                    binding.imageView.setImageBitmap(bitmap)
+                    Log.d("HomeFragment", "✅✅✅ Camera frame SUCCESSFULLY updated in UI! Size: ${bitmap.width}x${bitmap.height}")
+                } else {
+                    binding.imageView.setImageBitmap(null)
+                    Log.d("HomeFragment", "⚠️ Camera frame cleared (null or recycled bitmap)")
+                }
+            } catch (e: Exception) {
+                Log.e("HomeFragment", "UI 비트맵 업데이트 오류: ${e.message}", e)
                 binding.imageView.setImageBitmap(null)
-                Log.d("HomeFragment", "⚠️ Camera frame cleared (null bitmap)")
             }
         }
 

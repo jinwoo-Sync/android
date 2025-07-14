@@ -23,6 +23,9 @@ class HomeRepository(
 
     private var isStreamingActive = false
 
+    // ✅ Detection 콜백 변수 추가
+    var detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
+
     suspend fun getDefaultSensorData(): List<SensorData> {
         val dataList = mutableListOf<SensorData>()
         repeat(5) {
@@ -66,15 +69,17 @@ class HomeRepository(
                     Log.d(TAG, "✅ New camera frame pushed to flow: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
                 } else {
                     Log.w(TAG, "⚠️ Received null camera frame, but keeping flow active")
-                    // ✅ null이어도 Flow를 유지 (연결 끊김 방지)
                 }
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
-                Log.d(TAG, "🎯 Repository Detection 콜백: frameId=$frameId, boxes=${boundingBoxes.size}, time=${inferenceTime}ms")
-                // ✅ 추가 처리가 필요하면 여기서
+                Log.d(TAG, "🎯 Repository Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, time=${inferenceTime}ms")
+
                 if (boundingBoxes.isNotEmpty()) {
                     Log.d(TAG, "🎯 Repository에서 받은 객체들: ${boundingBoxes.map { "${it.clsName}(${it.cnf})" }}")
                 }
+
+                // ✅ ViewModel로 즉시 전달
+                detectionCallback?.invoke(boundingBoxes, inferenceTime, frameId)
             }
         )
     }
@@ -103,24 +108,26 @@ class HomeRepository(
         gnssCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
         detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
     ) {
+        Log.d(TAG, "🎯 Repository startSensorStreaming - detectionCallback: ${detectionCallback != null}")
+
         sensorCollector.startSensorStreaming(
             gpsCallback = gpsCallback,
             imuCallback = imuCallback,
             gnssCallback = gnssCallback,
-            // ✅ Detection 콜백을 그대로 전달하면서 추가 로깅
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
-                Log.d(TAG, "🎯 Repository Detection 전달: frameId=$frameId, boxes=${boundingBoxes.size}, time=${inferenceTime}ms")
+                Log.d(TAG, "🎯 Repository Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, time=${inferenceTime}ms")
 
-                // ✅ Repository 로깅 유지
                 if (boundingBoxes.isNotEmpty()) {
                     Log.d(TAG, "🎯 Repository에서 받은 객체들: ${boundingBoxes.map { "${it.clsName}(${it.cnf})" }}")
                 }
 
                 // ✅ ViewModel로 콜백 전달
+                Log.d(TAG, "🎯 ViewModel로 콜백 전달 시작 - detectionCallback: ${detectionCallback != null}")
                 detectionCallback?.invoke(boundingBoxes, inferenceTime, frameId)
+                Log.d(TAG, "🎯 ViewModel로 콜백 전달 완료")
             }
         )
-        Log.d(TAG, "센서 스트리밍 시작")
+        Log.d(TAG, "✅ 모든 센서 스트리밍 시작 완료")
     }
 
     /**
