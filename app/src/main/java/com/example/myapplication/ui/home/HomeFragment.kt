@@ -5,6 +5,8 @@ import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
 import android.location.LocationManager
 import android.os.Bundle
 import android.util.Log
@@ -22,6 +24,7 @@ import kotlinx.coroutines.launch
 import android.net.Uri
 import android.provider.Settings
 import android.widget.TextView
+import java.lang.ref.WeakReference
 
 class HomeFragment : Fragment() {
     private var _binding: FragmentHomeBinding? = null
@@ -32,6 +35,10 @@ class HomeFragment : Fragment() {
             (requireActivity() as MainActivity).homeRepository
         )
     }
+
+    // ✅ 비트맵 메모리 관리를 위한 약한 참조
+    private var currentBitmapRef: WeakReference<Bitmap>? = null
+    private val bitmapLock = Object()
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -60,6 +67,53 @@ class HomeFragment : Fragment() {
         }
 
         return root
+    }
+
+    /**
+     * ✅ 안전한 비트맵 설정 메서드
+     */
+    private fun safeSetImageBitmap(newBitmap: Bitmap?) {
+        synchronized(bitmapLock) {
+            try {
+                // ✅ 이전 비트맵 안전하게 해제
+                val currentDrawable = binding.imageView.drawable
+                if (currentDrawable is BitmapDrawable) {
+                    val oldBitmap = currentDrawable.bitmap
+                    val currentBitmap = currentBitmapRef?.get()
+
+                    // 이전 비트맵이 새 비트맵과 다르고 재활용되지 않았으면 재활용
+                    if (oldBitmap != null && oldBitmap != newBitmap &&
+                        !oldBitmap.isRecycled && oldBitmap == currentBitmap) {
+                        try {
+                            oldBitmap.recycle()
+                            Log.d("HomeFragment", "✅ 이전 비트맵 재활용 완료")
+                        } catch (e: Exception) {
+                            Log.w("HomeFragment", "이전 비트맵 재활용 실패: ${e.message}")
+                        }
+                    }
+                }
+
+                // ✅ 새 비트맵 설정
+                if (newBitmap != null && !newBitmap.isRecycled) {
+                    binding.imageView.setImageBitmap(newBitmap)
+                    currentBitmapRef = WeakReference(newBitmap)
+                    Log.d("HomeFragment", "✅ 새 비트맵 설정 완료: ${newBitmap.width}x${newBitmap.height}")
+                } else {
+                    binding.imageView.setImageBitmap(null)
+                    currentBitmapRef = null
+                    Log.d("HomeFragment", "⚠️ 비트맵 클리어 (null 또는 재활용됨)")
+                }
+            } catch (e: Exception) {
+                Log.e("HomeFragment", "비트맵 설정 중 오류: ${e.message}", e)
+                // 오류 발생 시 안전하게 null 설정
+                try {
+                    binding.imageView.setImageBitmap(null)
+                    currentBitmapRef = null
+                } catch (ex: Exception) {
+                    Log.e("HomeFragment", "비트맵 null 설정도 실패: ${ex.message}")
+                }
+            }
+        }
     }
 
     /**
@@ -99,7 +153,7 @@ class HomeFragment : Fragment() {
     }
 
     /**
- * ✅ UI 관찰자 설정 - 센서와 카메라 분리
+     * ✅ UI 관찰자 설정 - 센서와 카메라 분리
      */
     private fun setupObservers() {
         // 상태 메시지 관찰
@@ -109,47 +163,45 @@ class HomeFragment : Fragment() {
             Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show()
         }
 
-        // ✅ 카메라 프레임 관찰
+        // ✅ 카메라 프레임 관찰 - 안전한 비트맵 처리
         viewModel.cameraFrame.observe(viewLifecycleOwner) { bitmap ->
             try {
-                // ✅ 이전 비트맵 정리
-                val currentDrawable = binding.imageView.drawable
-                if (currentDrawable is android.graphics.drawable.BitmapDrawable) {
-                    val currentBitmap = currentDrawable.bitmap
-                    if (currentBitmap != null && !currentBitmap.isRecycled && currentBitmap != bitmap) {
-                        currentBitmap.recycle()
-                    }
-                }
+                safeSetImageBitmap(bitmap)
 
                 if (bitmap != null && !bitmap.isRecycled) {
-                    binding.imageView.setImageBitmap(bitmap)
                     Log.d("HomeFragment", "✅✅✅ Camera frame SUCCESSFULLY updated in UI! Size: ${bitmap.width}x${bitmap.height}")
                 } else {
-                    binding.imageView.setImageBitmap(null)
                     Log.d("HomeFragment", "⚠️ Camera frame cleared (null or recycled bitmap)")
                 }
             } catch (e: Exception) {
-                Log.e("HomeFragment", "UI 비트맵 업데이트 오류: ${e.message}", e)
-                binding.imageView.setImageBitmap(null)
+                Log.e("HomeFragment", "Camera frame 처리 오류: ${e.message}", e)
+                // 오류 발생 시 안전하게 처리
+                safeSetImageBitmap(null)
             }
         }
 
-    // ✅ 바운딩 박스 관찰 - 강화된 로깅
+        // ✅ 바운딩 박스 관찰 - 강화된 로깅
         viewModel.boundingBoxes.observe(viewLifecycleOwner) { boundingBoxes ->
-            Log.d("HomeFragment", "🎯 UI에서 바운딩 박스 수신: ${boundingBoxes.size}개")
+            try {
+                Log.d("HomeFragment", "🎯 UI에서 바운딩 박스 수신: ${boundingBoxes.size}개")
 
-            if (boundingBoxes.isNotEmpty()) {
-                Log.d("HomeFragment", "🎯 UI에서 표시할 객체들: ${boundingBoxes.map { "${it.clsName}(${it.cnf})" }}")
-                boundingBoxes.forEachIndexed { index, bbox ->
-                    Log.d("HomeFragment", "   📦 객체 $index: ${bbox.clsName}, 신뢰도: ${bbox.cnf}, 위치: (${bbox.x1}, ${bbox.y1}) - (${bbox.x2}, ${bbox.y2})")
+                if (boundingBoxes.isNotEmpty()) {
+                    Log.d("HomeFragment", "🎯 UI에서 표시할 객체들: ${boundingBoxes.map { "${it.clsName}(${it.cnf})" }}")
+                    boundingBoxes.forEachIndexed { index, bbox ->
+                        Log.d("HomeFragment", "   📦 객체 $index: ${bbox.clsName}, 신뢰도: ${bbox.cnf}, 위치: (${bbox.x1}, ${bbox.y1}) - (${bbox.x2}, ${bbox.y2})")
+                    }
+                } else {
+                    Log.d("HomeFragment", "🎯 UI: 표시할 객체 없음")
                 }
-            } else {
-                Log.d("HomeFragment", "🎯 UI: 표시할 객체 없음")
-            }
 
-            binding.overlayView.setResults(boundingBoxes)
-            binding.overlayView.invalidate()
-            Log.d("HomeFragment", "🎯 OverlayView 업데이트 완료")
+                binding.overlayView.setResults(boundingBoxes)
+                binding.overlayView.invalidate()
+                Log.d("HomeFragment", "🎯 OverlayView 업데이트 완료")
+            } catch (e: Exception) {
+                Log.e("HomeFragment", "바운딩 박스 처리 오류: ${e.message}", e)
+                // 오류 발생 시 오버레이 클리어
+                binding.overlayView.clear()
+            }
         }
 
         // 추론 시간 관찰
@@ -167,55 +219,56 @@ class HomeFragment : Fragment() {
             }
         }
 
-    // ✅ GPS 데이터 관찰 - 강화된 로깅
+        // ✅ GPS 데이터 관찰 - 강화된 로깅
         viewModel.gpsData.observe(viewLifecycleOwner) { data ->
             binding.gpsLogText.text = data
-        Log.d("HomeFragment", "📍 GPS 데이터 UI 업데이트: $data")
+            Log.d("HomeFragment", "📍 GPS 데이터 UI 업데이트: $data")
         }
 
-    // ✅ GNSS 데이터 관찰 - 강화된 로깅
+        // ✅ GNSS 데이터 관찰 - 강화된 로깅
         viewModel.gnssData.observe(viewLifecycleOwner) { data ->
             if (data == "GNSS: 대기 중") {
                 binding.gnssLogText.text = "GNSS 데이터가 수신되지 않습니다."
             } else {
                 binding.gnssLogText.text = data
             }
-        Log.d("HomeFragment", "🛰️ GNSS 데이터 UI 업데이트: $data")
+            Log.d("HomeFragment", "🛰️ GNSS 데이터 UI 업데이트: $data")
         }
 
-    // ✅ IMU 데이터 관찰 - 강화된 로깅
+        // ✅ IMU 데이터 관찰 - 강화된 로깅
         viewModel.imuData.observe(viewLifecycleOwner) { data ->
             binding.imuLogText.text = data
-        Log.d("HomeFragment", "📊 IMU 데이터 UI 업데이트: $data")
+            Log.d("HomeFragment", "📊 IMU 데이터 UI 업데이트: $data")
         }
 
-    // ✅ 카메라 스트리밍 상태 관찰
+        // ✅ 카메라 스트리밍 상태 관찰
         viewModel.isStreaming.observe(viewLifecycleOwner) { isStreaming ->
             binding.buttonOpenCamera.text = if (isStreaming) "스트리밍 중지" else "스트리밍 시작"
             binding.buttonCaptureFrame.text = if (isStreaming) "현재 프레임 저장" else "프레임 캡처"
 
             if (!isStreaming) {
+                // ✅ 스트리밍 중지 시 안전하게 UI 클리어
                 binding.overlayView.clear()
                 binding.inferenceTime.text = "Inference: 0ms"
-                binding.imageView.setImageBitmap(null)
-            Log.d("HomeFragment", "🔴 Camera streaming stopped - UI cleared")
+                safeSetImageBitmap(null)
+                Log.d("HomeFragment", "🔴 Camera streaming stopped - UI cleared")
             } else {
-            Log.d("HomeFragment", "🟢 Camera streaming started - UI ready for frames")
+                Log.d("HomeFragment", "🟢 Camera streaming started - UI ready for frames")
             }
 
-        Log.d("HomeFragment", "✅ Camera streaming status changed: $isStreaming")
-    }
-
-    // ✅ 센서 스트리밍 상태 관찰 (추가)
-    viewModel.isSensorStreaming.observe(viewLifecycleOwner) { isSensorStreaming ->
-        Log.d("HomeFragment", "🔧 Sensor streaming status: $isSensorStreaming")
-
-        if (!isSensorStreaming) {
-            // 센서 스트리밍이 중지되면 센서 데이터 UI 초기화
-            binding.gpsLogText.text = "GPS: 대기 중"
-            binding.gnssLogText.text = "GNSS: 대기 중"
-            binding.imuLogText.text = "IMU: 대기 중"
+            Log.d("HomeFragment", "✅ Camera streaming status changed: $isStreaming")
         }
+
+        // ✅ 센서 스트리밍 상태 관찰 (추가)
+        viewModel.isSensorStreaming.observe(viewLifecycleOwner) { isSensorStreaming ->
+            Log.d("HomeFragment", "🔧 Sensor streaming status: $isSensorStreaming")
+
+            if (!isSensorStreaming) {
+                // 센서 스트리밍이 중지되면 센서 데이터 UI 초기화
+                binding.gpsLogText.text = "GPS: 대기 중"
+                binding.gnssLogText.text = "GNSS: 대기 중"
+                binding.imuLogText.text = "IMU: 대기 중"
+            }
         }
 
         // 서버 전송 상태 관찰
@@ -328,22 +381,38 @@ class HomeFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-    Log.d("HomeFragment", "📱 Fragment resumed - starting sensor streaming only")
-    // ✅ 센서 스트리밍만 자동 시작 (카메라는 수동 제어)
+        Log.d("HomeFragment", "📱 Fragment resumed - starting sensor streaming only")
+        // ✅ 센서 스트리밍만 자동 시작 (카메라는 수동 제어)
         viewModel.startSensorStreaming()
     }
 
     override fun onPause() {
         super.onPause()
-    Log.d("HomeFragment", "📱 Fragment paused - sensor streaming continues")
-    // ✅ Fragment pause 시 센서 스트리밍은 유지 (백그라운드 동작)
-    // 필요시에만 중지: viewModel.stopSensorStreaming()
+        Log.d("HomeFragment", "📱 Fragment paused - sensor streaming continues")
+        // ✅ Fragment pause 시 센서 스트리밍은 유지 (백그라운드 동작)
+        // 필요시에만 중지: viewModel.stopSensorStreaming()
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
         Log.d("HomeFragment", "📱 Fragment destroying - cleaning up")
-    // ✅ Fragment 완전 종료 시에만 센서 스트리밍 중지
+
+        // ✅ 비트맵 메모리 정리
+        synchronized(bitmapLock) {
+            try {
+                currentBitmapRef?.get()?.let { bitmap ->
+                    if (!bitmap.isRecycled) {
+                        bitmap.recycle()
+                        Log.d("HomeFragment", "✅ Fragment 종료 시 비트맵 재활용 완료")
+                    }
+                }
+                currentBitmapRef = null
+            } catch (e: Exception) {
+                Log.w("HomeFragment", "Fragment 종료 시 비트맵 정리 실패: ${e.message}")
+            }
+        }
+
+        // ✅ Fragment 완전 종료 시에만 센서 스트리밍 중지
         viewModel.stopSensorStreaming()
         _binding = null
     }

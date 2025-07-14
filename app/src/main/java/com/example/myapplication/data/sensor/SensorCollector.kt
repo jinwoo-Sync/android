@@ -639,9 +639,14 @@ class SensorCollector(private val context: Context) {
             ).apply {
                 setOnImageAvailableListener({ reader ->
                     reader.acquireLatestImage()?.use { image ->
+                        var originalBitmap: Bitmap? = null
+                        var currentBitmap: Bitmap? = null
+                        var finalBitmap: Bitmap? = null
+                        var detectionBitmap: Bitmap? = null
+
                         try {
                             // ✅ 1단계: 원본 비트맵 생성
-                            val originalBitmap: Bitmap? = when (cameraConfig.imageFormat) {
+                            originalBitmap = when (cameraConfig.imageFormat) {
                                 ImageFormat.JPEG -> {
                                     val buffer = image.planes[0].buffer
                                     val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
@@ -651,108 +656,141 @@ class SensorCollector(private val context: Context) {
                                 else -> null
                             }
 
-                            originalBitmap?.let { original ->
-                                var currentBitmap = original
+                            if (originalBitmap == null || originalBitmap.isRecycled) {
+                                Log.e(TAG, "❌ Failed to create bitmap from camera frame")
+                                coroutineScope.launch(Dispatchers.Main) { callback(null) }
+                                return@use
+                            }
 
-                                try {
-                                    // ✅ 2단계: 스케일링 (필요한 경우만)
-                                    if (currentBitmap.width != 840 || currentBitmap.height != 840) {
-                                        val scaledBitmap = Bitmap.createScaledBitmap(currentBitmap, 840, 840, true)
-                                        if (scaledBitmap != currentBitmap) {
-                                            currentBitmap.recycle() // 원본 해제
-                                        }
-                                        currentBitmap = scaledBitmap
-                                    }
+                            currentBitmap = originalBitmap
 
-                                    // ✅ 3단계: 회전 처리 (안전하게)
-                                    val rotationDegrees = getRotationDegrees(cameraId)
-                                    if (rotationDegrees != 0) {
-                                        val rotatedBitmap = safeRotateBitmap(currentBitmap, rotationDegrees)
-                                        if (rotatedBitmap != null && rotatedBitmap != currentBitmap) {
-                                            currentBitmap.recycle() // 이전 비트맵 해제
-                                            currentBitmap = rotatedBitmap
-                                        }
-                                    }
+                            // ✅ 2단계: 스케일링 (필요한 경우만)
+                            if (currentBitmap.width != 840 || currentBitmap.height != 840) {
+                                val scaledBitmap = Bitmap.createScaledBitmap(currentBitmap, 840, 840, true)
+                                if (scaledBitmap != currentBitmap && !currentBitmap.isRecycled) {
+                                    currentBitmap.recycle() // 원본 해제
+                                }
+                                currentBitmap = scaledBitmap
+                            }
 
-                                    val frameId = System.currentTimeMillis()
-                                    val systemTime = System.currentTimeMillis()
-                                    val monoTime = System.nanoTime()
+                            // ✅ 3단계: 회전 처리 (안전하게)
+                            val rotationDegrees = getRotationDegrees(cameraId)
+                            if (rotationDegrees != 0) {
+                                val rotatedBitmap = safeRotateBitmap(currentBitmap, rotationDegrees)
+                                if (rotatedBitmap != null && rotatedBitmap != currentBitmap && !currentBitmap.isRecycled) {
+                                    currentBitmap.recycle() // 이전 비트맵 해제
+                                    currentBitmap = rotatedBitmap
+                                }
+                            }
 
-                                    // ✅ 4단계: 최종 UI/LoggerManager용 비트맵 생성
-                                    val finalBitmap = if (!currentBitmap.isRecycled) {
-                                        currentBitmap.copy(currentBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                            val frameId = System.currentTimeMillis()
+                            val systemTime = System.currentTimeMillis()
+                            val monoTime = System.nanoTime()
+
+                            // ✅ 4단계: UI용 복사본 생성 (메모리 안전)
+                            if (currentBitmap != null && !currentBitmap.isRecycled) {
+                                finalBitmap = try {
+                                    // ✅ 메모리 체크
+                                    val runtime = Runtime.getRuntime()
+                                    val availableMemory = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+                                    val requiredMemory = currentBitmap.width * currentBitmap.height * 4L
+
+                                    if (availableMemory < requiredMemory * 3) { // 안전 마진 3배
+                                        Log.w(TAG, "Insufficient memory for bitmap copy, using original")
+                                        currentBitmap // 복사 대신 원본 사용
                                     } else {
-                                        null
+                                        currentBitmap.copy(currentBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                                    }
+                                } catch (e: OutOfMemoryError) {
+                                    Log.e(TAG, "OutOfMemoryError creating bitmap copy", e)
+                                    System.gc()
+                                    currentBitmap // 복사 실패 시 원본 사용
+                                }
+
+                                if (finalBitmap != null) {
+                                    val sensorData = SensorData(
+                                        value = "Streaming: ${image.timestamp}",
+                                        bitmap = finalBitmap,
+                                        timestamp = systemTime,
+                                        monoTimestamp = monoTime,
+                                        frameId = frameId
+                                    )
+
+                                    // LoggerManager에 전달
+                                    if (::dataSynchronizer.isInitialized) {
+                                        LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
                                     }
 
-                                    if (finalBitmap != null) {
-                                        val sensorData = SensorData(
-                                            value = "Streaming: ${image.timestamp}",
-                                            bitmap = finalBitmap,
-                                            timestamp = systemTime,
-                                            monoTimestamp = monoTime,
-                                            frameId = frameId
-                                        )
+                                    frameCount++
 
-                                        // LoggerManager에 전달
-                                        if (::dataSynchronizer.isInitialized) {
-                                            LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
-                                        }
+                                    // UI 콜백 (메인 스레드)
+                                    coroutineScope.launch(Dispatchers.Main) {
+                                        callback(sensorData)
+                                        Log.d(TAG, "✅ UI callback called with frameId: $frameId")
+                                    }
 
-                                        frameCount++
+                                    // ✅ 5단계: Detection 처리 (별도 복사본)
+                                    if (frameCount % frameSkipInterval == 0) {
+                                        ensureDetectorExecutor()
+                                        if (detectorInitialized && !isDetecting) {
+                                            isDetecting = true
+                                            detectorExecutor.submit {
+                                                try {
+                                                    // ✅ Detection용 별도 복사본 생성 (메모리 안전)
+                                                    detectionBitmap = try {
+                                                        val runtime = Runtime.getRuntime()
+                                                        val availableMemory = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+                                                        val requiredMemory = finalBitmap.width * finalBitmap.height * 4L
 
-                                        // UI 콜백 (메인 스레드)
-                                        coroutineScope.launch(Dispatchers.Main) {
-                                            callback(sensorData)
-                                            Log.d(TAG, "✅ UI callback called with frameId: $frameId")
-                                        }
-
-                                        // ✅ 5단계: Detection 처리 (별도 복사본)
-                                        if (frameCount % frameSkipInterval == 0) {
-                                            ensureDetectorExecutor()
-                                            if (detectorInitialized && !isDetecting) {
-                                                isDetecting = true
-                                                detectorExecutor.submit {
-                                                    var detectionBitmap: Bitmap? = null
-                                                    try {
-                                                        // Detection용 별도 복사본 생성
-                                                        detectionBitmap = finalBitmap.copy(finalBitmap.config ?: Bitmap.Config.ARGB_8888, false)
-                                                        detector?.detect(detectionBitmap, frameId)
-                                                    } catch (e: Exception) {
-                                                        Log.e(TAG, "Error in Detector.detect: ${e.message}", e)
-                                                    } finally {
-                                                        // Detection 비트맵 해제
-                                                        detectionBitmap?.recycle()
-                                                        isDetecting = false
+                                                        if (availableMemory < requiredMemory * 2) {
+                                                            Log.w(TAG, "Insufficient memory for detection bitmap, skipping")
+                                                            null
+                                                        } else {
+                                                            finalBitmap.copy(finalBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                                                        }
+                                                    } catch (e: OutOfMemoryError) {
+                                                        Log.e(TAG, "OutOfMemoryError creating detection bitmap", e)
+                                                        System.gc()
+                                                        null
                                                     }
+
+                                                    if (detectionBitmap != null && !detectionBitmap!!.isRecycled) {
+                                                        detector?.detect(detectionBitmap!!, frameId)
+                                                    }
+                                                } catch (e: Exception) {
+                                                    Log.e(TAG, "Error in Detector.detect: ${e.message}", e)
+                                                } finally {
+                                                    // ✅ Detection 비트맵 안전하게 해제
+                                                    try {
+                                                        detectionBitmap?.let { bitmap ->
+                                                            if (!bitmap.isRecycled) {
+                                                                bitmap.recycle()
+                                                            }
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        Log.w(TAG, "Error recycling detection bitmap: ${e.message}")
+                                                    }
+                                                    detectionBitmap = null
+                                                    isDetecting = false
                                                 }
                                             }
                                         }
                                     }
-
-                                    // ✅ 6단계: 작업용 비트맵 해제
-                                    currentBitmap.recycle()
-
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Error processing bitmap: ${e.message}", e)
-                                    // 에러 시 모든 비트맵 해제
-                                    if (!currentBitmap.isRecycled) {
-                                        currentBitmap.recycle()
-                                    }
-                                    coroutineScope.launch(Dispatchers.Main) {
-                                        callback(null)
-                                    }
-                                }
-                            } ?: run {
-                                Log.e(TAG, "❌ Failed to create bitmap from camera frame")
-                                coroutineScope.launch(Dispatchers.Main) {
-                                    callback(null)
                                 }
                             }
+
                         } catch (e: Exception) {
-                            Log.e(TAG, "Error processing camera frame: ${e.message}", e)
-                            coroutineScope.launch(Dispatchers.Main) {
-                                callback(null)
+                            Log.e(TAG, "Error processing bitmap: ${e.message}", e)
+                            coroutineScope.launch(Dispatchers.Main) { callback(null) }
+                        } finally {
+                            // ✅ 6단계: 작업용 비트맵들 안전하게 해제
+                            try {
+                                // currentBitmap과 finalBitmap이 같은 경우 중복 해제 방지
+                                if (currentBitmap != null && currentBitmap != finalBitmap && !currentBitmap.isRecycled) {
+                                    currentBitmap.recycle()
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Error recycling current bitmap: ${e.message}")
                             }
                         }
                     }
