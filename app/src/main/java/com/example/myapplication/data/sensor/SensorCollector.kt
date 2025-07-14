@@ -611,6 +611,7 @@ class SensorCollector(private val context: Context) {
         detectionCallback: (List<BoundingBox>, Long, Long) -> Unit
     ) {
         this.detectionCallback = detectionCallback
+
         if (isStreaming.get()) {
             Log.d(TAG, "Streaming already in progress")
             return

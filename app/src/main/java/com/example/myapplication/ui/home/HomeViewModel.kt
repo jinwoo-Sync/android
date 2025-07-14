@@ -126,18 +126,22 @@ class HomeViewModel(
                 }
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
-                // ✅ Detection 결과를 메인 스레드에서 처리
+                // ✅ 메인 스레드에서 즉시 UI 업데이트
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    if (frameId != -1L) {
-                        synchronized(boundingBoxMap) {
-                            boundingBoxMap[frameId] = Pair(boundingBoxes, inferenceTime)
-                            Log.d("HomeViewModel", "🎯 Detection 결과 저장: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
-                        }
-                        onNewInference(inferenceTime)
+                    Log.d("HomeViewModel", "🎯 ViewModel Detection 콜백: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
 
-                        // ✅ 즉시 UI 업데이트 시도
-                        checkAndUpdateDetectionUI(frameId)
+                    // ✅ 바로 UI 업데이트
+                    _boundingBoxes.postValue(boundingBoxes)
+                    _inferenceTime.postValue("${inferenceTime}ms")
+
+                    // ✅ 추가 로깅
+                    if (boundingBoxes.isNotEmpty()) {
+                        Log.d("HomeViewModel", "🎯 ViewModel에서 처리할 객체들: ${boundingBoxes.map { "${it.clsName}(conf=${it.cnf})" }}")
+                    } else {
+                        Log.d("HomeViewModel", "🎯 ViewModel: 감지된 객체 없음")
                     }
+
+                    onNewInference(inferenceTime)
                 }
             }
         )
@@ -196,9 +200,6 @@ class HomeViewModel(
                         // ✅ 카메라 프레임 즉시 업데이트
                         _cameraFrame.postValue(sensorData.bitmap)
                         Log.d("HomeViewModel", "✅ Camera frame received: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
-
-                        // ✅ Detection 결과와 매칭 시도
-                        checkAndUpdateDetectionUI(sensorData.frameId)
                     } else {
                         Log.w("HomeViewModel", "⚠️ Received null sensor data from camera flow")
                     }

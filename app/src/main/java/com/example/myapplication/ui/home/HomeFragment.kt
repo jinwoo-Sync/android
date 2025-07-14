@@ -122,13 +122,20 @@ class HomeFragment : Fragment() {
 
     // ✅ 바운딩 박스 관찰 - 강화된 로깅
         viewModel.boundingBoxes.observe(viewLifecycleOwner) { boundingBoxes ->
-        Log.d("HomeFragment", "🎯 바운딩 박스 수신: ${boundingBoxes.size}개")
+            Log.d("HomeFragment", "🎯 UI에서 바운딩 박스 수신: ${boundingBoxes.size}개")
+
+            if (boundingBoxes.isNotEmpty()) {
+                Log.d("HomeFragment", "🎯 UI에서 표시할 객체들: ${boundingBoxes.map { "${it.clsName}(${it.cnf})" }}")
+                boundingBoxes.forEachIndexed { index, bbox ->
+                    Log.d("HomeFragment", "   📦 객체 $index: ${bbox.clsName}, 신뢰도: ${bbox.cnf}, 위치: (${bbox.x1}, ${bbox.y1}) - (${bbox.x2}, ${bbox.y2})")
+                }
+            } else {
+                Log.d("HomeFragment", "🎯 UI: 표시할 객체 없음")
+            }
+
             binding.overlayView.setResults(boundingBoxes)
             binding.overlayView.invalidate()
-
-        if (boundingBoxes.isNotEmpty()) {
-            Log.d("HomeFragment", "🎯 바운딩 박스 표시: ${boundingBoxes.map { "${it.clsName}(${it.cnf})" }}")
-        }
+            Log.d("HomeFragment", "🎯 OverlayView 업데이트 완료")
         }
 
         // 추론 시간 관찰

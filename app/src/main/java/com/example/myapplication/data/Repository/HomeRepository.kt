@@ -70,7 +70,11 @@ class HomeRepository(
                 }
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
-                Log.d(TAG, "Detection result for frameId: $frameId, boxes: ${boundingBoxes.size}, time: $inferenceTime ms")
+                Log.d(TAG, "🎯 Repository Detection 콜백: frameId=$frameId, boxes=${boundingBoxes.size}, time=${inferenceTime}ms")
+                // ✅ 추가 처리가 필요하면 여기서
+                if (boundingBoxes.isNotEmpty()) {
+                    Log.d(TAG, "🎯 Repository에서 받은 객체들: ${boundingBoxes.map { "${it.clsName}(${it.cnf})" }}")
+                }
             }
         )
     }
@@ -103,7 +107,18 @@ class HomeRepository(
             gpsCallback = gpsCallback,
             imuCallback = imuCallback,
             gnssCallback = gnssCallback,
-            detectionCallback = detectionCallback
+            // ✅ Detection 콜백을 그대로 전달하면서 추가 로깅
+            detectionCallback = { boundingBoxes, inferenceTime, frameId ->
+                Log.d(TAG, "🎯 Repository Detection 전달: frameId=$frameId, boxes=${boundingBoxes.size}, time=${inferenceTime}ms")
+
+                // ✅ Repository 로깅 유지
+                if (boundingBoxes.isNotEmpty()) {
+                    Log.d(TAG, "🎯 Repository에서 받은 객체들: ${boundingBoxes.map { "${it.clsName}(${it.cnf})" }}")
+                }
+
+                // ✅ ViewModel로 콜백 전달
+                detectionCallback?.invoke(boundingBoxes, inferenceTime, frameId)
+            }
         )
         Log.d(TAG, "센서 스트리밍 시작")
     }
