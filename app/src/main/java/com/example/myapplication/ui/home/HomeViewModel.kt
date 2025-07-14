@@ -65,14 +65,23 @@ class HomeViewModel(
     private val _syncStatus = MutableLiveData<String>()
     val syncStatus: LiveData<String> = _syncStatus
 
+    // ✅ 센서 스트리밍 시작 - 앱 시작 시 자동으로 백그라운드에서 실행
+    private var isSensorStreamingStarted = false
+
     fun setServerTransmissionEnabled(enabled: Boolean) {
         _isServerTransmissionEnabled.postValue(enabled)
     }
 
     /**
-     * 센서 스트리밍 시작 (Repository를 통해 관리)
+     * ✅ 센서 스트리밍 시작 (백그라운드 - GPS, IMU, GNSS)
      */
     fun startSensorStreaming() {
+        if (isSensorStreamingStarted) {
+            Log.d("HomeViewModel", "Sensor streaming already started")
+            return
+        }
+
+        isSensorStreamingStarted = true
         homeRepository.startSensorStreaming(
             gpsCallback = { sensorDataString ->
                 val gpsInfo = buildString {
@@ -115,27 +124,100 @@ class HomeViewModel(
                 checkAndUpdateUI(frameId)
             }
         )
-        Log.d("HomeViewModel", "Sensor streaming started via Repository")
+        Log.d("HomeViewModel", "센서 스트리밍 시작 완료")
     }
 
     /**
-     * 센서 스트리밍 중지 (Repository를 통해 관리)
+     * ✅ 센서 스트리밍 중지 (백그라운드 센서)
      */
     fun stopSensorStreaming() {
+        if (!isSensorStreamingStarted) {
+            Log.d("HomeViewModel", "Sensor streaming not started")
+            return
+        }
+
         homeRepository.stopSensorStreaming()
+        isSensorStreamingStarted = false
         _gpsData.postValue("GPS: 대기 중")
         _gnssData.postValue("GNSS: 대기 중")
         _imuData.postValue("IMU: 대기 중")
         _boundingBoxes.postValue(emptyList())
         _inferenceTime.postValue("0ms")
-        _cameraFrame.postValue(null)
+        _syncStatus.postValue("동기화 중지됨")
         synchronized(boundingBoxMap) { boundingBoxMap.clear() }
         lastGnssUpdateTime = 0L
         lastImuUpdateTime = 0L
-        _syncStatus.postValue("동기화 중지됨")
-        Log.d("HomeViewModel", "Sensor streaming stopped via Repository")
+        Log.d("HomeViewModel", "센서 스트리밍 중지 완료")
     }
 
+    /**
+     * ✅ 카메라 스트리밍 시작 (UI 버튼용)
+     */
+    private fun startCameraStreaming() {
+        if (_isStreaming.value == true) {
+            Log.d("HomeViewModel", "Camera streaming already active")
+            return
+        }
+
+        _text.value = "카메라 스트리밍 중..."
+        homeRepository.startCameraStreaming()
+
+        // ✅ Flow 구독 강화 - 새로운 Job으로 시작
+        viewModelScope.launch {
+            Log.d("HomeViewModel", "✅ Starting Flow collection...")
+            try {
+                homeRepository.cameraStreamFlow.collect { sensorData ->
+                    if (sensorData != null) {
+                        _cameraFrame.postValue(sensorData.bitmap)
+                        checkAndUpdateUI(sensorData.frameId)
+                        Log.d("HomeViewModel", "✅ Camera frame received and posted: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
+                    } else {
+                        Log.w("HomeViewModel", "⚠️ Received null sensor data from flow")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "❌ Error in Flow collection: ${e.message}", e)
+                _text.postValue("카메라 스트리밍 오류: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * ✅ 카메라 스트리밍 중지 (UI 버튼용)
+     */
+    private fun stopCameraStreaming() {
+        if (_isStreaming.value != true) {
+            Log.d("HomeViewModel", "No camera streaming to stop")
+            return
+        }
+
+        homeRepository.stopCameraStreaming()
+        _text.value = "카메라 스트리밍 중지됨"
+        _cameraFrame.postValue(null)
+        _boundingBoxes.postValue(emptyList())
+        _inferenceTime.postValue("0ms")
+        synchronized(boundingBoxMap) { boundingBoxMap.clear() }
+    }
+
+    /**
+     * ✅ 스트리밍 토글 (UI 버튼 전용)
+     */
+    suspend fun toggleStreaming(context: Context) {
+        if (_isStreaming.value == true) {
+            stopCameraStreaming()
+            _isStreaming.value = false
+            setServerStreamingEnabled(context, false)
+            Log.d("HomeViewModel", "Camera streaming stopped")
+        } else {
+            startCameraStreaming()
+            _isStreaming.value = true
+            Log.d("HomeViewModel", "Camera streaming started")
+        }
+    }
+
+    /**
+     * ✅ 프레임 캡처 (단일 프레임)
+     */
     suspend fun fetchCameraData() {
         if (_isStreaming.value == true) {
             _text.postValue("프레임 저장 중...")
@@ -161,25 +243,6 @@ class HomeViewModel(
         }
     }
 
-    private fun startCameraStreaming() {
-        if (_isStreaming.value == true) {
-            Log.d("HomeViewModel", "Streaming already active")
-            return
-        }
-
-        _text.value = "카메라 스트리밍 중..."
-        homeRepository.startCameraStreaming()
-
-        viewModelScope.launch {
-            homeRepository.cameraStreamFlow.collect { sensorData ->
-                sensorData?.let {
-                    _cameraFrame.postValue(it.bitmap)
-                    checkAndUpdateUI(it.frameId)
-                }
-            }
-        }
-    }
-
     private fun checkAndUpdateUI(frameId: Long) {
         synchronized(boundingBoxMap) {
             if (boundingBoxMap.containsKey(frameId) && _cameraFrame.value != null) {
@@ -192,35 +255,6 @@ class HomeViewModel(
         }
     }
 
-    private fun stopCameraStreaming() {
-        if (_isStreaming.value != true) {
-            Log.d("HomeViewModel", "No streaming to stop")
-            return
-        }
-
-        homeRepository.stopCameraStreaming()
-        _text.value = "카메라 스트리밍 중지됨"
-        _cameraFrame.postValue(null)
-        _boundingBoxes.postValue(emptyList())
-        _inferenceTime.postValue("0ms")
-        synchronized(boundingBoxMap) { boundingBoxMap.clear() }
-    }
-
-    suspend fun toggleStreaming(context: Context) {
-        if (_isStreaming.value == true) {
-            stopCameraStreaming()
-            stopSensorStreaming()
-            _isStreaming.value = false
-            setServerStreamingEnabled(context, false)
-            Log.d("HomeViewModel", "All streaming stopped")
-        } else {
-            startCameraStreaming()
-            startSensorStreaming()
-            _isStreaming.value = true
-            Log.d("HomeViewModel", "All streaming started")
-        }
-    }
-
     /**
      * 로그 저장 토글 (Repository를 통해 관리)
      */
@@ -228,7 +262,7 @@ class HomeViewModel(
         try {
             homeRepository.toggleLogSaving(context, enabled)
             _text.postValue(if (enabled) "실시간 로깅 시작" else "실시간 로깅 중지")
-            Log.d("HomeViewModel", "Log saving toggled via Repository: $enabled")
+            Log.d("HomeViewModel", "Log saving toggled: $enabled")
         } catch (e: Exception) {
             Log.e("HomeViewModel", "Failed to toggle log saving: ${e.message}", e)
             _text.postValue("로깅 설정 실패: ${e.message}")
@@ -243,7 +277,7 @@ class HomeViewModel(
             homeRepository.setServerStreamingEnabled(context, enabled)
             _isServerTransmissionEnabled.postValue(enabled)
             _text.postValue(if (enabled) "서버 스트리밍 시작" else "서버 스트리밍 중지")
-            Log.d("HomeViewModel", "Server streaming set via Repository: $enabled")
+            Log.d("HomeViewModel", "Server streaming set: $enabled")
         } catch (e: Exception) {
             Log.e("HomeViewModel", "Failed to set server streaming: ${e.message}", e)
             _text.postValue("서버 스트리밍 설정 실패: ${e.message}")
@@ -257,7 +291,7 @@ class HomeViewModel(
         try {
             homeRepository.setHttpStreamingEnabled(context, enabled)
             _text.postValue(if (enabled) "HTTP 스트리밍 시작" else "HTTP 스트리밍 중지")
-            Log.d("HomeViewModel", "HTTP streaming set via Repository: $enabled")
+            Log.d("HomeViewModel", "HTTP streaming set: $enabled")
         } catch (e: Exception) {
             Log.e("HomeViewModel", "Failed to set HTTP streaming: ${e.message}", e)
             _text.postValue("HTTP 스트리밍 설정 실패: ${e.message}")
@@ -291,7 +325,7 @@ class HomeViewModel(
             homeRepository.setFrameSkipInterval(effectiveInterval)
             currentSkipInterval = effectiveInterval
             _effectiveInterval.postValue(effectiveInterval)
-            Log.d("HomeViewModel", "Frame skip interval set to $effectiveInterval (avg: $avg) via Repository")
+            Log.d("HomeViewModel", "Frame skip interval set to $effectiveInterval (avg: $avg)")
         }
     }
 
@@ -301,7 +335,7 @@ class HomeViewModel(
             homeRepository.setFrameSkipInterval(interval)
             currentSkipInterval = interval
             _effectiveInterval.postValue(interval)
-            Log.d("HomeViewModel", "User set frame skip interval to $interval via Repository")
+            Log.d("HomeViewModel", "User set frame skip interval to $interval")
         } else {
             Log.w("HomeViewModel", "Invalid frame skip interval ignored: $interval")
         }

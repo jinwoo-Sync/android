@@ -18,7 +18,6 @@ import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
 import com.example.myapplication.MainActivity
 import com.example.myapplication.databinding.FragmentHomeBinding
-import com.example.myapplication.learning.yolo.OverlayView
 import kotlinx.coroutines.launch
 import android.net.Uri
 import android.provider.Settings
@@ -43,159 +42,220 @@ class HomeFragment : Fragment() {
         val root: View = binding.root
 
         try {
+            // ✅ 권한 및 GPS 설정 체크
+            checkGpsAndPermissions()
 
-            val locationManager = requireContext().getSystemService(Context.LOCATION_SERVICE) as LocationManager
-            if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                AlertDialog.Builder(requireContext())
-                    .setMessage("GNSS 데이터 수집을 위해 GPS를 활성화해주세요.")
-                    .setPositiveButton("설정으로 이동") { _, _ ->
-                        startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
-                    }
-                    .setNegativeButton("취소") { dialog, _ -> dialog.dismiss() }
-                    .show()
-            }
+            // ✅ UI 관찰자 설정
+            setupObservers()
 
-            val mainActivity = requireActivity() as MainActivity
+            // ✅ 버튼 클릭 리스너 설정
+            setupClickListeners()
 
-            if (!mainActivity.isBackgroundLocationPermissionGranted()) {
-                Toast.makeText(requireContext(), "백그라운드 위치 권한이 필요합니다. 설정에서 '항상 허용'을 선택해주세요.", Toast.LENGTH_LONG).show()
-            }
-
-            if (mainActivity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-                binding.gpsLogText.text = "GNSS 데이터 수집을 위해 위치 권한이 필요합니다."
-                AlertDialog.Builder(requireContext())
-                    .setMessage("GNSS 데이터 수집을 위해 위치 권한이 필요합니다. 설정 화면으로 이동하시겠습니까?")
-                    .setPositiveButton("설정으로 이동") { _, _ ->
-                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                        val uri = Uri.fromParts("package", requireActivity().packageName, null)
-                        intent.data = uri
-                        startActivity(intent)
-                    }
-                    .setNegativeButton("취소") { dialog, _ -> dialog.dismiss() }
-                    .show()
-            }
-
-            val textView: TextView = binding.textHome
-            viewModel.text.observe(viewLifecycleOwner) {
-                textView.text = it
-                Toast.makeText(requireContext(), it, Toast.LENGTH_SHORT).show()
-            }
-
-            viewModel.cameraFrame.observe(viewLifecycleOwner) { bitmap ->
-                if (bitmap != null) {
-                    binding.imageView.setImageBitmap(bitmap)
-                } else {
-                    binding.imageView.setImageBitmap(null)
-                    Log.d("HomeFragment", "Camera frame cleared")
-                }
-            }
-
-            viewModel.boundingBoxes.observe(viewLifecycleOwner) { boundingBoxes ->
-                Log.d("HomeFragment", "Received bounding boxes: ${boundingBoxes.size}")
-                binding.overlayView.setResults(boundingBoxes)
-                binding.overlayView.invalidate()
-            }
-
-            viewModel.inferenceTime.observe(viewLifecycleOwner) { time ->
-                binding.inferenceTime.text = "Inference: $time"
-            }
-
-            viewModel.effectiveInterval.observe(viewLifecycleOwner) { interval ->
-                val currentText = binding.editTextFrameSkip.text.toString()
-                val parsed = currentText.toIntOrNull()
-
-                if (!binding.editTextFrameSkip.isFocused && parsed != interval) {
-                    binding.editTextFrameSkip.setText(interval.toString())
-                }
-            }
-
-            viewModel.gpsData.observe(viewLifecycleOwner) { data ->
-                binding.gpsLogText.text = "GPS: $data"
-                Log.d("HomeFragment", "GPS 데이터 UI 업데이트: $data")
-            }
-
-            viewModel.gnssData.observe(viewLifecycleOwner) { data ->
-                if (data == "GNSS: 대기 중") {
-                    binding.gnssLogText.text = "GNSS 데이터가 수신되지 않습니다."
-                } else {
-                    binding.gnssLogText.text = data
-                }
-                Log.d("HomeFragment", "GNSS 데이터 UI 업데이트: $data")
-            }
-
-            viewModel.imuData.observe(viewLifecycleOwner) { data ->
-                binding.imuLogText.text = data
-                Log.d("HomeFragment", "IMU 데이터 UI 업데이트: $data")
-            }
-
-            viewModel.isStreaming.observe(viewLifecycleOwner) { isStreaming ->
-                binding.buttonOpenCamera.text = if (isStreaming) "스트리밍 중지" else "스트리밍 시작"
-                binding.buttonCaptureFrame.text = if (isStreaming) "현재 프레임 저장" else "프레임 캡처"
-                if (!isStreaming) {
-                    binding.overlayView.clear()
-                    binding.inferenceTime.text = "Inference: 0ms"
-                }
-            }
-
-            viewModel.isServerTransmissionEnabled.observe(viewLifecycleOwner) { enabled ->
-                binding.streamingCheckbox.isChecked = enabled
-                Log.d("HomeFragment", "Server streaming checkbox inclusionupdated: $enabled")
-            }
-
-            binding.buttonOpenCamera.setOnClickListener {
-                if (mainActivity.isCameraPermissionGranted() && mainActivity.isLocationPermissionGranted() && mainActivity.isBackgroundLocationPermissionGranted()) {
-                    lifecycleScope.launch {
-                        viewModel.toggleStreaming(requireContext())
-                        Log.d("HomeFragment", "All streaming toggled")
-                    }
-                } else {
-                    Toast.makeText(requireContext(), "카메라와 위치 권한이 필요합니다", Toast.LENGTH_SHORT).show()
-                }
-            }
-
-            binding.buttonCaptureFrame.setOnClickListener {
-                if (mainActivity.isCameraPermissionGranted()) {
-                    viewLifecycleOwner.lifecycleScope.launch {
-                        viewModel.fetchCameraData()
-                    }
-                } else {
-                    Toast.makeText(requireContext(), "카메라 권한이 필요합니다", Toast.LENGTH_SHORT).show()
-                }
-            }
-
-            binding.loggingCheckbox.setOnCheckedChangeListener { _, isChecked ->
-                viewModel.toggleLogSaving(requireContext(), isChecked)
-                Log.d("HomeFragment", "Logging checkbox changed: $isChecked")
-            }
-
-            binding.streamingCheckbox.setOnCheckedChangeListener { _, isChecked ->
-                Log.d("HomeFragment", "Streaming checkbox changed: $isChecked")
-                lifecycleScope.launch {
-                    viewModel.setServerStreamingEnabled(requireContext(), isChecked)
-                    Log.d("HomeFragment", "Server streaming checkbox inclusionupdated: $isChecked")
-                }
-            }
-
-            binding.buttonSetFrameSkip.setOnClickListener {
-                val intervalText = binding.editTextFrameSkip.text.toString()
-                val interval = intervalText.toIntOrNull()
-                if (interval != null && interval in 2..15) {
-                    viewModel.setUserFrameSkipInterval(interval)
-                    Toast.makeText(requireContext(), "Frame skip interval set to $interval", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(requireContext(), "Please enter a valid integer between 2 and 15", Toast.LENGTH_SHORT).show()
-                }
-            }
+            // ✅ 센서 스트리밍은 백그라운드에서 자동 시작
+            viewModel.startSensorStreaming()
 
         } catch (e: Exception) {
             Log.e("HomeFragment", "Error initializing fragment: ${e.message}", e)
             Toast.makeText(requireContext(), "초기화 오류: ${e.message}", Toast.LENGTH_LONG).show()
         }
 
-        viewModel.startSensorStreaming()
         return root
     }
 
+    /**
+     * ✅ GPS 및 권한 상태 체크
+     */
+    private fun checkGpsAndPermissions() {
+        val locationManager = requireContext().getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            AlertDialog.Builder(requireContext())
+                .setMessage("GNSS 데이터 수집을 위해 GPS를 활성화해주세요.")
+                .setPositiveButton("설정으로 이동") { _, _ ->
+                    startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                }
+                .setNegativeButton("취소") { dialog, _ -> dialog.dismiss() }
+                .show()
+        }
+
+        val mainActivity = requireActivity() as MainActivity
+
+        if (!mainActivity.isBackgroundLocationPermissionGranted()) {
+            Toast.makeText(requireContext(), "백그라운드 위치 권한이 필요합니다. 설정에서 '항상 허용'을 선택해주세요.", Toast.LENGTH_LONG).show()
+        }
+
+        if (mainActivity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            binding.gpsLogText.text = "GNSS 데이터 수집을 위해 위치 권한이 필요합니다."
+            AlertDialog.Builder(requireContext())
+                .setMessage("GNSS 데이터 수집을 위해 위치 권한이 필요합니다. 설정 화면으로 이동하시겠습니까?")
+                .setPositiveButton("설정으로 이동") { _, _ ->
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    val uri = Uri.fromParts("package", requireActivity().packageName, null)
+                    intent.data = uri
+                    startActivity(intent)
+                }
+                .setNegativeButton("취소") { dialog, _ -> dialog.dismiss() }
+                .show()
+        }
+    }
+
+    /**
+     * ✅ UI 관찰자 설정
+     */
+    private fun setupObservers() {
+        // 상태 메시지 관찰
+        val textView: TextView = binding.textHome
+        viewModel.text.observe(viewLifecycleOwner) { message ->
+            textView.text = message
+            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show()
+        }
+
+        // ✅ 카메라 프레임 관찰
+        viewModel.cameraFrame.observe(viewLifecycleOwner) { bitmap ->
+            if (bitmap != null) {
+                binding.imageView.setImageBitmap(bitmap)
+                Log.d("HomeFragment", "✅✅✅ Camera frame SUCCESSFULLY updated in UI! Size: ${bitmap.width}x${bitmap.height}")
+            } else {
+                binding.imageView.setImageBitmap(null)
+                Log.d("HomeFragment", "⚠️ Camera frame cleared (null bitmap)")
+            }
+        }
+
+        // 바운딩 박스 관찰
+        viewModel.boundingBoxes.observe(viewLifecycleOwner) { boundingBoxes ->
+            Log.d("HomeFragment", "Received bounding boxes: ${boundingBoxes.size}")
+            binding.overlayView.setResults(boundingBoxes)
+            binding.overlayView.invalidate()
+        }
+
+        // 추론 시간 관찰
+        viewModel.inferenceTime.observe(viewLifecycleOwner) { time ->
+            binding.inferenceTime.text = "Inference: $time"
+        }
+
+        // 프레임 스킵 간격 관찰
+        viewModel.effectiveInterval.observe(viewLifecycleOwner) { interval ->
+            val currentText = binding.editTextFrameSkip.text.toString()
+            val parsed = currentText.toIntOrNull()
+
+            if (!binding.editTextFrameSkip.isFocused && parsed != interval) {
+                binding.editTextFrameSkip.setText(interval.toString())
+            }
+        }
+
+        // GPS 데이터 관찰
+        viewModel.gpsData.observe(viewLifecycleOwner) { data ->
+            binding.gpsLogText.text = data
+            Log.d("HomeFragment", "GPS 데이터 UI 업데이트: $data")
+        }
+
+        // GNSS 데이터 관찰
+        viewModel.gnssData.observe(viewLifecycleOwner) { data ->
+            if (data == "GNSS: 대기 중") {
+                binding.gnssLogText.text = "GNSS 데이터가 수신되지 않습니다."
+            } else {
+                binding.gnssLogText.text = data
+            }
+            Log.d("HomeFragment", "GNSS 데이터 UI 업데이트: $data")
+        }
+
+        // IMU 데이터 관찰
+        viewModel.imuData.observe(viewLifecycleOwner) { data ->
+            binding.imuLogText.text = data
+            Log.d("HomeFragment", "IMU 데이터 UI 업데이트: $data")
+        }
+
+        // ✅ 스트리밍 상태 관찰
+        viewModel.isStreaming.observe(viewLifecycleOwner) { isStreaming ->
+            binding.buttonOpenCamera.text = if (isStreaming) "스트리밍 중지" else "스트리밍 시작"
+            binding.buttonCaptureFrame.text = if (isStreaming) "현재 프레임 저장" else "프레임 캡처"
+
+            if (!isStreaming) {
+                binding.overlayView.clear()
+                binding.inferenceTime.text = "Inference: 0ms"
+                binding.imageView.setImageBitmap(null)
+                Log.d("HomeFragment", "🔴 Streaming stopped - UI cleared")
+            } else {
+                Log.d("HomeFragment", "🟢 Streaming started - UI ready for frames")
+            }
+
+            Log.d("HomeFragment", "✅ Streaming status changed: $isStreaming")
+        }
+
+        // 서버 전송 상태 관찰
+        viewModel.isServerTransmissionEnabled.observe(viewLifecycleOwner) { enabled ->
+            binding.streamingCheckbox.isChecked = enabled
+            Log.d("HomeFragment", "Server streaming checkbox updated: $enabled")
+        }
+    }
+
+    /**
+     * ✅ 버튼 클릭 리스너 설정
+     */
+    private fun setupClickListeners() {
+        val mainActivity = requireActivity() as MainActivity
+
+        // ✅ 카메라 스트리밍 버튼 (UI 전용)
+        binding.buttonOpenCamera.setOnClickListener {
+            if (mainActivity.isCameraPermissionGranted() &&
+                mainActivity.isLocationPermissionGranted() &&
+                mainActivity.isBackgroundLocationPermissionGranted()) {
+
+                lifecycleScope.launch {
+                    viewModel.toggleStreaming(requireContext())
+                    Log.d("HomeFragment", "✅ Camera streaming toggle requested")
+                }
+            } else {
+                Toast.makeText(requireContext(), "카메라와 위치 권한이 필요합니다", Toast.LENGTH_SHORT).show()
+                Log.w("HomeFragment", "⚠️ Missing permissions for camera streaming")
+            }
+        }
+
+        // ✅ 프레임 캡처 버튼
+        binding.buttonCaptureFrame.setOnClickListener {
+            if (mainActivity.isCameraPermissionGranted()) {
+                lifecycleScope.launch {
+                    viewModel.fetchCameraData()
+                    Log.d("HomeFragment", "✅ Frame capture requested")
+                }
+            } else {
+                Toast.makeText(requireContext(), "카메라 권한이 필요합니다", Toast.LENGTH_SHORT).show()
+                Log.w("HomeFragment", "⚠️ Missing camera permission for frame capture")
+            }
+        }
+
+        // 로그 저장 체크박스
+        binding.loggingCheckbox.setOnCheckedChangeListener { _, isChecked ->
+            viewModel.toggleLogSaving(requireContext(), isChecked)
+            Log.d("HomeFragment", "Logging checkbox changed: $isChecked")
+        }
+
+        // 서버 스트리밍 체크박스
+        binding.streamingCheckbox.setOnCheckedChangeListener { _, isChecked ->
+            Log.d("HomeFragment", "Streaming checkbox changed: $isChecked")
+            lifecycleScope.launch {
+                viewModel.setServerStreamingEnabled(requireContext(), isChecked)
+                Log.d("HomeFragment", "Server streaming checkbox updated: $isChecked")
+            }
+        }
+
+        // 프레임 스킵 설정 버튼
+        binding.buttonSetFrameSkip.setOnClickListener {
+            val intervalText = binding.editTextFrameSkip.text.toString()
+            val interval = intervalText.toIntOrNull()
+            if (interval != null && interval in 2..15) {
+                viewModel.setUserFrameSkipInterval(interval)
+                Toast.makeText(requireContext(), "Frame skip interval set to $interval", Toast.LENGTH_SHORT).show()
+                Log.d("HomeFragment", "Frame skip interval set to: $interval")
+            } else {
+                Toast.makeText(requireContext(), "Please enter a valid integer between 2 and 15", Toast.LENGTH_SHORT).show()
+                Log.w("HomeFragment", "Invalid frame skip interval: $intervalText")
+            }
+        }
+    }
+
+    /**
+     * ✅ 권한 체크 및 요청
+     */
     private fun checkAndRequestPermissions() {
         val permissions = arrayOf(
             Manifest.permission.WRITE_EXTERNAL_STORAGE,
@@ -220,26 +280,33 @@ class HomeFragment : Fragment() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_CODE_PERMISSIONS) {
             if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-                Log.d("HomeFragment", "모든 권한이 부여되었습니다")
+                Log.d("HomeFragment", "✅ 모든 권한이 부여되었습니다")
                 viewModel.startSensorStreaming()
             } else {
                 Toast.makeText(requireContext(), "필요한 권한이 부여되지 않았습니다", Toast.LENGTH_LONG).show()
+                Log.w("HomeFragment", "⚠️ 일부 권한이 거부되었습니다")
             }
         }
     }
 
     override fun onResume() {
         super.onResume()
-        viewModel.startSensorStreaming() // GNSS 콜백 재등록
+        Log.d("HomeFragment", "📱 Fragment resumed - starting sensor streaming")
+        // ✅ 센서 스트리밍만 재시작 (카메라는 버튼으로 제어)
+        viewModel.startSensorStreaming()
     }
 
     override fun onPause() {
         super.onPause()
-        viewModel.stopSensorStreaming() // GNSS 콜백 해제
+        Log.d("HomeFragment", "📱 Fragment paused - stopping sensor streaming")
+        // ✅ 센서 스트리밍만 중지 (카메라는 계속 유지)
+        viewModel.stopSensorStreaming()
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
+        Log.d("HomeFragment", "📱 Fragment destroying - cleaning up")
+        // ✅ 모든 스트리밍 정지
         viewModel.stopSensorStreaming()
         _binding = null
     }

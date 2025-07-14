@@ -47,6 +47,9 @@ class HomeRepository(
         return syncedData.firstOrNull()
     }
 
+    /**
+     * ✅ 카메라 스트리밍 시작 - UI 버튼용
+     */
     fun startCameraStreaming() {
         if (isStreamingActive) {
             Log.d(TAG, "Camera streaming already active")
@@ -58,9 +61,12 @@ class HomeRepository(
 
         sensorCollector.startCameraStreaming(
             callback = { sensorData ->
-                sensorData?.let {
-                    _cameraStreamFlow.value = it
-                    //Log.d(TAG, "New frame received at ${it.timestamp}, frameId: ${it.frameId}")
+                if (sensorData != null) {
+                    _cameraStreamFlow.value = sensorData
+                    Log.d(TAG, "✅ New camera frame pushed to flow: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
+                } else {
+                    Log.w(TAG, "⚠️ Received null camera frame, but keeping flow active")
+                    // ✅ null이어도 Flow를 유지 (연결 끊김 방지)
                 }
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
@@ -69,6 +75,9 @@ class HomeRepository(
         )
     }
 
+    /**
+     * ✅ 카메라 스트리밍 중지 - UI 버튼용
+     */
     fun stopCameraStreaming() {
         if (!isStreamingActive) {
             Log.d(TAG, "No camera streaming to stop")
@@ -82,8 +91,33 @@ class HomeRepository(
     }
 
     /**
+     * ✅ 센서 데이터 스트리밍 시작 - 백그라운드 센서용 (GPS, IMU, GNSS)
+     */
+    fun startSensorStreaming(
+        gpsCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
+        imuCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
+        gnssCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
+        detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
+    ) {
+        sensorCollector.startSensorStreaming(
+            gpsCallback = gpsCallback,
+            imuCallback = imuCallback,
+            gnssCallback = gnssCallback,
+            detectionCallback = detectionCallback
+        )
+        Log.d(TAG, "센서 스트리밍 시작")
+    }
+
+    /**
+     * ✅ 센서 데이터 스트리밍 중지 - 백그라운드 센서용
+     */
+    fun stopSensorStreaming() {
+        sensorCollector.stopSensorStreaming()
+        Log.d(TAG, "센서 스트리밍 중지")
+    }
+
+    /**
      * 로그 저장 기능 토글
-     * Repository 레이어에서 LoggerManager 접근 관리
      */
     fun toggleLogSaving(context: Context, enabled: Boolean) {
         try {
@@ -101,15 +135,13 @@ class HomeRepository(
     }
 
     /**
-     * 서버 스트리밍 기능 설정
-     * Repository 레이어에서 LoggerManager와 SensorCollector 접근 관리
+     * 서버 스트리밍 기능 설정 (WebSocket)
      */
     suspend fun setServerStreamingEnabled(context: Context, enabled: Boolean) {
         try {
             val loggerManager = LoggerManager.getInstance(context, dataSynchronizer)
 
             if (enabled) {
-                // WebSocket 전송 방식 설정
                 loggerManager.setTransportType("websocket")
                 loggerManager.enableStreaming()
                 Log.d(TAG, "서버 스트리밍 활성화 - WebSocket")
@@ -131,7 +163,6 @@ class HomeRepository(
             val loggerManager = LoggerManager.getInstance(context, dataSynchronizer)
 
             if (enabled) {
-                // HTTP 전송 방식 설정
                 loggerManager.setTransportType("http")
                 loggerManager.enableStreaming()
                 Log.d(TAG, "서버 스트리밍 활성화 - HTTP")
@@ -143,33 +174,6 @@ class HomeRepository(
             Log.e(TAG, "HTTP 스트리밍 설정 실패: ${e.message}", e)
             throw e
         }
-    }
-
-    /**
-     * 센서 데이터 스트리밍 시작
-     * SensorCollector를 통한 센서 데이터 수집 관리
-     */
-    fun startSensorStreaming(
-        gpsCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
-        imuCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
-        gnssCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
-        detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
-    ) {
-        sensorCollector.startSensorStreaming(
-            gpsCallback = gpsCallback,
-            imuCallback = imuCallback,
-            gnssCallback = gnssCallback,
-            detectionCallback = detectionCallback
-        )
-        Log.d(TAG, "센서 스트리밍 시작")
-    }
-
-    /**
-     * 센서 데이터 스트리밍 중지
-     */
-    fun stopSensorStreaming() {
-        sensorCollector.stopSensorStreaming()
-        Log.d(TAG, "센서 스트리밍 중지")
     }
 
     /**
@@ -199,6 +203,11 @@ class HomeRepository(
             append("총 데이터 포인트: ${queueStatus.totalDataPoints}")
         }
     }
+
+    /**
+     * ✅ 스트리밍 상태 확인
+     */
+    fun isStreamingActive(): Boolean = isStreamingActive
 
     private suspend fun collectSensorDataAsync(): SensorData? = suspendCancellableCoroutine { continuation ->
         Log.d(TAG, "Collecting sensor data asynchronously")

@@ -122,7 +122,7 @@ class DataSynchronizer {
 
             gpsLostStartTime = 0L // GPS 복구 시 리셋
 
-            Log.d(TAG, "⏰ GPS 기반 정밀 시간 동기화: hybridKey=${hybridKey}, confidence=${filteredTime.confidence}")
+            // Log.d(TAG, "⏰ GPS 기반 정밀 시간 동기화: hybridKey=${hybridKey}, confidence=${filteredTime.confidence}")
         } else {
             if (isGpsAvailable && gpsLostStartTime == 0L) {
                 gpsLostStartTime = System.currentTimeMillis()
@@ -151,7 +151,7 @@ class DataSynchronizer {
                 synchronizedTimeKeys.add(hybridKey)
             }
 
-            Log.d(TAG, "⏰ 시간 동기화: mode=${currentSyncMode}, hybridKey=${hybridKey}")
+            // Log.d(TAG, "⏰ 시간 동기화: mode=${currentSyncMode}, hybridKey=${hybridKey}")
         }
     }
 

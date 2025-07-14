@@ -652,21 +652,27 @@ class SensorCollector(private val context: Context) {
                             val monoTime = System.nanoTime()
                             val sensorData = SensorData(
                                 value = "Streaming: ${image.timestamp}",
-                                bitmap = rotatedBitmap,
+                                bitmap = rotatedBitmap, // ✅ 회전된 비트맵 사용
                                 timestamp = systemTime,
                                 monoTimestamp = monoTime,
                                 frameId = frameId
                             )
 
+                            // ✅ 핵심: 로그매니저 먼저, 콜백 나중에
                             if (::dataSynchronizer.isInitialized) {
                                 LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
                             }
+
                             frameCount++
 
+                            // ✅ 매 프레임마다 콜백 호출 (frameSkipInterval 무시하고 UI 업데이트)
+                            coroutineScope.launch(Dispatchers.Main) {
+                                callback(sensorData) // ✅ UI 콜백 항상 호출
+                                Log.d(TAG, "✅ UI callback called with frameId: $frameId, bitmap: ${sensorData.bitmap != null}")
+                            }
+
+                            // ✅ Detection은 별도로 frameSkipInterval 적용
                             if (frameCount % frameSkipInterval == 0) {
-                                coroutineScope.launch(Dispatchers.Main) {
-                                    callback(sensorData)
-                                }
                                 ensureDetectorExecutor()
                                 rotatedBitmap?.let { bitmap ->
                                     if (detectorInitialized && !isDetecting) {
@@ -683,9 +689,14 @@ class SensorCollector(private val context: Context) {
                                     }
                                 }
                             }
+                        } ?: run {
+                            Log.e(TAG, "❌ Failed to create bitmap from camera frame")
+                            coroutineScope.launch(Dispatchers.Main) {
+                                callback(null)
+                            }
                         }
                     }
-                }, null)
+                }, null) // ✅ 백그라운드 스레드에서 처리
             }
 
             if (!cameraOpenCloseLock.tryAcquire(2, TimeUnit.SECONDS)) {
@@ -707,27 +718,35 @@ class SensorCollector(private val context: Context) {
                                     captureSession = session
                                     session.setRepeatingRequest(builder.build(), cameraConfig.captureCallback, null)
                                     isStreaming.set(true)
+                                    Log.d(TAG, "✅ Camera session configured and streaming started")
                                 }
                                 override fun onConfigureFailed(session: CameraCaptureSession) {
+                                    Log.e(TAG, "❌ Camera session configuration failed")
                                     callback(null)
                                     closeCamera()
                                 }
                             },
                             null
                         )
-                    } ?: callback(null)
+                    } ?: run {
+                        Log.e(TAG, "❌ ImageReader surface is null")
+                        callback(null)
+                    }
                 }
                 override fun onDisconnected(camera: CameraDevice) {
+                    Log.d(TAG, "Camera disconnected")
                     closeCamera()
                     callback(null)
                 }
                 override fun onError(camera: CameraDevice, error: Int) {
+                    Log.e(TAG, "Camera error: $error")
                     closeCamera()
                     callback(null)
                 }
             }, null)
 
         } catch (e: Exception) {
+            Log.e(TAG, "❌ Error in startCameraStreaming: ${e.message}", e)
             callback(null)
             closeCamera()
         }
