@@ -35,6 +35,10 @@ class MainActivity : AppCompatActivity() {
     private var isLocationPermissionGranted = false
     private var isBackgroundLocationPermissionGranted = false
 
+    // ✅ Dialog 참조를 관리하여 메모리 누수 방지
+    private var batteryOptimizationDialog: AlertDialog? = null
+    private var locationServiceDialog: AlertDialog? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -49,9 +53,15 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         checkPermissions()
-        requestBatteryOptimizationDisable() // 배터리 최적화 비활성화 요청
+        requestBatteryOptimizationDisable()
         checkLocationServiceEnabled()
 
+        setupNavigation()
+
+        Log.d("MainActivity", "Initialization completed: SensorCollector and HomeRepository set up")
+    }
+
+    private fun setupNavigation() {
         val navView: BottomNavigationView = binding.navView
         val navController = findNavController(R.id.nav_host_fragment_activity_main)
         val appBarConfiguration = AppBarConfiguration(
@@ -61,8 +71,6 @@ class MainActivity : AppCompatActivity() {
         )
         setupActionBarWithNavController(navController, appBarConfiguration)
         navView.setupWithNavController(navController)
-
-        Log.d("MainActivity", "Initialization completed: SensorCollector and HomeRepository set up")
     }
 
     private fun checkPermissions() {
@@ -121,7 +129,10 @@ class MainActivity : AppCompatActivity() {
     private fun requestBatteryOptimizationDisable() {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
-            AlertDialog.Builder(this)
+            // ✅ 기존 다이얼로그가 있다면 해제
+            batteryOptimizationDialog?.dismiss()
+
+            batteryOptimizationDialog = AlertDialog.Builder(this)
                 .setMessage("GNSS 데이터 수집을 위해 배터리 최적화를 비활성화해야 합니다. 설정으로 이동하시겠습니까?")
                 .setPositiveButton("설정으로 이동") { _, _ ->
                     val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
@@ -129,7 +140,28 @@ class MainActivity : AppCompatActivity() {
                     startActivity(intent)
                 }
                 .setNegativeButton("취소") { dialog, _ -> dialog.dismiss() }
-                .show()
+                .create()
+
+            batteryOptimizationDialog?.show()
+        }
+    }
+
+    private fun checkLocationServiceEnabled() {
+        val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val isGpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+        if (!isGpsEnabled) {
+            // 기존 다이얼로그가 있다면 해제
+            locationServiceDialog?.dismiss()
+
+            locationServiceDialog = AlertDialog.Builder(this)
+                .setMessage("위치 서비스가 비활성화되어 있습니다. 설정으로 이동하여 활성화하시겠습니까?")
+                .setPositiveButton("설정으로 이동") { _, _ ->
+                    startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                }
+                .setNegativeButton("취소") { dialog, _ -> dialog.dismiss() }
+                .create()
+
+            locationServiceDialog?.show()
         }
     }
 
@@ -181,19 +213,23 @@ class MainActivity : AppCompatActivity() {
         intent.data = uri
         startActivity(intent)
     }
+    // ✅ 액티비티 종료 시 리소스 정리
+    override fun onDestroy() {
+        super.onDestroy()
 
-    private fun checkLocationServiceEnabled() {
-        val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        val isGpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
-        if (!isGpsEnabled) {
-            AlertDialog.Builder(this)
-                .setMessage("위치 서비스가 비활성화되어 있습니다. 설정으로 이동하여 활성화하시겠습니까?")
-                .setPositiveButton("설정으로 이동") { _, _ ->
-                    startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
-                }
-                .setNegativeButton("취소") { dialog, _ -> dialog.dismiss() }
-                .show()
+        // ✅ 다이얼로그 해제로 메모리 누수 방지
+        batteryOptimizationDialog?.dismiss()
+        locationServiceDialog?.dismiss()
+        batteryOptimizationDialog = null
+        locationServiceDialog = null
+
+        // ✅ SensorCollector 정리
+        if (::sensorCollector.isInitialized) {
+            sensorCollector.stopSensorStreaming()
+            sensorCollector.closeCamera()
         }
+
+        Log.d("MainActivity", "Activity destroyed and resources cleaned up")
     }
 
     fun isCameraPermissionGranted(): Boolean = isCameraPermissionGranted

@@ -189,7 +189,6 @@ class LoggerManager private constructor(
     }
 
     // 🚨 메모리 기반 큐 조작 함수들을 주석 처리
-    /*
     private fun <T> maintainAdaptiveQueueSize(
         queue: ConcurrentLinkedQueue<T>,
         baseSize: Int,
@@ -205,7 +204,6 @@ class LoggerManager private constructor(
         val memoryPressure = memoryMonitor.getMemoryPressure()
         maintainAdaptiveQueueSize(queue, maxSize, memoryPressure)
     }
-    */
 
     fun pushComprehensiveGnss(comprehensiveData: ComprehensiveGnssData, clockData: GnssClockData?) {
         if (shouldSave()) {
@@ -214,8 +212,7 @@ class LoggerManager private constructor(
                 clockData = clockData
             )
             comprehensiveGnssQueue.offer(comprehensiveEntry)
-            // 🚨 메모리 기반 큐 크기 제한 주석 처리
-            // maintainQueueSize(comprehensiveGnssQueue, MAX_COMPREHENSIVE_GNSS_QUEUE)
+            maintainQueueSize(comprehensiveGnssQueue, MAX_COMPREHENSIVE_GNSS_QUEUE)
         }
     }
 
@@ -223,8 +220,7 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val statusEntry = IndependentSatelliteStatusEntry(satelliteStatus = satelliteStatus)
             satelliteStatusQueue.offer(statusEntry)
-            // 🚨 메모리 기반 큐 크기 제한 주석 처리
-            // maintainQueueSize(satelliteStatusQueue, MAX_SATELLITE_STATUS_QUEUE)
+            maintainQueueSize(satelliteStatusQueue, MAX_SATELLITE_STATUS_QUEUE)
         }
     }
 
@@ -232,8 +228,7 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val navEntry = IndependentNavigationEntry(navigationData = navigationData)
             navigationMessageQueue.offer(navEntry)
-            // 🚨 메모리 기반 큐 크기 제한 주석 처리
-            // maintainQueueSize(navigationMessageQueue, MAX_NAVIGATION_QUEUE)
+            maintainQueueSize(navigationMessageQueue, MAX_NAVIGATION_QUEUE)
         }
     }
 
@@ -242,8 +237,7 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val antennaEntry = IndependentAntennaEntry(antennaData = antennaData)
             antennaInfoQueue.offer(antennaEntry)
-            // 🚨 메모리 기반 큐 크기 제한 주석 처리
-            // maintainQueueSize(antennaInfoQueue, MAX_ANTENNA_QUEUE)
+            maintainQueueSize(antennaInfoQueue, MAX_ANTENNA_QUEUE)
         }
     }
 
@@ -251,8 +245,7 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val clockEntry = IndependentGnssClockEntry(clockData = clockData)
             gnssClockQueue.offer(clockEntry)
-            // 🚨 메모리 기반 큐 크기 제한 주석 처리
-            // maintainQueueSize(gnssClockQueue, MAX_GNSS_CLOCK_QUEUE)
+            maintainQueueSize(gnssClockQueue, MAX_GNSS_CLOCK_QUEUE)
         }
     }
 
@@ -268,8 +261,7 @@ class LoggerManager private constructor(
         )
         val sessionEntry = IndependentGnssSessionEntry(sessionData = sessionSummary)
         gnssSessionQueue.offer(sessionEntry)
-        // 🚨 메모리 기반 큐 크기 제한 주석 처리
-        // maintainQueueSize(gnssSessionQueue, MAX_GNSS_SESSION_QUEUE)
+        maintainQueueSize(gnssSessionQueue, MAX_GNSS_SESSION_QUEUE)
     }
 
     fun recordSessionEnd(sessionDuration: Long, ttffMs: Long?) {
@@ -284,8 +276,7 @@ class LoggerManager private constructor(
         )
         val sessionEntry = IndependentGnssSessionEntry(sessionData = sessionSummary)
         gnssSessionQueue.offer(sessionEntry)
-        // 🚨 메모리 기반 큐 크기 제한 주석 처리
-        // maintainQueueSize(gnssSessionQueue, MAX_GNSS_SESSION_QUEUE)
+        maintainQueueSize(gnssSessionQueue, MAX_GNSS_SESSION_QUEUE)
     }
 
     fun pushGps(loc: Location, sysTs: Long = System.currentTimeMillis(), monoTs: Long = System.nanoTime()) {
@@ -296,8 +287,7 @@ class LoggerManager private constructor(
                 monoTime = monoTs
             )
             independentGpsQueue.offer(gpsEntry)
-            // 🚨 메모리 기반 큐 크기 제한 주석 처리
-            // maintainQueueSize(independentGpsQueue, MAX_GPS_QUEUE)
+            maintainQueueSize(independentGpsQueue, MAX_GPS_QUEUE)
         }
     }
 
@@ -309,8 +299,7 @@ class LoggerManager private constructor(
                 monoTime = monoTs
             )
             independentImuQueue.offer(imuEntry)
-            // 🚨 메모리 기반 큐 크기 제한 주석 처리
-            // maintainQueueSize(independentImuQueue, MAX_IMU_QUEUE)
+            maintainQueueSize(independentImuQueue, MAX_IMU_QUEUE)
         }
     }
 
@@ -318,8 +307,7 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val gnssEntry = IndependentGnssEntry(gnssData = g)
             independentGnssQueue.offer(gnssEntry)
-            // 🚨 메모리 기반 큐 크기 제한 주석 처리
-            // maintainQueueSize(independentGnssQueue, MAX_GNSS_QUEUE)
+            maintainQueueSize(independentGnssQueue, MAX_GNSS_QUEUE)
         }
     }
 
@@ -327,8 +315,7 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val bboxEntry = IndependentBboxEntry(bboxData = bboxes.toList())
             independentBboxQueue.offer(bboxEntry)
-            // 🚨 메모리 기반 큐 크기 제한 주석 처리
-            // maintainQueueSize(independentBboxQueue, MAX_BBOX_QUEUE)
+            maintainQueueSize(independentBboxQueue, MAX_BBOX_QUEUE)
         }
     }
 
@@ -342,7 +329,7 @@ class LoggerManager private constructor(
             val cameraEntry = IndependentCameraEntry(cameraData = data)
             independentCameraQueue.offer(cameraEntry)
             // 🚨 메모리 기반 큐 크기 제한 주석 처리
-            // maintainQueueSize(independentCameraQueue, MAX_CAMERA_QUEUE)
+            maintainQueueSize(independentCameraQueue, MAX_CAMERA_QUEUE)
         }
     }
 

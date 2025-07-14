@@ -968,8 +968,10 @@ class SensorCollector(private val context: Context) {
      */
     fun stopSensorStreaming() {
         try {
+            // ✅ GPS 콜백 해제
             fusedLocationClient.removeLocationUpdates(locationCallback)
 
+            // ✅ GNSS 콜백 해제
             if (isGnssCallbackRegistered.getAndSet(false)) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     locationManager.unregisterGnssMeasurementsCallback(gnssMeasurementsCallback)
@@ -978,16 +980,31 @@ class SensorCollector(private val context: Context) {
                 }
             }
 
+            // ✅ IMU 센서 해제
             sensorManager.unregisterListener(accelerometerListener)
             sensorManager.unregisterListener(gyroscopeListener)
             sensorManager.unregisterListener(magnetometerListener)
+
+            // ✅ Detector 정리
             detector?.close()
+
+            // ✅ ExecutorService 정리
             detectorExecutor.shutdown()
-            detectorExecutor.awaitTermination(5, TimeUnit.SECONDS)
+            try {
+                if (!detectorExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    detectorExecutor.shutdownNow()
+                }
+            } catch (e: InterruptedException) {
+                detectorExecutor.shutdownNow()
+                Thread.currentThread().interrupt()
+            }
+
+            // ✅ 코루틴 스코프 정리
             coroutineScope.cancel()
-            Log.d(TAG, "✅ 모든 센서 스트리밍 중지 완료")
+
+            Log.d(TAG, "✅ 모든 센서 스트리밍 중지 및 리소스 정리 완료")
         } catch (e: Exception) {
-            Log.e(TAG, "센서 스트리밍 중지 오류: ${e.message}")
+            Log.e(TAG, "센서 스트리밍 중지 오류: ${e.message}", e)
         }
     }
 

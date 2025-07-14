@@ -25,6 +25,8 @@ import androidx.lifecycle.lifecycleScope
 import com.example.myapplication.MainActivity
 import com.example.myapplication.databinding.FragmentHomeBinding
 import com.example.myapplication.utils.ResourceMonitor
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 
@@ -204,6 +206,9 @@ class HomeFragment : Fragment() {
             setupClickListeners()
             viewModel.startSensorStreaming()
 
+            // 3. 주기적인 메모리 모니터링 시작
+            setupPeriodicMemoryCheck()
+
         } catch (e: Exception) {
             Log.e("HomeFragment", "Error initializing fragment: ${e.message}", e)
             resourceMonitor?.logAppResourceStatus("HomeFragment", "초기화 오류: ${e.message}")
@@ -211,6 +216,39 @@ class HomeFragment : Fragment() {
         }
 
         return root
+    }
+
+    /**
+     * 주기적으로 메모리 상태를 확인하고 경고 발생 시 정리 작업을 수행합니다.
+     */
+    private fun setupPeriodicMemoryCheck() {
+        lifecycleScope.launch {
+            while (isActive) {
+                delay(10000) // 10초마다 확인
+                resourceMonitor?.let { monitor ->
+                    val warnings = monitor.checkAppMemoryWarnings()
+                    if (warnings.isNotEmpty()) {
+                        Log.w("HomeFragment", "메모리 경고: ${warnings.joinToString()}")
+                        // 필요시 응급 정리
+                        performEmergencyCleanup()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 메모리 부족 경고 시 비상 정리 작업을 수행합니다.
+     */
+    private fun performEmergencyCleanup() {
+        Log.w("HomeFragment", "🚨 메모리 부족 경고! 응급 정리 작업을 수행합니다.")
+        // 현재 비트맵 풀 정리
+        bitmapPool?.cleanup()
+        // 비트맵 풀 재초기화
+        bitmapPool?.initialize()
+
+        // GC 강제 실행 (메모리 회수를 돕기 위함)
+        System.gc()
     }
 
     /**
