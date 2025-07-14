@@ -12,10 +12,12 @@ import com.example.myapplication.data.streaming.StreamingClientFactory
 import com.example.myapplication.data.sync.DataSynchronizer
 import com.example.myapplication.data.sync.HybridSynchronizedDataEntry
 import com.example.myapplication.model.*
+import com.example.myapplication.utils.ResourceMonitor
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.*
+import java.text.DecimalFormat
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -28,38 +30,28 @@ class LoggerManager private constructor(
 ) {
     companion object {
         private const val TAG = "LoggerManager"
-
-        // Video Parameters
         private const val VIDEO_WIDTH = 840
         private const val VIDEO_HEIGHT = 840
         private const val VIDEO_FPS = 15
         private const val VIDEO_BITRATE = 1_200_000
         private const val I_FRAME_INTERVAL = 2
-
-        // Batch Processing Parameters
         private const val BATCH_SIZE = 15
         private const val BATCH_TIMEOUT_MS = 4000L
         private const val MAX_FRAME_BUFFER = 45
-
-        // 적응형 큐 용량 관리
         private const val MAX_GPS_QUEUE = 100
         private const val MAX_IMU_QUEUE = 5000
         private const val MAX_GNSS_QUEUE = 100
         private const val MAX_BBOX_QUEUE = 50
         private const val MAX_CAMERA_QUEUE = 45
-
-        // 완전한 GNSS 데이터 큐 용량
         private const val MAX_COMPREHENSIVE_GNSS_QUEUE = 1000
         private const val MAX_SATELLITE_STATUS_QUEUE = 500
         private const val MAX_NAVIGATION_QUEUE = 200
         private const val MAX_ANTENNA_QUEUE = 50
         private const val MAX_GNSS_CLOCK_QUEUE = 500
         private const val MAX_GNSS_SESSION_QUEUE = 100
-
         private const val BUFFER_SIZE = 8192
         private const val GPS_BASED_BATCH_INTERVAL = 1000L
         private const val GPS_BATCH_SIZE = 10
-
         private val videoSessionMutex = Mutex()
 
         @Volatile
@@ -72,33 +64,25 @@ class LoggerManager private constructor(
         }
     }
 
-    // 기존 큐들
     private val independentGpsQueue = ConcurrentLinkedQueue<IndependentGpsEntry>()
     private val independentImuQueue = ConcurrentLinkedQueue<IndependentImuEntry>()
     private val independentGnssQueue = ConcurrentLinkedQueue<IndependentGnssEntry>()
     private val independentBboxQueue = ConcurrentLinkedQueue<IndependentBboxEntry>()
     private val independentCameraQueue = ConcurrentLinkedQueue<IndependentCameraEntry>()
-
-    // 완전한 GNSS 데이터 큐들
     private val comprehensiveGnssQueue = ConcurrentLinkedQueue<IndependentComprehensiveGnssEntry>()
     private val satelliteStatusQueue = ConcurrentLinkedQueue<IndependentSatelliteStatusEntry>()
     private val navigationMessageQueue = ConcurrentLinkedQueue<IndependentNavigationEntry>()
     private val antennaInfoQueue = ConcurrentLinkedQueue<IndependentAntennaEntry>()
     private val gnssClockQueue = ConcurrentLinkedQueue<IndependentGnssClockEntry>()
     private val gnssSessionQueue = ConcurrentLinkedQueue<IndependentGnssSessionEntry>()
-
-    // Video encoding queue
     private val frameBuffer = ConcurrentLinkedQueue<SensorData>()
-
-    // 메모리 압박 상황 모니터링
     private val memoryMonitor = MemoryMonitor()
-
-    // 큐 접근 동기화
     private val queueAccessMutex = Mutex()
-
-    // GPS 상태 추적
     @Volatile
     private var currentGpsStatus = false
+
+    // **리소스 모니터 추가**
+    private val resourceMonitor = ResourceMonitor.getInstance(context)
 
     private inner class MemoryMonitor {
         fun getMemoryPressure(): Float {
@@ -111,7 +95,6 @@ class LoggerManager private constructor(
         fun isMemoryPressureHigh(): Boolean = getMemoryPressure() > 0.8f
     }
 
-    // 데이터 엔트리 정의 (생략, 기존과 동일)
     data class IndependentGpsEntry(
         val location: Location,
         val systemTime: Long,
@@ -188,17 +171,13 @@ class LoggerManager private constructor(
         val captureTime: Long = System.currentTimeMillis()
     )
 
-    // 상태 관리
     private var isLogSavingEnabled = false
     private var isLiveStreamingEnabled = false
-    private var currentLogDirectory: File? = null  // 로깅 세션의 폴더 경로 저장
-
+    private var currentLogDirectory: File? = null
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val encodingScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-
     private lateinit var liveStreamingClient: StreamingClient
     private var currentTransportType: String? = null
-
     private val lastBatchTime = AtomicLong(System.currentTimeMillis())
     private var videoEncoder: SimpleVideoEncoder? = null
     private val encoderMutex = Mutex()
@@ -209,7 +188,8 @@ class LoggerManager private constructor(
         startQueueMonitoring()
     }
 
-    // 큐 관리 메서드 (생략, 기존과 동일)
+    // 🚨 메모리 기반 큐 조작 함수들을 주석 처리
+    /*
     private fun <T> maintainAdaptiveQueueSize(
         queue: ConcurrentLinkedQueue<T>,
         baseSize: Int,
@@ -225,19 +205,17 @@ class LoggerManager private constructor(
         val memoryPressure = memoryMonitor.getMemoryPressure()
         maintainAdaptiveQueueSize(queue, maxSize, memoryPressure)
     }
+    */
 
-    // 데이터 푸시 메서드 (생략, 기존과 동일)
-    fun pushComprehensiveGnss(
-        comprehensiveData: ComprehensiveGnssData,
-        clockData: GnssClockData?
-    ) {
+    fun pushComprehensiveGnss(comprehensiveData: ComprehensiveGnssData, clockData: GnssClockData?) {
         if (shouldSave()) {
             val comprehensiveEntry = IndependentComprehensiveGnssEntry(
                 comprehensiveData = comprehensiveData,
                 clockData = clockData
             )
             comprehensiveGnssQueue.offer(comprehensiveEntry)
-            maintainQueueSize(comprehensiveGnssQueue, MAX_COMPREHENSIVE_GNSS_QUEUE)
+            // 🚨 메모리 기반 큐 크기 제한 주석 처리
+            // maintainQueueSize(comprehensiveGnssQueue, MAX_COMPREHENSIVE_GNSS_QUEUE)
         }
     }
 
@@ -245,7 +223,8 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val statusEntry = IndependentSatelliteStatusEntry(satelliteStatus = satelliteStatus)
             satelliteStatusQueue.offer(statusEntry)
-            maintainQueueSize(satelliteStatusQueue, MAX_SATELLITE_STATUS_QUEUE)
+            // 🚨 메모리 기반 큐 크기 제한 주석 처리
+            // maintainQueueSize(satelliteStatusQueue, MAX_SATELLITE_STATUS_QUEUE)
         }
     }
 
@@ -253,7 +232,8 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val navEntry = IndependentNavigationEntry(navigationData = navigationData)
             navigationMessageQueue.offer(navEntry)
-            maintainQueueSize(navigationMessageQueue, MAX_NAVIGATION_QUEUE)
+            // 🚨 메모리 기반 큐 크기 제한 주석 처리
+            // maintainQueueSize(navigationMessageQueue, MAX_NAVIGATION_QUEUE)
         }
     }
 
@@ -262,7 +242,8 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val antennaEntry = IndependentAntennaEntry(antennaData = antennaData)
             antennaInfoQueue.offer(antennaEntry)
-            maintainQueueSize(antennaInfoQueue, MAX_ANTENNA_QUEUE)
+            // 🚨 메모리 기반 큐 크기 제한 주석 처리
+            // maintainQueueSize(antennaInfoQueue, MAX_ANTENNA_QUEUE)
         }
     }
 
@@ -270,7 +251,8 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val clockEntry = IndependentGnssClockEntry(clockData = clockData)
             gnssClockQueue.offer(clockEntry)
-            maintainQueueSize(gnssClockQueue, MAX_GNSS_CLOCK_QUEUE)
+            // 🚨 메모리 기반 큐 크기 제한 주석 처리
+            // maintainQueueSize(gnssClockQueue, MAX_GNSS_CLOCK_QUEUE)
         }
     }
 
@@ -286,7 +268,8 @@ class LoggerManager private constructor(
         )
         val sessionEntry = IndependentGnssSessionEntry(sessionData = sessionSummary)
         gnssSessionQueue.offer(sessionEntry)
-        maintainQueueSize(gnssSessionQueue, MAX_GNSS_SESSION_QUEUE)
+        // 🚨 메모리 기반 큐 크기 제한 주석 처리
+        // maintainQueueSize(gnssSessionQueue, MAX_GNSS_SESSION_QUEUE)
     }
 
     fun recordSessionEnd(sessionDuration: Long, ttffMs: Long?) {
@@ -301,7 +284,8 @@ class LoggerManager private constructor(
         )
         val sessionEntry = IndependentGnssSessionEntry(sessionData = sessionSummary)
         gnssSessionQueue.offer(sessionEntry)
-        maintainQueueSize(gnssSessionQueue, MAX_GNSS_SESSION_QUEUE)
+        // 🚨 메모리 기반 큐 크기 제한 주석 처리
+        // maintainQueueSize(gnssSessionQueue, MAX_GNSS_SESSION_QUEUE)
     }
 
     fun pushGps(loc: Location, sysTs: Long = System.currentTimeMillis(), monoTs: Long = System.nanoTime()) {
@@ -312,7 +296,8 @@ class LoggerManager private constructor(
                 monoTime = monoTs
             )
             independentGpsQueue.offer(gpsEntry)
-            maintainQueueSize(independentGpsQueue, MAX_GPS_QUEUE)
+            // 🚨 메모리 기반 큐 크기 제한 주석 처리
+            // maintainQueueSize(independentGpsQueue, MAX_GPS_QUEUE)
         }
     }
 
@@ -324,7 +309,8 @@ class LoggerManager private constructor(
                 monoTime = monoTs
             )
             independentImuQueue.offer(imuEntry)
-            maintainQueueSize(independentImuQueue, MAX_IMU_QUEUE)
+            // 🚨 메모리 기반 큐 크기 제한 주석 처리
+            // maintainQueueSize(independentImuQueue, MAX_IMU_QUEUE)
         }
     }
 
@@ -332,7 +318,8 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val gnssEntry = IndependentGnssEntry(gnssData = g)
             independentGnssQueue.offer(gnssEntry)
-            maintainQueueSize(independentGnssQueue, MAX_GNSS_QUEUE)
+            // 🚨 메모리 기반 큐 크기 제한 주석 처리
+            // maintainQueueSize(independentGnssQueue, MAX_GNSS_QUEUE)
         }
     }
 
@@ -340,20 +327,22 @@ class LoggerManager private constructor(
         if (shouldSave()) {
             val bboxEntry = IndependentBboxEntry(bboxData = bboxes.toList())
             independentBboxQueue.offer(bboxEntry)
-            maintainQueueSize(independentBboxQueue, MAX_BBOX_QUEUE)
+            // 🚨 메모리 기반 큐 크기 제한 주석 처리
+            // maintainQueueSize(independentBboxQueue, MAX_BBOX_QUEUE)
         }
     }
 
     fun pushCamera(data: SensorData) {
         if (shouldSave()) {
             frameBuffer.offer(data)
+            // 🚨 frameBuffer만 기본 최대값으로 제한 유지 (완전히 무제한하면 너무 위험)
             while (frameBuffer.size > MAX_FRAME_BUFFER) {
                 frameBuffer.poll()
             }
-
             val cameraEntry = IndependentCameraEntry(cameraData = data)
             independentCameraQueue.offer(cameraEntry)
-            maintainQueueSize(independentCameraQueue, MAX_CAMERA_QUEUE)
+            // 🚨 메모리 기반 큐 크기 제한 주석 처리
+            // maintainQueueSize(independentCameraQueue, MAX_CAMERA_QUEUE)
         }
     }
 
@@ -368,26 +357,48 @@ class LoggerManager private constructor(
                             "Sat=${status.satelliteStatusQueueSize}, Nav=${status.navigationQueueSize}, " +
                             "Memory=${(memoryPressure * 100).toInt()}%")
                 }
+                // 🚨 메모리 압박 시 응급 정리 함수 호출 주석 처리
+                /*
                 if (memoryMonitor.isMemoryPressureHigh()) {
-                    performEmergencyCleanup()
+                    performEmergencyMemoryCleanup()
                 }
+                */
                 currentGpsStatus = dataSynchronizer.getGpsStatus().isGpsAvailable
                 delay(10000)
             }
         }
     }
 
-    private suspend fun performEmergencyCleanup() {
-        Log.w(TAG, "⚠️ 메모리 압박 감지, 응급 정리 수행")
+    // 🚨 응급 메모리 정리 함수 전체를 주석 처리
+    /*
+    private suspend fun performEmergencyMemoryCleanup() {
+        Log.w(TAG, "🚨 응급 메모리 정리 시작")
+        resourceMonitor.logResourceStatus(TAG, "응급 정리 전")
+
         queueAccessMutex.withLock {
-            while (independentImuQueue.size > MAX_IMU_QUEUE / 2) independentImuQueue.poll()
-            while (comprehensiveGnssQueue.size > MAX_COMPREHENSIVE_GNSS_QUEUE / 2) comprehensiveGnssQueue.poll()
-            while (satelliteStatusQueue.size > MAX_SATELLITE_STATUS_QUEUE / 2) satelliteStatusQueue.poll()
-            while (independentCameraQueue.size > MAX_CAMERA_QUEUE / 2) independentCameraQueue.poll()
+            while (independentImuQueue.size > MAX_IMU_QUEUE / 4) independentImuQueue.poll()
+            while (comprehensiveGnssQueue.size > MAX_COMPREHENSIVE_GNSS_QUEUE / 4) comprehensiveGnssQueue.poll()
+            while (satelliteStatusQueue.size > MAX_SATELLITE_STATUS_QUEUE / 4) satelliteStatusQueue.poll()
+            while (independentCameraQueue.size > MAX_CAMERA_QUEUE / 4) independentCameraQueue.poll()
+            while (frameBuffer.size > MAX_FRAME_BUFFER / 4) frameBuffer.poll()
         }
+
+        videoEncoder?.let {
+            try {
+                it.stopRecording()
+                videoEncoder = null
+                Log.d(TAG, "응급 정리: 비디오 인코더 중지")
+            } catch (e: Exception) {
+                Log.w(TAG, "비디오 인코더 중지 실패: ${e.message}")
+            }
+        }
+
         System.gc()
-        Log.d(TAG, "✅ 응급 정리 완료")
+        delay(200)
+        resourceMonitor.logResourceStatus(TAG, "응급 정리 후")
+        Log.d(TAG, "✅ 응급 메모리 정리 완료")
     }
+    */
 
     private fun startBatchProcessor() {
         ioScope.launch {
@@ -411,24 +422,37 @@ class LoggerManager private constructor(
 
         encoderMutex.withLock {
             try {
-                val runtime = Runtime.getRuntime()
-                val usedMemory = runtime.totalMemory() - runtime.freeMemory()
-                val maxMemory = runtime.maxMemory()
-                val memoryUsage = usedMemory.toFloat() / maxMemory.toFloat()
+                resourceMonitor.logAppResourceStatus(TAG, "배치 처리 시작: $reason")
 
-                if (memoryUsage > 0.85f) {
-                    Log.w(TAG, "⚠️ 메모리 사용률 높음: ${(memoryUsage * 100).toInt()}%, 배치 처리 지연")
+                val appMemory = resourceMonitor.getAppMemoryInfo()
+                val warnings = resourceMonitor.checkAppMemoryWarnings()
+
+                if (warnings.isNotEmpty()) {
+                    Log.w(TAG, "⚠️ 앱 메모리 경고: ${warnings.joinToString(", ")}")
+                }
+
+                // 앱 힙 메모리가 90% 이상이면 배치 지연
+                if (appMemory.heapUsagePercent > 90.0) {
+                    Log.w(TAG, "🔴 앱 힙 메모리 위험: ${appMemory.heapUsagePercent}%, 배치 처리 지연")
                     System.gc()
-                    delay(100)
+                    delay(200)
+                    return@withLock
+                }
+
+                // Native 힙 메모리가 200MB 이상이면 비트맵 정리 필요
+                if (appMemory.nativeHeapMB > 200) {
+                    Log.w(TAG, "🔴 Native 메모리 과다: ${appMemory.nativeHeapMB}MB, 비트맵 정리 필요")
                 }
 
                 val commonDirectory = getCurrentDataDirectory()
                 val currentMinuteId = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
 
                 if (videoEncoder != null && videoEncoder!!.getSessionId() != currentMinuteId) {
+                    Log.d(TAG, "🎬 비디오 인코더 세션 변경: ${videoEncoder!!.getSessionId()} -> $currentMinuteId")
                     videoEncoder?.stopRecording()
                     videoEncoder = null
                     System.gc()
+                    delay(50)
                 }
 
                 if (videoEncoder == null || !videoEncoder!!.isRecording()) {
@@ -437,6 +461,7 @@ class LoggerManager private constructor(
                     val started = videoEncoder!!.startRecording()
                     if (!started) {
                         Log.e(TAG, "비디오 인코더 시작 실패")
+                        resourceMonitor.logAppResourceStatus(TAG, "비디오 인코더 시작 실패")
                         return@withLock
                     }
                     currentSessionTimestamp = videoEncoder!!.getSessionId()
@@ -450,18 +475,29 @@ class LoggerManager private constructor(
                 var encodedFrames = 0
                 for (frame in framesToProcess) {
                     frame.bitmap?.let { bitmap ->
+                        val bitmapInfo = resourceMonitor.getBitmapMemoryUsage(bitmap)
+                        if (!bitmapInfo.isValid) {
+                            Log.w(TAG, "⚠️ 유효하지 않은 비트맵 감지: ${bitmapInfo.config}")
+                            return@let
+                        }
+                        if (bitmapInfo.sizeMB > 10) {
+                            Log.w(TAG, "⚠️ 큰 비트맵 감지: ${bitmapInfo.sizeMB}MB (${bitmapInfo.width}x${bitmapInfo.height})")
+                        }
                         if (!bitmap.isRecycled && bitmap.width > 0 && bitmap.height > 0) {
                             if (videoEncoder?.addFrame(bitmap) == true) {
                                 encodedFrames++
                             }
                         }
                         if (!bitmap.isRecycled) {
-                            bitmap.recycle()
+                            try {
+                                bitmap.recycle()
+                            } catch (e: Exception) {
+                                Log.w(TAG, "비트맵 재활용 실패: ${e.message}")
+                            }
                         }
                     }
                 }
 
-                // 카메라 데이터 큐에서 처리된 프레임 제거
                 queueAccessMutex.withLock {
                     repeat(framesToProcess.size.coerceAtMost(independentCameraQueue.size)) {
                         independentCameraQueue.poll()
@@ -469,20 +505,33 @@ class LoggerManager private constructor(
                 }
 
                 framesToProcess.clear()
-
-                // 비동기 배치 처리 (모든 데이터 파일에 쓰고 즉시 큐 비우기)
                 saveCompleteGnssDataOptimized()
 
                 lastBatchTime.set(System.currentTimeMillis())
-                Log.d(TAG, "$reason 완료: ${encodedFrames}프레임, 메모리 사용률: ${(memoryUsage * 100).toInt()}%")
+                resourceMonitor.logAppResourceStatus(TAG, "배치 처리 완료: ${encodedFrames}프레임")
+                Log.d(TAG, "$reason 완료: ${encodedFrames}프레임, 앱 힙 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
 
             } catch (e: OutOfMemoryError) {
                 Log.e(TAG, "❌ 메모리 부족으로 배치 처리 실패", e)
-                frameBuffer.clear()
-                independentCameraQueue.clear()
+                resourceMonitor.logAppResourceStatus(TAG, "메모리 부족 발생")
+
+                // OOM 발생 시 최소한의 정리
+                try {
+                    frameBuffer.clear()
+                    independentCameraQueue.clear()
+                    videoEncoder?.stopRecording()
+                    videoEncoder = null
+                    Log.w(TAG, "🚨 OOM 응급 정리 완료")
+                } catch (cleanupError: Exception) {
+                    Log.e(TAG, "응급 정리 중 오류: ${cleanupError.message}")
+                }
+
                 System.gc()
+                delay(500) // OOM 후 충분한 대기
+
             } catch (e: Exception) {
                 Log.e(TAG, "배치 처리 실패: ${e.message}", e)
+                resourceMonitor.logAppResourceStatus(TAG, "배치 처리 예외: ${e.message}")
                 System.gc()
             }
         }
@@ -505,7 +554,7 @@ class LoggerManager private constructor(
             )
             jobs.awaitAll()
         } catch (e: Exception) {
-            Log.e(TAG, "완전한 GNSSGNSS 데이터 저장 실패: ${e.message}", e)
+            Log.e(TAG, "완전한 GNSS 데이터 저장 실패: ${e.message}", e)
         }
     }
 
@@ -639,7 +688,6 @@ class LoggerManager private constructor(
         }
     }
 
-    // 파일 저장 헬퍼 함수
     private suspend fun <T> saveToFile(
         file: File,
         header: String,
@@ -662,7 +710,6 @@ class LoggerManager private constructor(
         }
     }
 
-    // 콘텐츠 빌더 메서드 (생략, 기존과 동일)
     private fun buildComprehensiveGnssContent(dataList: List<IndependentComprehensiveGnssEntry>): String {
         return buildString(dataList.size * 500) {
             for (entry in dataList) {
@@ -853,11 +900,9 @@ class LoggerManager private constructor(
         }
     }
 
-    // 상태 관리 및 제어 메서드
     fun enableLogSaving() {
+        resourceMonitor.logResourceStatus(TAG, "로그 저장 시작")
         isLogSavingEnabled = true
-
-        // 로깅 시작 시 폴더 생성
         currentLogDirectory = createLogDirectory()
 
         if (videoEncoder == null) {
@@ -866,18 +911,24 @@ class LoggerManager private constructor(
             val started = videoEncoder!!.startRecording()
             if (started) {
                 Log.d(TAG, "📁 로그 저장 및 비디오 녹화 활성화: ${currentLogDirectory!!.absolutePath}")
+                resourceMonitor.logResourceStatus(TAG, "로그 저장 활성화 완료")
             } else {
                 Log.e(TAG, "❌ 비디오 인코더 시작 실패")
+                resourceMonitor.logResourceStatus(TAG, "비디오 인코더 시작 실패")
                 videoEncoder = null
             }
         }
     }
 
     fun disableLogSaving() {
+        resourceMonitor.logResourceStatus(TAG, "로그 저장 중지 시작")
         isLogSavingEnabled = false
         videoEncoder?.stopRecording()
         videoEncoder = null
-        currentLogDirectory = null  // 로깅 세션 종료 시 폴더 경로 초기화
+        currentLogDirectory = null
+        System.gc()
+        runBlocking { delay(100) }
+        resourceMonitor.logResourceStatus(TAG, "로그 저장 중지 완료")
         Log.d(TAG, "📁 로그 저장 및 비디오 녹화 비활성화")
     }
 
@@ -894,7 +945,6 @@ class LoggerManager private constructor(
             return logDir
         } catch (e: Exception) {
             Log.e(TAG, "❌ 디렉토리 생성 실패: ${e.message}", e)
-            // 비상 폴더 생성
             val internalDir = File(context.filesDir, "gnss_data/$timestamp")
             internalDir.mkdirs()
             Log.w(TAG, "🚨 내부 저장소 사용: ${internalDir.absolutePath}")
@@ -946,7 +996,6 @@ class LoggerManager private constructor(
         }
     }
 
-    // 상태 정보 제공 (생략, 기존과 동일)
     data class IndependentQueueStatusInfo(
         val gpsQueueSize: Int,
         val imuQueueSize: Int,
@@ -1000,6 +1049,9 @@ class LoggerManager private constructor(
     }
 
     fun getSystemStatus(): String {
+        val memoryInfo = resourceMonitor.getDetailedMemoryInfo()
+        val warnings = resourceMonitor.checkMemoryWarnings()
+
         return buildString {
             append("=== LoggerManager 상태 ===\n")
             append("로그 저장: ${if (isLogSavingEnabled) "활성화" else "비활성화"}\n")
@@ -1013,6 +1065,7 @@ class LoggerManager private constructor(
             append("GNSS: ${queueStatus.gnssQueueSize}/${MAX_GNSS_QUEUE}\n")
             append("BBOX: ${queueStatus.bboxQueueSize}/${MAX_BBOX_QUEUE}\n")
             append("CAMERA: ${queueStatus.cameraQueueSize}/${MAX_CAMERA_QUEUE}\n")
+            append("프레임 버퍼: ${frameBuffer.size}/${MAX_FRAME_BUFFER}\n")
             append("=== 완전한 GNSS 큐 상태 ===\n")
             append("완전한 GNSS: ${queueStatus.comprehensiveGnssQueueSize}/${MAX_COMPREHENSIVE_GNSS_QUEUE}\n")
             append("위성 상태: ${queueStatus.satelliteStatusQueueSize}/${MAX_SATELLITE_STATUS_QUEUE}\n")
@@ -1021,7 +1074,14 @@ class LoggerManager private constructor(
             append("클럭: ${queueStatus.gnssClockQueueSize}/${MAX_GNSS_CLOCK_QUEUE}\n")
             append("세션: ${queueStatus.gnssSessionQueueSize}/${MAX_GNSS_SESSION_QUEUE}\n")
             append("총 데이터 포인트: ${queueStatus.totalDataPoints}\n")
-            append("메모리 사용률: ${(queueStatus.memoryPressure * 100).toInt()}%")
+            append("=== 메모리 상태 ===\n")
+            append("힙 사용률: ${DecimalFormat("#.#").format(memoryInfo.heapUsagePercent)}%\n")
+            append("사용 가능한 힙: ${DecimalFormat("#.#").format(memoryInfo.availableHeapMB)} MB\n")
+            append("시스템 메모리 부족: ${if (memoryInfo.systemMemoryLow) "예" else "아니오"}\n")
+            if (warnings.isNotEmpty()) {
+                append("=== 메모리 경고 ===\n")
+                warnings.forEach { append("⚠️ $it\n") }
+            }
         }
     }
 
@@ -1032,7 +1092,6 @@ class LoggerManager private constructor(
     private inline fun shouldSave() = isLogSavingEnabled
     private inline fun shouldLiveStream() = isLiveStreamingEnabled
 
-    // 헤더 정의 (생략, 기존과 동일)
     private val COMPREHENSIVE_GNSS_HEADER = """
 # Comprehensive GNSS Measurements Data - Complete Raw Signal Information
 CAPTURE_TIME	GPS_TIME	LOCAL_TIME	MONO_TIME	GNSS_TYPE	SAT_ID	CN0_DBZ	CARRIER_FREQ_HZ	MULTIPATH	PSEUDORANGE_RATE	PR_RATE_UNC	ACCUM_DELTA_RANGE	ADR_STATE	CARRIER_PHASE	CP_UNC	RX_SV_TIME_NANOS	RX_SV_TIME_UNC	STATE	AGC_DB	BASEBAND_CN0	CODE_TYPE	CLOCK_TIME_NANOS	CLOCK_FULL_BIAS	GPS_STATUS

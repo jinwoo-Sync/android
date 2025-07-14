@@ -29,11 +29,15 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = false // 이 부분이 요청하신 내용입니다.
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        debug {
+            isDebuggable = true // Correct property name for Kotlin DSL
+            applicationIdSuffix = ".debug"
         }
     }
     compileOptions {
@@ -104,4 +108,6 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+
+    debugImplementation("com.squareup.leakcanary:leakcanary-android:2.14")
 }
