@@ -7,9 +7,6 @@ import android.location.GnssStatus
 import android.os.Build
 import androidx.annotation.RequiresApi
 
-/**
- * ✅ 완전한 GNSS 측정 데이터 (GnssMeasurementsEvent의 모든 정보)
- */
 data class ComprehensiveGnssData(
     val gpsTimestamp: Long,
     val localTimestamp: Long,
@@ -156,7 +153,6 @@ data class GnssSessionSummary(
     val additionalInfo: String
 )
 
-// 새로운 통합 GNSS 데이터
 data class GnssData(
     val gpsTimestamp: Long,
     val localTimestamp: Long,
@@ -179,9 +175,7 @@ enum class SignalQuality {
     POOR,       // C/N0 15-25 dB-Hz
     VERY_POOR   // C/N0 < 15 dB-Hz
 }
-/**
- * ✅ GNSS 위성군 타입 열거형
- */
+
 enum class GnssConstellationType(val id: Int, val displayName: String) {
     UNKNOWN(0, "Unknown"),
     GPS(1, "GPS"),

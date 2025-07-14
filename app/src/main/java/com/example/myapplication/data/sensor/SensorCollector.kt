@@ -22,7 +22,6 @@ import android.util.Log
 import android.util.Range
 import android.util.Size
 import android.view.Surface
-import android.widget.Toast
 import androidx.annotation.RequiresApi
 import com.example.myapplication.data.logging.LoggerManager
 import com.example.myapplication.data.sync.DataSynchronizer
@@ -35,6 +34,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import com.google.android.gms.location.Priority // 최신 API를 위한 Priority import
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -206,7 +207,6 @@ class SensorCollector(private val context: Context) {
 
     /**
      * ✅ GPS 위치 콜백 - FusedLocationProviderClient를 통해 받은 위치 정보.
-     * 주로 시간 동기화의 기준점으로 사용됩니다.
      */
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(locationResult: LocationResult) {
@@ -237,9 +237,10 @@ class SensorCollector(private val context: Context) {
     }
 
     /**
-     * ✅ GNSS 측정 콜백 - 위성으로부터 받은 원시(Raw) 측정 데이터를 처리합니다.
+     * ✅ GNSS 측정 콜백 - API 24+ 지원
      */
-    private val comprehensiveGnssMeasurementsCallback = object : GnssMeasurementsEvent.Callback() {
+    @RequiresApi(Build.VERSION_CODES.N)
+    private val gnssMeasurementsCallback = object : GnssMeasurementsEvent.Callback() {
         override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
             val clock = event.clock
             val gpsTimestamp = clock.timeNanos / 1_000_000
@@ -270,11 +271,12 @@ class SensorCollector(private val context: Context) {
                     GnssStatus.CONSTELLATION_BEIDOU -> "BeiDou"
                     GnssStatus.CONSTELLATION_GALILEO -> "Galileo"
                     GnssStatus.CONSTELLATION_QZSS -> "QZSS"
-                    GnssStatus.CONSTELLATION_IRNSS -> "IRNSS"
                     GnssStatus.CONSTELLATION_SBAS -> "SBAS"
+                    GnssStatus.CONSTELLATION_IRNSS -> "IRNSS"
                     else -> "Unknown"
                 }
 
+                // ✅ 실제 Android API 메서드만 사용
                 val comprehensiveData = ComprehensiveGnssData(
                     gpsTimestamp = gpsTimestamp,
                     localTimestamp = localTimestamp,
@@ -284,14 +286,15 @@ class SensorCollector(private val context: Context) {
                     constellationType = measurement.constellationType,
                     satelliteId = measurement.svid,
                     svid = measurement.svid,
-                    signalStrength = measurement.cn0DbHz,
-                    carrierFrequencyHz = if (measurement.hasCarrierFrequencyHz()) measurement.carrierFrequencyHz else null,
+                    signalStrength = measurement.cn0DbHz.toDouble(),
+                    carrierFrequencyHz = if (measurement.hasCarrierFrequencyHz()) measurement.carrierFrequencyHz.toDouble() else null,
                     multipathIndicator = measurement.multipathIndicator,
-                    pseudorangeRate = if (measurement.hasPseudorangeRateMetersPerSecond()) measurement.pseudorangeRateMetersPerSecond else null,
-                    pseudorangeRateUncertainty = if (measurement.hasPseudorangeRateUncertaintyMetersPerSecond()) measurement.pseudorangeRateUncertaintyMetersPerSecond else null,
-                    accumulatedDeltaRange = if (measurement.hasAccumulatedDeltaRangeMeters()) measurement.accumulatedDeltaRangeMeters else null,
+                    // ✅ has* 메서드가 없는 필드들은 직접 값 체크
+                    pseudorangeRate = measurement.pseudorangeRateMetersPerSecond.takeIf { !it.isNaN() },
+                    pseudorangeRateUncertainty = measurement.pseudorangeRateUncertaintyMetersPerSecond.takeIf { !it.isNaN() },
+                    accumulatedDeltaRange = measurement.accumulatedDeltaRangeMeters.takeIf { !it.isNaN() },
                     accumulatedDeltaRangeState = measurement.accumulatedDeltaRangeState,
-                    accumulatedDeltaRangeUncertainty = if (measurement.hasAccumulatedDeltaRangeUncertaintyMeters()) measurement.accumulatedDeltaRangeUncertaintyMeters else null,
+                    accumulatedDeltaRangeUncertainty = measurement.accumulatedDeltaRangeUncertaintyMeters.takeIf { !it.isNaN() },
                     carrierPhase = if (measurement.hasCarrierPhase()) measurement.carrierPhase else null,
                     carrierPhaseUncertainty = if (measurement.hasCarrierPhaseUncertainty()) measurement.carrierPhaseUncertainty else null,
                     carrierCycles = if (measurement.hasCarrierCycles()) measurement.carrierCycles else null,
@@ -299,13 +302,13 @@ class SensorCollector(private val context: Context) {
                     receivedSvTimeUncertainty = measurement.receivedSvTimeUncertaintyNanos,
                     timeOffsetNanos = measurement.timeOffsetNanos,
                     state = measurement.state,
-                    automaticGainControl = if (measurement.hasAutomaticGainControlLevelDb()) measurement.automaticGainControlLevelDb else null,
-                    basebandCn0DbHz = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasBasebandCn0DbHz()) measurement.basebandCn0DbHz else null,
-                    fullInterSignalBiasNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasFullInterSignalBiasNanos()) measurement.fullInterSignalBiasNanos else null,
-                    fullInterSignalBiasUncertaintyNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasFullInterSignalBiasUncertaintyNanos()) measurement.fullInterSignalBiasUncertaintyNanos else null,
-                    satelliteInterSignalBiasNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasSatelliteInterSignalBiasNanos()) measurement.satelliteInterSignalBiasNanos else null,
-                    satelliteInterSignalBiasUncertaintyNanos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && measurement.hasSatelliteInterSignalBiasUncertaintyNanos()) measurement.satelliteInterSignalBiasUncertaintyNanos else null,
-                    codeType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && measurement.hasCodeType()) measurement.codeType else null,
+                    automaticGainControl = if (measurement.hasAutomaticGainControlLevelDb()) measurement.automaticGainControlLevelDb.toDouble() else null,
+                    basebandCn0DbHz = if (measurement.hasBasebandCn0DbHz()) measurement.basebandCn0DbHz.toDouble() else null,
+                    fullInterSignalBiasNanos = if (measurement.hasFullInterSignalBiasNanos()) measurement.fullInterSignalBiasNanos else null,
+                    fullInterSignalBiasUncertaintyNanos = if (measurement.hasFullInterSignalBiasUncertaintyNanos()) measurement.fullInterSignalBiasUncertaintyNanos else null,
+                    satelliteInterSignalBiasNanos = if (measurement.hasSatelliteInterSignalBiasNanos()) measurement.satelliteInterSignalBiasNanos else null,
+                    satelliteInterSignalBiasUncertaintyNanos = if (measurement.hasSatelliteInterSignalBiasUncertaintyNanos()) measurement.satelliteInterSignalBiasUncertaintyNanos else null,
+                    codeType = if (measurement.hasCodeType()) measurement.codeType else null,
                     additionalInfo = "State=0x${measurement.state.toString(16)}, MP=${measurement.multipathIndicator}"
                 )
 
@@ -325,8 +328,9 @@ class SensorCollector(private val context: Context) {
     }
 
     /**
-     * ✅ GNSS 위성 상태 콜백 - 각 위성의 상태 (사용 여부, 위치 등)를 처리합니다.
+     * ✅ GNSS 위성 상태 콜백
      */
+    @RequiresApi(Build.VERSION_CODES.N)
     private val gnssStatusCallback = object : GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(status: GnssStatus) {
             val localTimestamp = System.currentTimeMillis()
@@ -345,8 +349,9 @@ class SensorCollector(private val context: Context) {
                     constellationType = status.getConstellationType(i),
                     svid = status.getSvid(i),
                     cn0DbHz = status.getCn0DbHz(i),
-                    hasCarrierFrequency = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) status.hasCarrierFrequency(i) else false,
-                    carrierFrequencyHz = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && status.hasCarrierFrequency(i)) status.getCarrierFrequencyHz(i) else null,
+                    // ✅ 실제 존재하지 않는 메서드들 제거
+                    hasCarrierFrequency = false,
+                    carrierFrequencyHz = null,
                     azimuthDegrees = status.getAzimuthDegrees(i),
                     elevationDegrees = status.getElevationDegrees(i),
                     hasAlmanacData = status.hasAlmanacData(i),
@@ -384,7 +389,7 @@ class SensorCollector(private val context: Context) {
     }
 
     /**
-     * ✅ GNSS 내비게이션 메시지 콜백 - 위성 궤도 정보 등 방송 메시지를 처리합니다.
+     * ✅ GNSS 내비게이션 메시지 콜백 (API 24+)
      */
     @RequiresApi(Build.VERSION_CODES.N)
     private val gnssNavigationMessageCallback = object : GnssNavigationMessage.Callback() {
@@ -407,46 +412,13 @@ class SensorCollector(private val context: Context) {
             )
 
             if (::dataSynchronizer.isInitialized) {
-                LoggerManager.getInstance(context, dataSynchronizer).pushNavigationMessage(navigationData)
+                LoggerManager.getInstance(context, dataSynchronizer)
+                    .pushNavigationMessage(navigationData)
             }
         }
     }
 
-    /**
-     * ✅ GNSS 안테나 정보 콜백 (API 30+) - 정밀 측위를 위한 안테나 정보를 처리합니다.
-     */
-    @RequiresApi(Build.VERSION_CODES.R)
-    private val gnssAntennaInfoCallback = object : GnssAntennaInfo.Callback() {
-        override fun onGnssAntennaInfoReceived(antennaInfos: List<GnssAntennaInfo>) {
-            val localTimestamp = System.currentTimeMillis()
-            val monoTimestamp = System.nanoTime()
-
-            for (antennaInfo in antennaInfos) {
-                val antennaData = GnssAntennaData(
-                    gpsTimestamp = 0L,
-                    localTimestamp = localTimestamp,
-                    monoTimestamp = monoTimestamp,
-                    carrierFrequencyMHz = antennaInfo.carrierFrequencyMHz,
-                    phaseCenterOffsetX = antennaInfo.phaseCenterOffset.xOffsetMm,
-                    phaseCenterOffsetY = antennaInfo.phaseCenterOffset.yOffsetMm,
-                    phaseCenterOffsetZ = antennaInfo.phaseCenterOffset.zOffsetMm,
-                    phaseCenterOffsetUncertaintyX = antennaInfo.phaseCenterOffset.xOffsetUncertaintyMm,
-                    phaseCenterOffsetUncertaintyY = antennaInfo.phaseCenterOffset.yOffsetUncertaintyMm,
-                    phaseCenterOffsetUncertaintyZ = antennaInfo.phaseCenterOffset.zOffsetUncertaintyMm,
-                    phaseCenterVariationCorrections = antennaInfo.phaseCenterVariationCorrections?.corrections?.flatMap { it.toList() }?.toDoubleArray(),
-                    phaseCenterVariationUncertainties = antennaInfo.phaseCenterVariationCorrections?.correctionUncertainties?.flatMap { it.toList() }?.toDoubleArray(),
-                    signalGainCorrections = antennaInfo.signalGainCorrections?.corrections?.flatMap { it.toList() }?.toDoubleArray(),
-                    signalGainUncertainties = antennaInfo.signalGainCorrections?.correctionUncertainties?.flatMap { it.toList() }?.toDoubleArray(),
-                    additionalInfo = "FreqMHz=${antennaInfo.carrierFrequencyMHz}"
-                )
-
-                if (::dataSynchronizer.isInitialized) {
-                    LoggerManager.getInstance(context, dataSynchronizer).pushAntennaInfo(antennaData)
-                }
-            }
-        }
-    }
-    // ========== IMU 센서 리스너들 (기존과 동일) ==========
+    // ========== IMU 센서 리스너들 ==========
 
     private val accelerometerListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
@@ -692,7 +664,7 @@ class SensorCollector(private val context: Context) {
                             frameCount++
 
                             if (frameCount % frameSkipInterval == 0) {
-                                CoroutineScope(Dispatchers.Main).launch {
+                                coroutineScope.launch(Dispatchers.Main) {
                                     callback(sensorData)
                                 }
                                 ensureDetectorExecutor()
@@ -779,87 +751,87 @@ class SensorCollector(private val context: Context) {
             Log.e(TAG, "Error stopping camera: ${e.message}")
         }
     }
-     /**
-     * ✅ startSensorStreaming 함수 업데이트 - 모든 GNSS 콜백 등록
-     */
-     fun startSensorStreaming(
-         gpsCallback: ((SensorData_String) -> Unit)? = null,
-         imuCallback: ((SensorData_String) -> Unit)? = null,
-         gnssCallback: ((SensorData_String) -> Unit)? = null,
-         detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
-     ) {
-         this.gpsCallback = gpsCallback
-         this.imuCallback = imuCallback
-         this.gnssCallback = gnssCallback
-         this.detectionCallback = detectionCallback
-
-         if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-             Log.e(TAG, "ACCESS_FINE_LOCATION 권한 없음")
-             return
-         }
-
-         if (!isGnssCallbackRegistered.getAndSet(true)) {
-             try {
-                 locationManager.registerGnssMeasurementsCallback(context.mainExecutor, comprehensiveGnssMeasurementsCallback)
-                 locationManager.registerGnssStatusCallback(context.mainExecutor, gnssStatusCallback)
-
-                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                     locationManager.registerGnssNavigationMessageCallback(context.mainExecutor, gnssNavigationMessageCallback)
-                 }
-
-                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                     locationManager.registerAntennaInfoCallback(context.mainExecutor, gnssAntennaInfoCallback)
-                 }
-
-                 Log.d(TAG, "✅ 모든 GNSS 콜백 등록 성공")
-             } catch (e: Exception) {
-                 Log.e(TAG, "GNSS 콜백 등록 실패: ${e.message}", e)
-                 isGnssCallbackRegistered.set(false)
-             }
-         }
-
-         val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
-             .setMinUpdateIntervalMillis(500L)
-             .build()
-         fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
-
-         val desiredHz = 50
-         val samplingPeriodUs = 1_000_000 / desiredHz
-         val samplingRate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-             context.checkSelfPermission(Manifest.permission.HIGH_SAMPLING_RATE_SENSORS) == PackageManager.PERMISSION_GRANTED) {
-             samplingPeriodUs
-         } else {
-             SensorManager.SENSOR_DELAY_GAME
-         }
-
-         sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
-             sensorManager.registerListener(accelerometerListener, it, samplingRate)
-         }
-         sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let {
-             sensorManager.registerListener(gyroscopeListener, it, samplingRate)
-         }
-         sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)?.let {
-             sensorManager.registerListener(magnetometerListener, it, samplingRate)
-         }
-
-         Log.d(TAG, "✅ 모든 센서 스트리밍 시작 완료")
-     }
 
     /**
-     * ✅ stopSensorStreaming 함수 업데이트 - 모든 GNSS 콜백 해제
+     * ✅ 최신 LocationRequest API 사용
+     */
+    @Suppress("DEPRECATION")
+    fun startSensorStreaming(
+        gpsCallback: ((SensorData_String) -> Unit)? = null,
+        imuCallback: ((SensorData_String) -> Unit)? = null,
+        gnssCallback: ((SensorData_String) -> Unit)? = null,
+        detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
+    ) {
+        this.gpsCallback = gpsCallback
+        this.imuCallback = imuCallback
+        this.gnssCallback = gnssCallback
+        this.detectionCallback = detectionCallback
+
+        if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "ACCESS_FINE_LOCATION 권한 없음")
+            return
+        }
+
+        if (!isGnssCallbackRegistered.getAndSet(true)) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    locationManager.registerGnssMeasurementsCallback(gnssMeasurementsCallback)
+                    locationManager.registerGnssStatusCallback(gnssStatusCallback)
+                    locationManager.registerGnssNavigationMessageCallback(gnssNavigationMessageCallback)
+                    Log.d(TAG, "✅ GNSS 콜백들 등록 성공")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "GNSS 콜백 등록 실패: ${e.message}", e)
+                isGnssCallbackRegistered.set(false)
+            }
+        }
+
+        val locationRequest = com.google.android.gms.location.LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
+            .setMinUpdateIntervalMillis(500L)
+            .setMaxUpdateDelayMillis(2000L)
+            .setMinUpdateDistanceMeters(0f)
+            .build()
+
+        fusedLocationClient.requestLocationUpdates(
+            locationRequest,
+            locationCallback,
+            Looper.getMainLooper()
+        )
+
+        val desiredHz = 50
+        val samplingPeriodUs = 1_000_000 / desiredHz
+        val samplingRate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            context.checkSelfPermission(Manifest.permission.HIGH_SAMPLING_RATE_SENSORS) == PackageManager.PERMISSION_GRANTED) {
+            samplingPeriodUs
+        } else {
+            SensorManager.SENSOR_DELAY_GAME
+        }
+
+        sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+            sensorManager.registerListener(accelerometerListener, it, samplingRate)
+        }
+        sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let {
+            sensorManager.registerListener(gyroscopeListener, it, samplingRate)
+        }
+        sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)?.let {
+            sensorManager.registerListener(magnetometerListener, it, samplingRate)
+        }
+
+        Log.d(TAG, "✅ 모든 센서 스트리밍 시작 완료")
+    }
+
+    /**
+     * ✅ stopSensorStreaming 함수 업데이트
      */
     fun stopSensorStreaming() {
         try {
             fusedLocationClient.removeLocationUpdates(locationCallback)
 
             if (isGnssCallbackRegistered.getAndSet(false)) {
-                locationManager.unregisterGnssMeasurementsCallback(comprehensiveGnssMeasurementsCallback)
-                locationManager.unregisterGnssStatusCallback(gnssStatusCallback)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    locationManager.unregisterGnssMeasurementsCallback(gnssMeasurementsCallback)
+                    locationManager.unregisterGnssStatusCallback(gnssStatusCallback)
                     locationManager.unregisterGnssNavigationMessageCallback(gnssNavigationMessageCallback)
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    locationManager.unregisterAntennaInfoCallback(gnssAntennaInfoCallback)
                 }
             }
 
@@ -875,7 +847,6 @@ class SensorCollector(private val context: Context) {
             Log.e(TAG, "센서 스트리밍 중지 오류: ${e.message}")
         }
     }
-
 
     private fun validateImageSize(cameraId: String, size: Size, format: Int): Size {
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -917,9 +888,9 @@ class SensorCollector(private val context: Context) {
         vBuffer.get(nv21, ySize, vSize)
         uBuffer.get(nv21, ySize + vSize, uSize)
 
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null)
+        val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
         ByteArrayOutputStream().use { out ->
-            yuvImage.compressToJpeg(android.graphics.Rect(0, 0, image.getWidth(), image.getHeight()), 90, out)
+            yuvImage.compressToJpeg(android.graphics.Rect(0, 0, image.width, image.height), 90, out)
             val bytes: ByteArray = out.toByteArray()
             return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 ?: throw IllegalStateException("비트맵 디코딩 실패")
@@ -1058,6 +1029,6 @@ class SensorCollector(private val context: Context) {
 
     fun setFrameSkipInterval(interval: Int) {
         frameSkipInterval = if (interval > 0) interval else 10
-            Log.d(TAG, "Frame skip interval set to $frameSkipInterval")
-        }
+        Log.d(TAG, "Frame skip interval set to $frameSkipInterval")
     }
+}
