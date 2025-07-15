@@ -55,69 +55,67 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * 🎯 메모리 압박 모니터
  */
-class AdaptiveMemoryManager {
-    private val TAG = "AdaptiveMemoryManager"
+class DeepLearningAdaptiveManager {
+    private val TAG = "DeepLearningAdaptiveManager"
 
-    enum class MemoryPressure { LOW, MEDIUM, HIGH, CRITICAL }
+    enum class InferenceComplexity { LOW, MEDIUM, HIGH, CRITICAL }
 
-    data class ProcessingStrategy(
-        val frameSkip: Int,
-        val poolSize: Int,
-        val enableDetection: Boolean,
-        val qualityReduction: Float,
-        val concurrentLimit: Int
+    data class DetectionStrategy(
+        val skipInterval: Int,        // 프레임 스킵 간격 (이전 추론시간 기반)
+        val enableDetection: Boolean, // 딥러닝 활성화 여부
+        val qualityReduction: Float,  // 이미지 품질 (필요시)
+        val concurrentLimit: Int,     // 동시 추론 제한
+        val complexity: InferenceComplexity
     )
 
-    private val pressureThresholds = mapOf(
-        MemoryPressure.LOW to 0.6f,
-        MemoryPressure.MEDIUM to 0.75f,
-        MemoryPressure.HIGH to 0.85f,
-        MemoryPressure.CRITICAL to 0.95f
+    private val inferenceThresholds = mapOf(
+        InferenceComplexity.LOW to 60L,      // 60ms 미만
+        InferenceComplexity.MEDIUM to 80L,   // 60-80ms
+        InferenceComplexity.HIGH to 100L,    // 80-100ms
+        InferenceComplexity.CRITICAL to 120L // 100ms 이상
     )
 
-    fun getCurrentMemoryPressure(): MemoryPressure {
-        val runtime = Runtime.getRuntime()
-        val usedMemory = runtime.totalMemory() - runtime.freeMemory()
-        val maxMemory = runtime.maxMemory()
-        val usagePercent = usedMemory.toFloat() / maxMemory.toFloat()
-
+    fun getCurrentInferenceComplexity(lastInferenceMs: Long): InferenceComplexity {
         return when {
-            usagePercent >= pressureThresholds[MemoryPressure.CRITICAL]!! -> MemoryPressure.CRITICAL
-            usagePercent >= pressureThresholds[MemoryPressure.HIGH]!! -> MemoryPressure.HIGH
-            usagePercent >= pressureThresholds[MemoryPressure.MEDIUM]!! -> MemoryPressure.MEDIUM
-            else -> MemoryPressure.LOW
+            lastInferenceMs >= inferenceThresholds[InferenceComplexity.CRITICAL]!! -> InferenceComplexity.CRITICAL
+            lastInferenceMs >= inferenceThresholds[InferenceComplexity.HIGH]!! -> InferenceComplexity.HIGH
+            lastInferenceMs >= inferenceThresholds[InferenceComplexity.MEDIUM]!! -> InferenceComplexity.MEDIUM
+            else -> InferenceComplexity.LOW
         }
     }
 
-    fun getCurrentStrategy(): ProcessingStrategy {
-        return when (getCurrentMemoryPressure()) {
-            MemoryPressure.CRITICAL -> ProcessingStrategy(
-                frameSkip = 20,  // 1.5fps
-                poolSize = 2,
-                enableDetection = false,
-                qualityReduction = 0.5f,
-                concurrentLimit = 1
-            )
-            MemoryPressure.HIGH -> ProcessingStrategy(
-                frameSkip = 10,  // 3fps
-                poolSize = 4,
+    fun getCurrentDetectionStrategy(lastInferenceMs: Long): DetectionStrategy {
+        return when (getCurrentInferenceComplexity(lastInferenceMs)) {
+            InferenceComplexity.CRITICAL -> DetectionStrategy(
+                skipInterval = 8,      // 8프레임 스킵 (약 2fps)
                 enableDetection = true,
                 qualityReduction = 0.7f,
-                concurrentLimit = 1
+                concurrentLimit = 1,
+                complexity = InferenceComplexity.CRITICAL
             )
-            MemoryPressure.MEDIUM -> ProcessingStrategy(
-                frameSkip = 6,   // 5fps
-                poolSize = 6,
+
+            InferenceComplexity.HIGH -> DetectionStrategy(
+                skipInterval = 6,      // 6프레임 스킵 (약 2.5fps)
                 enableDetection = true,
-                qualityReduction = 0.85f,
-                concurrentLimit = 2
+                qualityReduction = 0.8f,
+                concurrentLimit = 1,
+                complexity = InferenceComplexity.HIGH
             )
-            MemoryPressure.LOW -> ProcessingStrategy(
-                frameSkip = 3,   // 10fps
-                poolSize = 8,
+
+            InferenceComplexity.MEDIUM -> DetectionStrategy(
+                skipInterval = 5,      // 5프레임 스킵 (3fps)
+                enableDetection = true,
+                qualityReduction = 0.9f,
+                concurrentLimit = 1,
+                complexity = InferenceComplexity.MEDIUM
+            )
+
+            InferenceComplexity.LOW -> DetectionStrategy(
+                skipInterval = 3,      // 3프레임 스킵 (5fps)
                 enableDetection = true,
                 qualityReduction = 1.0f,
-                concurrentLimit = 2
+                concurrentLimit = 1,
+                complexity = InferenceComplexity.LOW
             )
         }
     }
@@ -180,12 +178,19 @@ class SensorCollector(private val context: Context) {
     // 🎯 True Zero-Copy 시스템
     private lateinit var zeroCopyPool: TrueZeroCopyBitmapPool
     private lateinit var highSpeedProcessor: HighSpeedZeroCopyProcessor
-    private val adaptiveMemoryManager = AdaptiveMemoryManager()
+
 
     // 성능 모니터링
     private val frameProcessingStats = AtomicInteger(0)
+
+    private val deepLearningAdaptiveManager = DeepLearningAdaptiveManager()
+    private var currentDetectionStrategy =
+        deepLearningAdaptiveManager.getCurrentDetectionStrategy(60L)
+
+    // 딥러닝 전용 추론 관리
+    private var lastInferenceTimeMs = 60L  // 초기값
+    private var inferenceFrameSkipCount = 0
     private val lastStrategyUpdate = AtomicLong(0)
-    private var currentStrategy = adaptiveMemoryManager.getCurrentStrategy()
 
     private val TAG = "SensorCollector"
     private var frameSkipInterval = 10
@@ -331,10 +336,11 @@ class SensorCollector(private val context: Context) {
                 val gpsTimestamp = location.time
                 val localTimestamp = System.currentTimeMillis()
                 val monoTimestamp = System.nanoTime()
-                val isGpsTimeValid = gpsTimestamp > 0 && abs(gpsTimestamp - localTimestamp) < 86400000L
+                val isGpsTimeValid =
+                    gpsTimestamp > 0 && abs(gpsTimestamp - localTimestamp) < 86400000L
 
                 val sensorData = SensorData_String(
-                    value = "Lat: ${location.latitude}, Lon: ${location.longitude}, Alt: ${if(location.hasAltitude()) location.altitude else "N/A"}, Acc: ${if(location.hasAccuracy()) location.accuracy else "N/A"}m",
+                    value = "Lat: ${location.latitude}, Lon: ${location.longitude}, Alt: ${if (location.hasAltitude()) location.altitude else "N/A"}, Acc: ${if (location.hasAccuracy()) location.accuracy else "N/A"}m",
                     timestamp = localTimestamp,
                     monoTimestamp = monoTimestamp
                 )
@@ -342,7 +348,10 @@ class SensorCollector(private val context: Context) {
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
                     synchronized(this@SensorCollector) {
                         gpsCallback?.invoke(sensorData)
-                        Log.d(TAG, "✅ GPS 콜백 호출: Lat=${location.latitude}, Lon=${location.longitude}")
+                        Log.d(
+                            TAG,
+                            "✅ GPS 콜백 호출: Lat=${location.latitude}, Lon=${location.longitude}"
+                        )
                     }
                 }
 
@@ -426,11 +435,13 @@ class SensorCollector(private val context: Context) {
                     additionalInfo = "State=0x${measurement.state.toString(16)}, MP=${measurement.multipathIndicator}"
                 )
 
-                gnssCallback?.invoke(SensorData_String(
-                    value = "GNSS: ${comprehensiveData.gnssType}, Sat: ${comprehensiveData.satelliteId}, C/N0: ${comprehensiveData.signalStrength}",
-                    timestamp = localTimestamp,
-                    monoTimestamp = monoTimestamp
-                ))
+                gnssCallback?.invoke(
+                    SensorData_String(
+                        value = "GNSS: ${comprehensiveData.gnssType}, Sat: ${comprehensiveData.satelliteId}, C/N0: ${comprehensiveData.signalStrength}",
+                        timestamp = localTimestamp,
+                        monoTimestamp = monoTimestamp
+                    )
+                )
 
                 if (::dataSynchronizer.isInitialized) {
                     LoggerManager.getInstance(context, dataSynchronizer).pushComprehensiveGnss(
@@ -472,7 +483,8 @@ class SensorCollector(private val context: Context) {
                 )
 
                 if (::dataSynchronizer.isInitialized) {
-                    LoggerManager.getInstance(context, dataSynchronizer).pushSatelliteStatus(satelliteStatus)
+                    LoggerManager.getInstance(context, dataSynchronizer)
+                        .pushSatelliteStatus(satelliteStatus)
                 }
             }
         }
@@ -480,7 +492,8 @@ class SensorCollector(private val context: Context) {
         override fun onFirstFix(ttffMillis: Int) {
             firstFixTime = ttffMillis.toLong()
             if (::dataSynchronizer.isInitialized) {
-                LoggerManager.getInstance(context, dataSynchronizer).recordFirstFix(ttffMillis.toLong())
+                LoggerManager.getInstance(context, dataSynchronizer)
+                    .recordFirstFix(ttffMillis.toLong())
             }
         }
 
@@ -489,9 +502,11 @@ class SensorCollector(private val context: Context) {
         }
 
         override fun onStopped() {
-            val sessionDuration = if (gnssSessionStartTime > 0) System.currentTimeMillis() - gnssSessionStartTime else 0L
+            val sessionDuration =
+                if (gnssSessionStartTime > 0) System.currentTimeMillis() - gnssSessionStartTime else 0L
             if (::dataSynchronizer.isInitialized) {
-                LoggerManager.getInstance(context, dataSynchronizer).recordSessionEnd(sessionDuration, firstFixTime)
+                LoggerManager.getInstance(context, dataSynchronizer)
+                    .recordSessionEnd(sessionDuration, firstFixTime)
             }
             gnssSessionStartTime = 0L
             firstFixTime = null
@@ -535,6 +550,7 @@ class SensorCollector(private val context: Context) {
                 updateLatestImuData(systemTimestamp, monoTimestamp)
             }
         }
+
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
     }
 
@@ -548,6 +564,7 @@ class SensorCollector(private val context: Context) {
                 updateLatestImuData(systemTimestamp, monoTimestamp)
             }
         }
+
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
     }
 
@@ -561,6 +578,7 @@ class SensorCollector(private val context: Context) {
                 updateLatestImuData(systemTimestamp, monoTimestamp)
             }
         }
+
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
     }
 
@@ -572,7 +590,11 @@ class SensorCollector(private val context: Context) {
         }
 
         val sensorData = SensorData_String(
-            value = "ACC[${latestAccelerometer.joinToString(",")}] GYRO[${latestGyroscope.joinToString(",")}] MAG[${latestMagnetometer.joinToString(",")}]",
+            value = "ACC[${latestAccelerometer.joinToString(",")}] GYRO[${
+                latestGyroscope.joinToString(
+                    ","
+                )
+            }] MAG[${latestMagnetometer.joinToString(",")}]",
             timestamp = systemTimestamp,
             monoTimestamp = monoTimestamp
         )
@@ -582,7 +604,8 @@ class SensorCollector(private val context: Context) {
         }
 
         if (::dataSynchronizer.isInitialized) {
-            LoggerManager.getInstance(context, dataSynchronizer).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
+            LoggerManager.getInstance(context, dataSynchronizer)
+                .pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
         }
     }
 
@@ -607,8 +630,14 @@ class SensorCollector(private val context: Context) {
                 callback(null)
                 return
             }
-            val validatedSize = validateImageSize(cameraId, cameraConfig.imageSize, cameraConfig.imageFormat)
-            imageReader = ImageReader.newInstance(validatedSize.width, validatedSize.height, cameraConfig.imageFormat, 2).apply {
+            val validatedSize =
+                validateImageSize(cameraId, cameraConfig.imageSize, cameraConfig.imageFormat)
+            imageReader = ImageReader.newInstance(
+                validatedSize.width,
+                validatedSize.height,
+                cameraConfig.imageFormat,
+                2
+            ).apply {
                 setOnImageAvailableListener({ reader ->
                     val image = reader.acquireLatestImage()
                     image?.let {
@@ -620,11 +649,13 @@ class SensorCollector(private val context: Context) {
                                     buffer.get(bytes)
                                     BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                                 }
+
                                 ImageFormat.YUV_420_888 -> yuvToBitmap(it)
                                 else -> null
                             }
                             bitmap?.let { bmp ->
-                                val rotatedBitmap = safeRotateBitmap(bmp, getRotationDegrees(cameraId))
+                                val rotatedBitmap =
+                                    safeRotateBitmap(bmp, getRotationDegrees(cameraId))
                                 val frameId = System.currentTimeMillis()
                                 val systemTime = System.currentTimeMillis()
                                 val monoTime = System.nanoTime()
@@ -636,7 +667,8 @@ class SensorCollector(private val context: Context) {
                                     frameId = frameId
                                 )
                                 if (::dataSynchronizer.isInitialized) {
-                                    LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+                                    LoggerManager.getInstance(context, dataSynchronizer)
+                                        .pushCamera(sensorData)
                                 }
                                 callback(sensorData)
                                 ensureDetectorExecutor()
@@ -662,7 +694,8 @@ class SensorCollector(private val context: Context) {
                 override fun onOpened(camera: CameraDevice) {
                     cameraDevice = camera
                     cameraOpenCloseLock.release()
-                    val captureRequestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+                    val captureRequestBuilder =
+                        camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
                     imageReader?.surface?.let { surface ->
                         captureRequestBuilder.addTarget(surface)
                         applyCameraSettings(captureRequestBuilder, cameraId, cameraManager)
@@ -671,8 +704,13 @@ class SensorCollector(private val context: Context) {
                             object : CameraCaptureSession.StateCallback() {
                                 override fun onConfigured(session: CameraCaptureSession) {
                                     captureSession = session
-                                    session.setRepeatingRequest(captureRequestBuilder.build(), cameraConfig.captureCallback, null)
+                                    session.setRepeatingRequest(
+                                        captureRequestBuilder.build(),
+                                        cameraConfig.captureCallback,
+                                        null
+                                    )
                                 }
+
                                 override fun onConfigureFailed(session: CameraCaptureSession) {
                                     callback(null)
                                     closeCamera()
@@ -682,12 +720,14 @@ class SensorCollector(private val context: Context) {
                         )
                     } ?: callback(null)
                 }
+
                 override fun onDisconnected(camera: CameraDevice) {
                     cameraOpenCloseLock.release()
                     camera.close()
                     cameraDevice = null
                     callback(null)
                 }
+
                 override fun onError(camera: CameraDevice, error: Int) {
                     cameraOpenCloseLock.release()
                     camera.close()
@@ -731,7 +771,8 @@ class SensorCollector(private val context: Context) {
                 return
             }
 
-            val validatedSize = validateImageSize(cameraId, cameraConfig.imageSize, cameraConfig.imageFormat)
+            val validatedSize =
+                validateImageSize(cameraId, cameraConfig.imageSize, cameraConfig.imageFormat)
 
             imageReader = ImageReader.newInstance(
                 validatedSize.width,
@@ -765,7 +806,11 @@ class SensorCollector(private val context: Context) {
 
                                     // 🎯 시스템 초기화 및 스트리밍 시작
                                     if (initializeOptimizedMemorySystem()) {
-                                        session.setRepeatingRequest(builder.build(), cameraConfig.captureCallback, null)
+                                        session.setRepeatingRequest(
+                                            builder.build(),
+                                            cameraConfig.captureCallback,
+                                            null
+                                        )
                                         isStreaming.set(true)
                                         isSessionActive.set(true)
                                         Log.d(TAG, "🎯 고급 카메라 세션 시작: ${zeroCopyPool.getStatus()}")
@@ -810,6 +855,9 @@ class SensorCollector(private val context: Context) {
     /**
      * 🚀 최적화된 이미지 리스너 - 30Hz 고속 처리
      */
+    /**
+     * 🚀 최적화된 이미지 리스너 - Zero-Copy 구조 유지 + 딥러닝 선별 처리
+     */
     private fun createOptimizedImageListener(
         cameraId: String,
         callback: (SensorData?) -> Unit
@@ -820,18 +868,14 @@ class SensorCollector(private val context: Context) {
                 return@OnImageAvailableListener
             }
 
-            // 🎯 적응적 전략 업데이트
+            // 🎯 딥러닝 적응적 전략 업데이트 (1초마다)
             val now = System.currentTimeMillis()
             if (now - lastStrategyUpdate.get() > 1000) {
-                updateProcessingStrategy()
+                updateDetectionProcessingStrategy()
                 lastStrategyUpdate.set(now)
             }
 
             frameCount++
-            if (frameCount % currentStrategy.frameSkip != 0) {
-                reader.acquireLatestImage()?.close()
-                return@OnImageAvailableListener
-            }
 
             val image = reader.acquireLatestImage()
             if (image != null) {
@@ -841,12 +885,13 @@ class SensorCollector(private val context: Context) {
                     val rotationDegrees = getRotationDegrees(cameraId)
 
                     if (imageBytes != null) {
-                        // 🚀 Zero-Copy 처리
+                        // 🚀 Zero-Copy 처리 (모든 프레임 처리 - 15fps 보장)
                         val sharedBitmap = highSpeedProcessor.processZeroCopy(
                             imageBytes, rotationDegrees
                         )
 
                         if (sharedBitmap != null) {
+                            // ✅ 모든 프레임을 Zero-Copy로 처리
                             handleZeroCopyFrame(sharedBitmap, callback)
                         } else {
                             coroutineScope.launch(Dispatchers.Main) { callback(null) }
@@ -863,13 +908,17 @@ class SensorCollector(private val context: Context) {
     }
 
     /**
-     * 🎯 처리 전략 동적 업데이트
+     * 🎯 딥러닝 전용 처리 전략 업데이트
      */
-    private fun updateProcessingStrategy() {
-        val newStrategy = adaptiveMemoryManager.getCurrentStrategy()
-        if (newStrategy != currentStrategy) {
-            currentStrategy = newStrategy
-            Log.i(TAG, "🔄 처리 전략 업데이트: $newStrategy")
+    private fun updateDetectionProcessingStrategy() {
+        val newStrategy =
+            deepLearningAdaptiveManager.getCurrentDetectionStrategy(lastInferenceTimeMs)
+        if (newStrategy != currentDetectionStrategy) {
+            currentDetectionStrategy = newStrategy
+            Log.i(
+                TAG,
+                "🔄 딥러닝 처리 전략 업데이트: 추론시간=${lastInferenceTimeMs}ms → 스킵간격=${newStrategy.skipInterval}, 복잡도=${newStrategy.complexity}"
+            )
         }
     }
 
@@ -885,10 +934,12 @@ class SensorCollector(private val context: Context) {
                     buffer.get(bytes)
                     bytes
                 }
+
                 ImageFormat.YUV_420_888 -> {
                     // YUV를 즉시 JPEG로 변환
                     convertYuvToJpegBytes(image)
                 }
+
                 else -> null
             }
         } catch (e: Exception) {
@@ -937,10 +988,10 @@ class SensorCollector(private val context: Context) {
 
         frameProcessingStats.incrementAndGet()
 
-        // 🎯 LoggerManager에 푸시 (원본 참조 사용)
+        // ✅ 모든 프레임을 LoggerManager에 푸시 (.mp4 + .txt 저장용)
         if (::dataSynchronizer.isInitialized) {
             val sensorData = SensorData(
-                value = "ZeroCopy Frame: $frameId",
+                value = "AllFrame: $frameId",
                 bitmap = sharedBitmap.bitmap,
                 timestamp = systemTime,
                 monoTimestamp = System.nanoTime(),
@@ -949,18 +1000,20 @@ class SensorCollector(private val context: Context) {
             LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
         }
 
-        // 🎯 UI 업데이트 (즉시 참조 추가)
+        // ✅ 모든 프레임을 UI 업데이트 (즉시 참조 추가)
         val uiRef = sharedBitmap.addRef()
         if (uiRef != null) {
             coroutineScope.launch(Dispatchers.Main) {
                 try {
-                    callback(SensorData(
-                        value = "ZeroCopy Frame: $frameId",
-                        bitmap = uiRef.bitmap,
-                        timestamp = systemTime,
-                        monoTimestamp = System.nanoTime(),
-                        frameId = frameId
-                    ))
+                    callback(
+                        SensorData(
+                            value = "ZeroCopy Frame: $frameId",
+                            bitmap = uiRef.bitmap,
+                            timestamp = systemTime,
+                            monoTimestamp = System.nanoTime(),
+                            frameId = frameId
+                        )
+                    )
                     Log.d(TAG, "✅ Zero-Copy frame delivered: frameId=$frameId")
                 } finally {
                     uiRef.release()
@@ -968,29 +1021,8 @@ class SensorCollector(private val context: Context) {
             }
         }
 
-        // 🎯 Detection (즉시 참조 추가)
-        if (currentStrategy.enableDetection && frameProcessingStats.get() % 2 == 0) {
-            val detectionRef = sharedBitmap.addRef()
-            if (detectionRef != null) {
-                ensureDetectorExecutor()
-                if (detectorInitialized && !isDetecting) {
-                    isDetecting = true
-                    detectorExecutor.submit {
-                        try {
-                            detector?.detect(detectionRef.bitmap, frameId)
-                            Log.d(TAG, "🔍 Zero-Copy Detection: frameId=$frameId")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Detection 오류: ${e.message}", e)
-                        } finally {
-                            detectionRef.release()
-                            isDetecting = false
-                        }
-                    }
-                } else {
-                    detectionRef.release()
-                }
-            }
-        }
+        // 🎯 딥러닝만 선별적 처리 (이전 추론시간 기반)
+        handleSelectiveDetection(sharedBitmap, frameId)
 
         // 🎯 원본 해제
         sharedBitmap.release()
@@ -999,7 +1031,62 @@ class SensorCollector(private val context: Context) {
         if (frameCount % 90 == 0) {
             Log.i(TAG, "📊 ${zeroCopyPool.getStatus()}")
             Log.i(TAG, "📊 ${highSpeedProcessor.getStatus()}")
+            Log.i(TAG, "🎯 딥러닝 전략: ${currentDetectionStrategy}")
         }
+    }
+
+    /**
+     * 🎯 딥러닝 선별적 처리 - 이전 추론시간 기반 스킵
+     */
+    private fun handleSelectiveDetection(sharedBitmap: SharedBitmap, frameId: Long) {
+        inferenceFrameSkipCount++
+
+        // 현재 전략에 따른 스킵 여부 결정
+        if (inferenceFrameSkipCount >= currentDetectionStrategy.skipInterval) {
+            inferenceFrameSkipCount = 0
+
+            if (currentDetectionStrategy.enableDetection && frameProcessingStats.get() % 2 == 0) {
+                val detectionRef = sharedBitmap.addRef()
+                if (detectionRef != null) {
+                    ensureDetectorExecutor()
+                    if (detectorInitialized && !isDetecting) {
+                        isDetecting = true
+
+                        // 추론 시작 시간 기록
+                        val inferenceStartTime = System.currentTimeMillis()
+
+                        detectorExecutor.submit {
+                            try {
+                                detector?.detect(detectionRef.bitmap, frameId)
+
+                                // 추론 완료 시간 기록 및 전략 업데이트
+                                val inferenceEndTime = System.currentTimeMillis()
+                                val actualInferenceTime = inferenceEndTime - inferenceStartTime
+                                updateLastInferenceTime(actualInferenceTime)
+
+                                Log.d(
+                                    TAG,
+                                    "🔍 Zero-Copy Detection 완료: frameId=$frameId, 추론시간=${actualInferenceTime}ms"
+                                )
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Detection 오류: ${e.message}", e)
+                            } finally {
+                                detectionRef.release()
+                                isDetecting = false
+                            }
+                        }
+                    } else {
+                        detectionRef.release()
+                    }
+                }
+            }
+
+        }
+    }
+
+    private fun updateLastInferenceTime(inferenceTimeMs: Long) {
+        lastInferenceTimeMs = inferenceTimeMs
+        Log.d(TAG, "🎯 추론시간 업데이트: ${inferenceTimeMs}ms → 다음 전략에 반영")
     }
 
     /**
@@ -1094,7 +1181,9 @@ class SensorCollector(private val context: Context) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     locationManager.registerGnssMeasurementsCallback(gnssMeasurementsCallback)
                     locationManager.registerGnssStatusCallback(gnssStatusCallback)
-                    locationManager.registerGnssNavigationMessageCallback(gnssNavigationMessageCallback)
+                    locationManager.registerGnssNavigationMessageCallback(
+                        gnssNavigationMessageCallback
+                    )
                     Log.d(TAG, "GNSS 콜백들 등록 성공")
                 }
             } catch (e: Exception) {
@@ -1103,7 +1192,10 @@ class SensorCollector(private val context: Context) {
             }
         }
 
-        val locationRequest = com.google.android.gms.location.LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
+        val locationRequest = com.google.android.gms.location.LocationRequest.Builder(
+            Priority.PRIORITY_HIGH_ACCURACY,
+            1000L
+        )
             .setMinUpdateIntervalMillis(500L)
             .setMaxUpdateDelayMillis(2000L)
             .setMinUpdateDistanceMeters(0f)
@@ -1166,7 +1258,9 @@ class SensorCollector(private val context: Context) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     locationManager.unregisterGnssMeasurementsCallback(gnssMeasurementsCallback)
                     locationManager.unregisterGnssStatusCallback(gnssStatusCallback)
-                    locationManager.unregisterGnssNavigationMessageCallback(gnssNavigationMessageCallback)
+                    locationManager.unregisterGnssNavigationMessageCallback(
+                        gnssNavigationMessageCallback
+                    )
                 }
             }
 
@@ -1261,53 +1355,113 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    private fun applyCameraSettings(builder: CaptureRequest.Builder, cameraId: String, cameraManager: CameraManager) {
+    private fun applyCameraSettings(
+        builder: CaptureRequest.Builder,
+        cameraId: String,
+        cameraManager: CameraManager
+    ) {
         try {
             val characteristics = cameraManager.getCameraCharacteristics(cameraId)
             builder.set(CaptureRequest.JPEG_QUALITY, cameraConfig.jpegQuality.toByte())
-            if (characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES)?.contains(cameraConfig.aeMode) == true) {
+            if (characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES)
+                    ?.contains(cameraConfig.aeMode) == true
+            ) {
                 builder.set(CaptureRequest.CONTROL_AE_MODE, cameraConfig.aeMode)
                 builder.set(CaptureRequest.CONTROL_AE_LOCK, cameraConfig.aeLock)
-                builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, cameraConfig.aeExposureCompensation)
-                val availableFpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: emptyArray()
-                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, availableFpsRanges.firstOrNull { it.lower == cameraConfig.aeTargetFpsRange.lower && it.upper == cameraConfig.aeTargetFpsRange.upper } ?: availableFpsRanges.firstOrNull() ?: Range(15, 30))
-                builder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, cameraConfig.aePrecaptureTrigger)
-                builder.set(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, cameraConfig.aeAntibandingMode)
+                builder.set(
+                    CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
+                    cameraConfig.aeExposureCompensation
+                )
+                val availableFpsRanges =
+                    characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                        ?: emptyArray()
+                builder.set(
+                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                    availableFpsRanges.firstOrNull { it.lower == cameraConfig.aeTargetFpsRange.lower && it.upper == cameraConfig.aeTargetFpsRange.upper }
+                        ?: availableFpsRanges.firstOrNull() ?: Range(15, 30))
+                builder.set(
+                    CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
+                    cameraConfig.aePrecaptureTrigger
+                )
+                builder.set(
+                    CaptureRequest.CONTROL_AE_ANTIBANDING_MODE,
+                    cameraConfig.aeAntibandingMode
+                )
             }
             if (cameraConfig.focusDistance > 0f && characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) != null) {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
                 builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, cameraConfig.focusDistance)
-            } else if (characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.contains(cameraConfig.afMode) == true) {
+            } else if (characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)
+                    ?.contains(cameraConfig.afMode) == true
+            ) {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, cameraConfig.afMode)
-                if (cameraConfig.afRegions.isNotEmpty()) builder.set(CaptureRequest.CONTROL_AF_REGIONS, cameraConfig.afRegions)
+                if (cameraConfig.afRegions.isNotEmpty()) builder.set(
+                    CaptureRequest.CONTROL_AF_REGIONS,
+                    cameraConfig.afRegions
+                )
                 builder.set(CaptureRequest.CONTROL_AF_TRIGGER, cameraConfig.afTrigger)
             }
             if (characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true && cameraConfig.flashMode != CameraMetadata.FLASH_MODE_OFF) {
                 builder.set(CaptureRequest.FLASH_MODE, cameraConfig.flashMode)
             }
-            if (characteristics.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.contains(cameraConfig.awbMode) == true) {
+            if (characteristics.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)
+                    ?.contains(cameraConfig.awbMode) == true
+            ) {
                 builder.set(CaptureRequest.CONTROL_AWB_MODE, cameraConfig.awbMode)
                 builder.set(CaptureRequest.CONTROL_AWB_LOCK, cameraConfig.awbLock)
-                cameraConfig.colorCorrectionGains?.let { builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, it) }
-            }
-            cameraConfig.sensorExposureTime?.let { if (characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) != null) builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, it) }
-            cameraConfig.sensorSensitivity?.let { if (characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) != null) builder.set(CaptureRequest.SENSOR_SENSITIVITY, it) }
-            cameraConfig.sensorFrameDuration?.let { builder.set(CaptureRequest.SENSOR_FRAME_DURATION, it) }
-            characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.let { if (it.contains(cameraConfig.opticalStabilizationMode)) builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, cameraConfig.opticalStabilizationMode) }
-            characteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)?.let { maxZoom ->
-                if (cameraConfig.zoomRatio > 1.0f && maxZoom > 1.0f) {
-                    val zoomFactor = cameraConfig.zoomRatio.coerceAtMost(maxZoom)
-                    val rect = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
-                    rect?.let {
-                        val centerX = it.width() / 2
-                        val centerY = it.height() / 2
-                        val newWidth = (it.width() / zoomFactor).toInt()
-                        val newHeight = (it.height() / zoomFactor).toInt()
-                        val cropRect = android.graphics.Rect(centerX - newWidth / 2, centerY - newHeight / 2, centerX + newWidth / 2, centerY + newHeight / 2)
-                        builder.set(CaptureRequest.SCALER_CROP_REGION, cropRect)
-                    }
+                cameraConfig.colorCorrectionGains?.let {
+                    builder.set(
+                        CaptureRequest.COLOR_CORRECTION_GAINS,
+                        it
+                    )
                 }
             }
+            cameraConfig.sensorExposureTime?.let {
+                if (characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) != null) builder.set(
+                    CaptureRequest.SENSOR_EXPOSURE_TIME,
+                    it
+                )
+            }
+            cameraConfig.sensorSensitivity?.let {
+                if (characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) != null) builder.set(
+                    CaptureRequest.SENSOR_SENSITIVITY,
+                    it
+                )
+            }
+            cameraConfig.sensorFrameDuration?.let {
+                builder.set(
+                    CaptureRequest.SENSOR_FRAME_DURATION,
+                    it
+                )
+            }
+            characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+                ?.let {
+                    if (it.contains(cameraConfig.opticalStabilizationMode)) builder.set(
+                        CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                        cameraConfig.opticalStabilizationMode
+                    )
+                }
+            characteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)
+                ?.let { maxZoom ->
+                    if (cameraConfig.zoomRatio > 1.0f && maxZoom > 1.0f) {
+                        val zoomFactor = cameraConfig.zoomRatio.coerceAtMost(maxZoom)
+                        val rect =
+                            characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+                        rect?.let {
+                            val centerX = it.width() / 2
+                            val centerY = it.height() / 2
+                            val newWidth = (it.width() / zoomFactor).toInt()
+                            val newHeight = (it.height() / zoomFactor).toInt()
+                            val cropRect = android.graphics.Rect(
+                                centerX - newWidth / 2,
+                                centerY - newHeight / 2,
+                                centerX + newWidth / 2,
+                                centerY + newHeight / 2
+                            )
+                            builder.set(CaptureRequest.SCALER_CROP_REGION, cropRect)
+                        }
+                    }
+                }
             builder.set(CaptureRequest.NOISE_REDUCTION_MODE, cameraConfig.noiseReductionMode)
             builder.set(CaptureRequest.SHADING_MODE, cameraConfig.shadingMode)
             cameraConfig.tonemapCurve?.let { builder.set(CaptureRequest.TONEMAP_CURVE, it) }
@@ -1318,7 +1472,8 @@ class SensorCollector(private val context: Context) {
     }
 
     private fun getRotationDegrees(cameraId: String): Int {
-        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+        val windowManager =
+            context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
         val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             context.display?.rotation ?: windowManager.defaultDisplay.rotation
         } else {
@@ -1328,7 +1483,8 @@ class SensorCollector(private val context: Context) {
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         try {
             val characteristics = cameraManager.getCameraCharacteristics(cameraId)
-            val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+            val sensorOrientation =
+                characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
             return when (rotation) {
                 android.view.Surface.ROTATION_0 -> (sensorOrientation - cameraConfig.orientation + 360) % 360
                 android.view.Surface.ROTATION_90 -> (sensorOrientation - 90 - cameraConfig.orientation + 360) % 360
