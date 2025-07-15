@@ -224,7 +224,7 @@ class SensorCollector(private val context: Context) {
     var cameraConfig = CameraConfig(
         imageSize = Size(840, 840),
         lensFacing = CameraCharacteristics.LENS_FACING_BACK,
-        aeTargetFpsRange = Range(30, 30),
+        aeTargetFpsRange = Range(15, 15),
         jpegQuality = 90,
         flashMode = CameraMetadata.FLASH_MODE_OFF,
         afMode = CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE,
@@ -1378,7 +1378,7 @@ class SensorCollector(private val context: Context) {
                 builder.set(
                     CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
                     availableFpsRanges.firstOrNull { it.lower == cameraConfig.aeTargetFpsRange.lower && it.upper == cameraConfig.aeTargetFpsRange.upper }
-                        ?: availableFpsRanges.firstOrNull() ?: Range(15, 30))
+                        ?: availableFpsRanges.firstOrNull() ?: Range(15, 15))
                 builder.set(
                     CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
                     cameraConfig.aePrecaptureTrigger

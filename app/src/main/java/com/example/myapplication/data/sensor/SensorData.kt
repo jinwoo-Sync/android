@@ -102,7 +102,7 @@ data class CameraConfig(
     var aeMode: Int = CameraMetadata.CONTROL_AE_MODE_ON,
     var aeLock: Boolean = false,
     var aeExposureCompensation: Int = 0,
-    var aeTargetFpsRange: Range<Int> = Range(10, 15),
+    var aeTargetFpsRange: Range<Int> = Range(15, 15),
     var aePrecaptureTrigger: Int = CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE,
     var aeAntibandingMode: Int = CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO,
     var afMode: Int = CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO,

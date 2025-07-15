@@ -18,8 +18,11 @@ class HomeViewModel(
     private val sensorCollector: SensorCollector,
     private val homeRepository: HomeRepository
 ) : ViewModel() {
-    // ✅ TAG 추가
     private val TAG = "HomeViewModel"
+
+    // ✅ UI용 프레임 버퍼링
+    private var lastUIFrameTime = 0L
+    private val UI_FRAME_INTERVAL_MS = 66L  // 15fps (1000/15 = 66ms)
 
     private val _cameraFrame = MutableLiveData<Bitmap?>()
     val cameraFrame: LiveData<Bitmap?> = _cameraFrame
@@ -53,7 +56,6 @@ class HomeViewModel(
     private val _isStreaming = MutableLiveData<Boolean>(false)
     val isStreaming: LiveData<Boolean> = _isStreaming
 
-    // ✅ 센서 스트리밍 상태 분리
     private val _isSensorStreaming = MutableLiveData<Boolean>(false)
     val isSensorStreaming: LiveData<Boolean> = _isSensorStreaming
 
@@ -74,11 +76,9 @@ class HomeViewModel(
     private val _syncStatus = MutableLiveData<String>()
     val syncStatus: LiveData<String> = _syncStatus
 
-    // ✅ 센서 스트리밍 상태 관리 분리
     private var isSensorStreamingStarted = false
     private var isCameraStreamingJob: kotlinx.coroutines.Job? = null
 
-    // ✅ 비트맵 참조 관리
     private var currentBitmapRef: WeakReference<Bitmap>? = null
     private val bitmapLock = Object()
 
@@ -87,32 +87,16 @@ class HomeViewModel(
     }
 
     /**
-     * ✅ 안전한 비트맵 업데이트
+     * ✅ 안전한 비트맵 업데이트 - UI 프레임 레이트 제한
      */
     private fun updateCameraFrame(bitmap: Bitmap?) {
+        // 프레임 레이트 제한 로직 제거하고 자연스럽게 처리
         synchronized(bitmapLock) {
-            try {
-                // 이전 비트맵 참조 해제
-                currentBitmapRef?.get()?.let { oldBitmap ->
-                    if (oldBitmap != bitmap && !oldBitmap.isRecycled) {
-                        // 이전 비트맵이 UI에서 더 이상 사용되지 않으면 재활용
-                        // 실제로는 UI에서 안전하게 처리하도록 맡김
-                        Log.d(TAG, "Previous bitmap reference cleared")
-                    }
-                }
-
-                // 새 비트맵 설정
-                if (bitmap != null && !bitmap.isRecycled) {
-                    _cameraFrame.postValue(bitmap)
-                    currentBitmapRef = WeakReference(bitmap)
-                    Log.d(TAG, "✅ New bitmap set: ${bitmap.width}x${bitmap.height}")
-                } else {
-                    _cameraFrame.postValue(null)
-                    currentBitmapRef = null
-                    Log.d(TAG, "⚠️ Bitmap cleared (null or recycled)")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "비트맵 업데이트 오류: ${e.message}", e)
+            if (bitmap != null && !bitmap.isRecycled) {
+                _cameraFrame.postValue(bitmap)
+                currentBitmapRef = WeakReference(bitmap)
+                Log.d(TAG, "✅ UI Frame updated: ${bitmap.width}x${bitmap.height}")
+            } else {
                 _cameraFrame.postValue(null)
                 currentBitmapRef = null
             }
@@ -120,7 +104,7 @@ class HomeViewModel(
     }
 
     /**
-     * ✅ 센서 스트리밍 시작 (백그라운드 - GPS, IMU, GNSS) - 독립적으로 동작
+     * ✅ 센서 스트리밍 시작 (백그라운드 - GPS, IMU, GNSS)
      */
     fun startSensorStreaming() {
         if (isSensorStreamingStarted) {
@@ -168,21 +152,15 @@ class HomeViewModel(
                 }
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
-                Log.d(TAG, "🎯🎯🎯 ViewModel Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
+                Log.d(TAG, "🎯 ViewModel Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
 
                 if (boundingBoxes.isNotEmpty()) {
                     Log.d(TAG, "🎯 ViewModel에서 처리할 객체들: ${boundingBoxes.map { "${it.clsName}(conf=${it.cnf})" }}")
-                    boundingBoxes.forEachIndexed { index, bbox ->
-                        Log.d(TAG, "🎯 BBOX $index: ${bbox.clsName} at (${bbox.x1}, ${bbox.y1}) - (${bbox.x2}, ${bbox.y2})")
-                    }
-                } else {
-                    Log.d(TAG, "🎯 ViewModel: 감지된 객체 없음")
                 }
 
-                // ✅ 즉시 메인 스레드에서 UI 업데이트
                 viewModelScope.launch(Dispatchers.Main.immediate) {
                     try {
-                        _boundingBoxes.value = boundingBoxes  // postValue 대신 value 사용
+                        _boundingBoxes.value = boundingBoxes
                         _inferenceTime.value = "${inferenceTime}ms"
                         Log.d(TAG, "🎯 UI 업데이트 완료: ${boundingBoxes.size}개 바운딩박스")
                     } catch (e: Exception) {
@@ -197,7 +175,7 @@ class HomeViewModel(
     }
 
     /**
-     * ✅ 센서 스트리밍 중지 (백그라운드 센서) - 독립적으로 동작
+     * ✅ 센서 스트리밍 중지
      */
     fun stopSensorStreaming() {
         if (!isSensorStreamingStarted) {
@@ -210,13 +188,11 @@ class HomeViewModel(
         isSensorStreamingStarted = false
         _isSensorStreaming.postValue(false)
 
-        // ✅ 센서 데이터 UI 초기화
         _gpsData.postValue("GPS: 대기 중")
         _gnssData.postValue("GNSS: 대기 중")
         _imuData.postValue("IMU: 대기 중")
         _syncStatus.postValue("동기화 중지됨")
 
-        // ✅ Detection 관련 데이터 초기화
         synchronized(boundingBoxMap) { boundingBoxMap.clear() }
         lastGnssUpdateTime = 0L
         lastImuUpdateTime = 0L
@@ -224,7 +200,7 @@ class HomeViewModel(
     }
 
     /**
-     * ✅ 카메라 스트리밍 시작 (UI 버튼용) - 독립적으로 동작, 개선된 비트맵 관리
+     * ✅ 카메라 스트리밍 시작
      */
     private fun startCameraStreaming() {
         if (_isStreaming.value == true) {
@@ -235,20 +211,13 @@ class HomeViewModel(
         Log.d(TAG, "📹 카메라 스트리밍 시작")
         _text.value = "카메라 스트리밍 중..."
 
-        // ✅ 핵심 수정: Detection 콜백을 Repository에 설정
         homeRepository.detectionCallback = { boundingBoxes, inferenceTime, frameId ->
-            Log.d(TAG, "🎯🎯🎯 ViewModel Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
+            Log.d(TAG, "🎯 ViewModel Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
 
             if (boundingBoxes.isNotEmpty()) {
                 Log.d(TAG, "🎯 ViewModel에서 처리할 객체들: ${boundingBoxes.map { "${it.clsName}(conf=${it.cnf})" }}")
-                boundingBoxes.forEachIndexed { index, bbox ->
-                    //Log.d(TAG, "🎯 UI BBOX $index: ${bbox.clsName} at (${bbox.x1}, ${bbox.y1}) - (${bbox.x2}, ${bbox.y2})")
-                }
-            } else {
-                Log.d(TAG, "🎯 ViewModel: 감지된 객체 없음")
             }
 
-            // ✅ 메인 스레드에서 즉시 UI 업데이트
             viewModelScope.launch(Dispatchers.Main.immediate) {
                 try {
                     _boundingBoxes.value = boundingBoxes
@@ -262,19 +231,15 @@ class HomeViewModel(
             onNewInference(inferenceTime)
         }
 
-        // ✅ 카메라 스트리밍 시작
         homeRepository.startCameraStreaming()
 
-        // ✅ 이전 Job 취소
         isCameraStreamingJob?.cancel()
 
-        // ✅ 새로운 Flow 구독
         isCameraStreamingJob = viewModelScope.launch {
             Log.d(TAG, "✅ Camera Flow 구독 시작...")
             try {
                 homeRepository.cameraStreamFlow.collect { sensorData ->
                     if (sensorData != null) {
-                        // ✅ 안전한 비트맵 업데이트
                         updateCameraFrame(sensorData.bitmap)
                         Log.d(TAG, "✅ Camera frame received: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
                     } else {
@@ -291,7 +256,7 @@ class HomeViewModel(
     }
 
     /**
-     * ✅ 카메라 스트리밍 중지 (UI 버튼용)
+     * ✅ 카메라 스트리밍 중지
      */
     private fun stopCameraStreaming() {
         if (_isStreaming.value != true) {
@@ -301,30 +266,26 @@ class HomeViewModel(
 
         Log.d("HomeViewModel", "📹 카메라 스트리밍 중지")
 
-        // ✅ Flow 구독 취소
         isCameraStreamingJob?.cancel()
         isCameraStreamingJob = null
 
         homeRepository.stopCameraStreaming()
         _text.value = "카메라 스트리밍 중지됨"
 
-        // ✅ 카메라 관련 UI만 초기화
         updateCameraFrame(null)
         _boundingBoxes.postValue(emptyList())
         _inferenceTime.postValue("0ms")
 
-        // ✅ Detection 맵만 초기화 (센서 데이터는 유지)
         synchronized(boundingBoxMap) { boundingBoxMap.clear() }
     }
 
     /**
-     * ✅ 스트리밍 토글 (카메라만) - 센서 스트리밍과 독립적
+     * ✅ 스트리밍 토글
      */
     suspend fun toggleStreaming(context: Context) {
         if (_isStreaming.value == true) {
             stopCameraStreaming()
             _isStreaming.value = false
-            // ✅ 카메라 중지 시 서버 스트리밍도 중지
             setServerStreamingEnabled(context, false)
             Log.d("HomeViewModel", "Camera streaming stopped")
         } else {
@@ -335,35 +296,7 @@ class HomeViewModel(
     }
 
     /**
-     * ✅ Detection UI 업데이트 최적화
-     */
-    private fun checkAndUpdateDetectionUI(frameId: Long) {
-        viewModelScope.launch {
-            synchronized(boundingBoxMap) {
-                if (boundingBoxMap.containsKey(frameId)) {
-                    val (boxes, inferenceTime) = boundingBoxMap[frameId]!!
-
-                    // ✅ UI 업데이트
-                    _boundingBoxes.postValue(boxes)
-                    _inferenceTime.postValue("${inferenceTime}ms")
-
-                    Log.d("HomeViewModel", "🎯 UI 업데이트 완료: frameId=$frameId, boxes=${boxes.size}, inference=${inferenceTime}ms")
-
-                    // ✅ 사용된 데이터 제거
-                    boundingBoxMap.remove(frameId)
-
-                    // ✅ 오래된 데이터 정리 (메모리 누수 방지)
-                    val currentTime = System.currentTimeMillis()
-                    boundingBoxMap.entries.removeIf { (fId, _) ->
-                        currentTime - fId > 5000L // 5초 이상 된 데이터 제거
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * ✅ 프레임 캡처 (단일 프레임) - 기존 스트리밍과 독립적
+     * ✅ 프레임 캡처
      */
     suspend fun fetchCameraData() {
         if (_isStreaming.value == true) {
@@ -390,9 +323,6 @@ class HomeViewModel(
         }
     }
 
-    /**
-     * 로그 저장 토글 (Repository를 통해 관리)
-     */
     fun toggleLogSaving(context: Context, enabled: Boolean) {
         try {
             homeRepository.toggleLogSaving(context, enabled)
@@ -404,9 +334,6 @@ class HomeViewModel(
         }
     }
 
-    /**
-     * 서버 스트리밍 설정 (Repository를 통해 관리)
-     */
     suspend fun setServerStreamingEnabled(context: Context, enabled: Boolean) {
         try {
             homeRepository.setServerStreamingEnabled(context, enabled)
@@ -419,9 +346,6 @@ class HomeViewModel(
         }
     }
 
-    /**
-     * HTTP 스트리밍 설정 (Company Streaming)
-     */
     suspend fun setHttpStreamingEnabled(context: Context, enabled: Boolean) {
         try {
             homeRepository.setHttpStreamingEnabled(context, enabled)
@@ -437,20 +361,14 @@ class HomeViewModel(
         super.onCleared()
         Log.d("HomeViewModel", "🧹 ViewModel 정리 시작")
 
-        // ✅ 비트맵 참조 정리
         synchronized(bitmapLock) {
             currentBitmapRef = null
             Log.d(TAG, "✅ Bitmap references cleared")
         }
 
-        // ✅ 카메라 스트리밍 정지
         isCameraStreamingJob?.cancel()
         homeRepository.stopCameraStreaming()
-
-        // ✅ 센서 스트리밍 정지
         stopSensorStreaming()
-
-        // ✅ 리소스 정리
         sensorCollector.closeCamera()
         _isStreaming.value = false
 
@@ -498,9 +416,6 @@ class HomeViewModel(
         Log.d("HomeViewModel", "User frame skip control cleared; auto-control enabled")
     }
 
-    /**
-     * 동기화 상태 업데이트
-     */
     private fun updateSyncStatus() {
         viewModelScope.launch {
             try {
