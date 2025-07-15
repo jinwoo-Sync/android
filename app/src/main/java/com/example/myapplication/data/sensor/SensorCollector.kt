@@ -5,8 +5,12 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.ImageFormat
 import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.PorterDuff
 import android.graphics.YuvImage
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -17,12 +21,10 @@ import android.location.*
 import android.media.Image
 import android.media.ImageReader
 import android.os.Build
-import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.util.Range
 import android.util.Size
-import android.view.Surface
 import androidx.annotation.RequiresApi
 import com.example.myapplication.data.logging.LoggerManager
 import com.example.myapplication.data.sync.DataSynchronizer
@@ -44,6 +46,83 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
+import com.example.myapplication.utils.AdvancedBitmapPool
+import com.example.myapplication.utils.SafeZeroCopyFrameProcessor
+import com.example.myapplication.utils.ProcessedFrame
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * 🎯 메모리 압박 모니터
+ */
+class AdaptiveMemoryManager {
+    private val TAG = "AdaptiveMemoryManager"
+
+    enum class MemoryPressure { LOW, MEDIUM, HIGH, CRITICAL }
+
+    data class ProcessingStrategy(
+        val frameSkip: Int,
+        val poolSize: Int,
+        val enableDetection: Boolean,
+        val qualityReduction: Float,
+        val concurrentLimit: Int
+    )
+
+    private val pressureThresholds = mapOf(
+        MemoryPressure.LOW to 0.6f,
+        MemoryPressure.MEDIUM to 0.75f,
+        MemoryPressure.HIGH to 0.85f,
+        MemoryPressure.CRITICAL to 0.95f
+    )
+
+    fun getCurrentMemoryPressure(): MemoryPressure {
+        val runtime = Runtime.getRuntime()
+        val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+        val maxMemory = runtime.maxMemory()
+        val usagePercent = usedMemory.toFloat() / maxMemory.toFloat()
+
+        return when {
+            usagePercent >= pressureThresholds[MemoryPressure.CRITICAL]!! -> MemoryPressure.CRITICAL
+            usagePercent >= pressureThresholds[MemoryPressure.HIGH]!! -> MemoryPressure.HIGH
+            usagePercent >= pressureThresholds[MemoryPressure.MEDIUM]!! -> MemoryPressure.MEDIUM
+            else -> MemoryPressure.LOW
+        }
+    }
+
+    fun getCurrentStrategy(): ProcessingStrategy {
+        return when (getCurrentMemoryPressure()) {
+            MemoryPressure.CRITICAL -> ProcessingStrategy(
+                frameSkip = 20,  // 1.5fps
+                poolSize = 2,
+                enableDetection = false,
+                qualityReduction = 0.5f,
+                concurrentLimit = 1
+            )
+            MemoryPressure.HIGH -> ProcessingStrategy(
+                frameSkip = 10,  // 3fps
+                poolSize = 4,
+                enableDetection = true,
+                qualityReduction = 0.7f,
+                concurrentLimit = 1
+            )
+            MemoryPressure.MEDIUM -> ProcessingStrategy(
+                frameSkip = 6,   // 5fps
+                poolSize = 6,
+                enableDetection = true,
+                qualityReduction = 0.85f,
+                concurrentLimit = 2
+            )
+            MemoryPressure.LOW -> ProcessingStrategy(
+                frameSkip = 3,   // 10fps
+                poolSize = 8,
+                enableDetection = true,
+                qualityReduction = 1.0f,
+                concurrentLimit = 2
+            )
+        }
+    }
+}
+
 
 private class YoloDetectorListener(
     private val context: Context,
@@ -95,9 +174,20 @@ class SensorCollector(private val context: Context) {
     private val cameraOpenCloseLock = Semaphore(1)
     private val isStreaming = AtomicBoolean(false)
 
-    // ✅ 1. Flush 충돌 방지를 위한 상태 관리
+    // 🎯 고급 메모리 관리 시스템
     private val isSessionActive = AtomicBoolean(false)
     private val frameProcessingLock = Object()
+
+
+    private lateinit var advancedBitmapPool: AdvancedBitmapPool
+    private lateinit var safeFrameProcessor: SafeZeroCopyFrameProcessor
+    private val adaptiveMemoryManager = AdaptiveMemoryManager()
+
+    // 성능 모니터링
+    private val frameProcessingStats = AtomicInteger(0)
+    private val lastStrategyUpdate = AtomicLong(0)
+    private var currentStrategy = adaptiveMemoryManager.getCurrentStrategy()
+
 
     private val TAG = "SensorCollector"
     private var frameSkipInterval = 10
@@ -167,21 +257,30 @@ class SensorCollector(private val context: Context) {
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
-        // Detector 초기화는 DataSynchronizer 설정 후에 수행
+        initializeAdvancedSystems()
     }
 
-    // ✅ 2. 메모리 체크 유틸리티 추가
-    private fun canAllocateBitmap(width: Int, height: Int): Boolean {
-        val runtime = Runtime.getRuntime()
-        val requiredMemory = width * height * 4L // ARGB_8888
-        val availableMemory = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
-        return availableMemory > requiredMemory * 3 // 3배 안전 마진
+    private fun initializeAdvancedSystems() {
+        // 초기 전략 기반 풀 크기 설정
+        val initialStrategy = adaptiveMemoryManager.getCurrentStrategy()
+
+        advancedBitmapPool = AdvancedBitmapPool(
+            poolSize = initialStrategy.poolSize,
+            width = 840,
+            height = 840,
+            config = Bitmap.Config.ARGB_8888
+        )
+
+        // Safe 프로세서 사용
+        safeFrameProcessor = SafeZeroCopyFrameProcessor(
+            bitmapPool = advancedBitmapPool,
+            targetWidth = 840,
+            targetHeight = 840
+        )
+
+        Log.d(TAG, "🎯 고급 메모리 시스템 초기화: ${initialStrategy}")
     }
 
-    private fun forceGarbageCollection() {
-        System.gc()
-        Thread.yield()
-    }
 
     private fun initializeDetector() {
         if (!::dataSynchronizer.isInitialized) {
@@ -219,6 +318,7 @@ class SensorCollector(private val context: Context) {
         }
     }
 
+    // ... GPS, IMU, GNSS 콜백들은 기존과 동일하므로 생략 ...
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(locationResult: LocationResult) {
             locationResult.lastLocation?.let { location ->
@@ -595,6 +695,9 @@ class SensorCollector(private val context: Context) {
         }
     }
 
+    /**
+     * 🚀 고속 카메라 스트리밍 - Lock-Free 최적화 적용
+     */
     fun startCameraStreaming(
         callback: (SensorData?) -> Unit,
         detectionCallback: (List<BoundingBox>, Long, Long) -> Unit
@@ -607,204 +710,66 @@ class SensorCollector(private val context: Context) {
         }
 
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+
         try {
             if (context.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
                 callback(null)
                 return
             }
-            closeCamera()
+
+            // 기존 리소스 정리
+            cleanupCameraResources()
 
             val cameraId = selectCameraId(cameraManager) ?: run {
                 callback(null)
                 return
             }
+
             val validatedSize = validateImageSize(cameraId, cameraConfig.imageSize, cameraConfig.imageFormat)
 
             imageReader = ImageReader.newInstance(
                 validatedSize.width,
                 validatedSize.height,
                 cameraConfig.imageFormat,
-                2
+                4 // 버퍼 크기 최적화
             ).apply {
-                setOnImageAvailableListener({ reader ->
-                    // ✅ 1. Flush 상태 체크로 충돌 방지
-                    if (!isSessionActive.get()) {
-                        Log.d(TAG, "Session not active, skipping frame")
-                        return@setOnImageAvailableListener
-                    }
-
-                    // ✅ 3. 동시성 제어
-                    synchronized(frameProcessingLock) {
-                        reader.acquireLatestImage()?.use { image ->
-                            var originalBitmap: Bitmap? = null
-                            var currentBitmap: Bitmap? = null
-                            var finalBitmap: Bitmap? = null
-                            var detectionBitmap: Bitmap? = null
-
-                            try {
-                                // ✅ 2. 메모리 체크
-                                if (!canAllocateBitmap(image.width, image.height)) {
-                                    Log.w(TAG, "Insufficient memory, skipping frame")
-                                    forceGarbageCollection()
-                                    return@use
-                                }
-
-                                originalBitmap = when (cameraConfig.imageFormat) {
-                                    ImageFormat.JPEG -> {
-                                        val buffer = image.planes[0].buffer
-                                        val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
-                                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                    }
-                                    ImageFormat.YUV_420_888 -> yuvToBitmap(image)
-                                    else -> null
-                                }
-
-                                if (originalBitmap == null || originalBitmap.isRecycled) {
-                                    Log.e(TAG, "Failed to create bitmap from camera frame")
-                                    coroutineScope.launch(Dispatchers.Main) { callback(null) }
-                                    return@use
-                                }
-
-                                currentBitmap = originalBitmap
-
-                                if (currentBitmap.width != 840 || currentBitmap.height != 840) {
-                                    val scaledBitmap = Bitmap.createScaledBitmap(currentBitmap, 840, 840, true)
-                                    if (scaledBitmap != currentBitmap && !currentBitmap.isRecycled) {
-                                        currentBitmap.recycle()
-                                    }
-                                    currentBitmap = scaledBitmap
-                                }
-
-                                val rotationDegrees = getRotationDegrees(cameraId)
-                                if (rotationDegrees != 0) {
-                                    val rotatedBitmap = safeRotateBitmap(currentBitmap, rotationDegrees)
-                                    if (rotatedBitmap != null && rotatedBitmap != currentBitmap && !currentBitmap.isRecycled) {
-                                        currentBitmap.recycle()
-                                        currentBitmap = rotatedBitmap
-                                    }
-                                }
-
-                                val frameId = System.nanoTime()
-                                val systemTime = System.currentTimeMillis()
-                                val monoTime = System.nanoTime()
-
-                                if (currentBitmap != null && !currentBitmap.isRecycled) {
-                                    finalBitmap = try {
-                                        if (canAllocateBitmap(currentBitmap.width, currentBitmap.height)) {
-                                            currentBitmap.copy(currentBitmap.config ?: Bitmap.Config.ARGB_8888, false)
-                                        } else {
-                                            Log.w(TAG, "Insufficient memory for bitmap copy, using original")
-                                            currentBitmap
-                                        }
-                                    } catch (e: OutOfMemoryError) {
-                                        Log.e(TAG, "OutOfMemoryError creating bitmap copy", e)
-                                        forceGarbageCollection()
-                                        currentBitmap
-                                    }
-
-                                    if (finalBitmap != null) {
-                                        val sensorData = SensorData(
-                                            value = "Streaming: ${image.timestamp}",
-                                            bitmap = finalBitmap,
-                                            timestamp = systemTime,
-                                            monoTimestamp = monoTime,
-                                            frameId = frameId
-                                        )
-
-                                        if (::dataSynchronizer.isInitialized) {
-                                            LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
-                                        }
-
-                                        frameCount++
-
-                                        coroutineScope.launch(Dispatchers.Main) {
-                                            callback(sensorData)
-                                            Log.d(TAG, "UI callback called with frameId: $frameId")
-                                        }
-
-                                        if (frameCount % frameSkipInterval == 0) {
-                                            ensureDetectorExecutor()
-                                            if (detectorInitialized && !isDetecting) {
-                                                isDetecting = true
-                                                detectorExecutor.submit {
-                                                    try {
-                                                        // ✅ 4. Detection용 안전한 비트맵 생성
-                                                        detectionBitmap = try {
-                                                            if (canAllocateBitmap(finalBitmap.width, finalBitmap.height)) {
-                                                                finalBitmap.copy(finalBitmap.config ?: Bitmap.Config.ARGB_8888, false)
-                                                            } else {
-                                                                Log.w(TAG, "Insufficient memory for detection bitmap, skipping")
-                                                                null
-                                                            }
-                                                        } catch (e: OutOfMemoryError) {
-                                                            Log.e(TAG, "OutOfMemoryError creating detection bitmap", e)
-                                                            forceGarbageCollection()
-                                                            null
-                                                        }
-
-                                                        if (detectionBitmap != null && !detectionBitmap!!.isRecycled) {
-                                                            detector?.detect(detectionBitmap!!, frameId)
-                                                        }
-                                                    } catch (e: Exception) {
-                                                        Log.e(TAG, "Error in Detector.detect: ${e.message}", e)
-                                                    } finally {
-                                                        try {
-                                                            detectionBitmap?.let { bitmap ->
-                                                                if (!bitmap.isRecycled) {
-                                                                    bitmap.recycle()
-                                                                }
-                                                            }
-                                                        } catch (e: Exception) {
-                                                            Log.w(TAG, "Error recycling detection bitmap: ${e.message}")
-                                                        }
-                                                        detectionBitmap = null
-                                                        isDetecting = false
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error processing bitmap: ${e.message}", e)
-                                coroutineScope.launch(Dispatchers.Main) { callback(null) }
-                            } finally {
-                                try {
-                                    if (currentBitmap != null && currentBitmap != finalBitmap && !currentBitmap.isRecycled) {
-                                        currentBitmap.recycle()
-                                    }
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "Error recycling current bitmap: ${e.message}")
-                                }
-                            }
-                        }
-                    }
-                }, null)
+                setOnImageAvailableListener(createOptimizedImageListener(cameraId, callback), null)
             }
 
-            if (!cameraOpenCloseLock.tryAcquire(2, TimeUnit.SECONDS)) {
+            if (!cameraOpenCloseLock.tryAcquire(3, TimeUnit.SECONDS)) {
                 callback(null)
                 return
             }
+
             cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     cameraDevice = camera
                     cameraOpenCloseLock.release()
+
                     val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
                     imageReader?.surface?.let { surface ->
                         builder.addTarget(surface)
                         applyCameraSettings(builder, cameraId, cameraManager)
+
                         camera.createCaptureSession(
                             listOf(surface),
                             object : CameraCaptureSession.StateCallback() {
                                 override fun onConfigured(session: CameraCaptureSession) {
                                     captureSession = session
-                                    session.setRepeatingRequest(builder.build(), cameraConfig.captureCallback, null)
-                                    isStreaming.set(true)
-                                    isSessionActive.set(true) // ✅ 세션 활성화
-                                    Log.d(TAG, "Camera session configured and streaming started")
+
+                                    // 🎯 시스템 초기화 및 스트리밍 시작
+                                    if (initializeOptimizedMemorySystem()) {
+                                        session.setRepeatingRequest(builder.build(), cameraConfig.captureCallback, null)
+                                        isStreaming.set(true)
+                                        isSessionActive.set(true)
+                                        Log.d(TAG, "🎯 고급 카메라 세션 시작: ${advancedBitmapPool.getPoolStatus()}")
+                                    } else {
+                                        Log.e(TAG, "❌ 최적화된 메모리 시스템 초기화 실패")
+                                        callback(null)
+                                        cleanupCameraResources()
+                                    }
                                 }
+
                                 override fun onConfigureFailed(session: CameraCaptureSession) {
                                     Log.e(TAG, "Camera session configuration failed")
                                     callback(null)
@@ -813,16 +778,15 @@ class SensorCollector(private val context: Context) {
                             },
                             null
                         )
-                    } ?: run {
-                        Log.e(TAG, "ImageReader surface is null")
-                        callback(null)
                     }
                 }
+
                 override fun onDisconnected(camera: CameraDevice) {
                     Log.d(TAG, "Camera disconnected")
                     closeCamera()
                     callback(null)
                 }
+
                 override fun onError(camera: CameraDevice, error: Int) {
                     Log.e(TAG, "Camera error: $error")
                     closeCamera()
@@ -837,13 +801,196 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    fun stopCameraStreaming() {
-        if (!isStreaming.get()) return
+    /**
+     * 🚀 최적화된 이미지 리스너 - 30Hz 고속 처리
+     */
+    private fun createOptimizedImageListener(
+        cameraId: String,
+        callback: (SensorData?) -> Unit
+    ): ImageReader.OnImageAvailableListener {
+        return ImageReader.OnImageAvailableListener { reader ->
+            if (!isSessionActive.get()) {
+                Log.d(TAG, "세션 비활성화 상태, 프레임 스킵")
+                reader.acquireLatestImage()?.close()
+                return@OnImageAvailableListener
+            }
 
-        // ✅ 1. 세션 비활성화로 flush 충돌 방지
-        isSessionActive.set(false)
+            // 🎯 적응적 전략 업데이트 (1초마다)
+            val now = System.currentTimeMillis()
+            if (now - lastStrategyUpdate.get() > 1000) {
+                updateProcessingStrategy()
+                lastStrategyUpdate.set(now)
+            }
 
+            // 🎯 적응적 프레임 스킵
+            frameCount++
+            if (frameCount % currentStrategy.frameSkip != 0) {
+                reader.acquireLatestImage()?.close()
+                return@OnImageAvailableListener
+            }
+
+            // 🎯 메모리 압박 체크
+            val memoryPressure = adaptiveMemoryManager.getCurrentMemoryPressure()
+            if (memoryPressure == AdaptiveMemoryManager.MemoryPressure.CRITICAL) {
+                Log.w(TAG, "🔴 메모리 압박 위험 - 프레임 스킵")
+                reader.acquireLatestImage()?.close()
+                return@OnImageAvailableListener
+            }
+
+            // 🎯 Safe Image 처리 - use 블록으로 안전한 라이프사이클 관리
+            val image = reader.acquireLatestImage()
+            if (image != null) {
+                try {
+                    // Image 생존 중에 모든 필요한 데이터 추출
+                    val imageTimestamp = image.timestamp
+                    val rotationDegrees = getRotationDegrees(cameraId)
+
+                    // Safe 프로세싱 (이미지 close 후에도 안전)
+                    safeFrameProcessor.processSafely(
+                        image,
+                        rotationDegrees,
+                        imageTimestamp
+                    ) { processedFrame ->
+                        handleSafeProcessedFrame(processedFrame, callback)
+                    }
+
+                } finally {
+                    // 명시적으로 close
+                    image.close()
+                }
+            }
+        }
+    }
+
+    /**
+     * 🎯 Safe 처리된 프레임 핸들링
+     */
+    private fun handleSafeProcessedFrame(
+        processedFrame: ProcessedFrame?,
+        callback: (SensorData?) -> Unit
+    ) {
+        if (processedFrame == null) {
+            coroutineScope.launch(Dispatchers.Main) { callback(null) }
+            return
+        }
+
+        val managedBitmap = processedFrame.managedBitmap
+        val frameId = processedFrame.frameId
+        val systemTime = processedFrame.processedTimestamp
+        val monoTime = System.nanoTime()
+
+        // 🎯 LoggerManager에 푸시
+        if (::dataSynchronizer.isInitialized) {
+            val sensorData = SensorData(
+                value = "Safe Streaming: ${processedFrame.originalTimestamp}",
+                bitmap = managedBitmap.bitmap,
+                timestamp = systemTime,
+                monoTimestamp = monoTime,
+                frameId = frameId
+            )
+            LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+        }
+
+        frameProcessingStats.incrementAndGet()
+
+        // 🎯 UI 업데이트 (별도 참조)
+        coroutineScope.launch(Dispatchers.Main) {
+            val uiRef = managedBitmap.addRef()
+            if (uiRef != null) {
+                try {
+                    val uiSensorData = SensorData(
+                        value = "UI Frame: $frameId",
+                        bitmap = uiRef.bitmap,
+                        timestamp = systemTime,
+                        monoTimestamp = monoTime,
+                        frameId = frameId
+                    )
+                    callback(uiSensorData)
+                    Log.d(TAG, "✅ Safe Camera frame delivered: frameId=$frameId")
+                } finally {
+                    uiRef.release()
+                }
+            }
+        }
+
+        // 🎯 Detection (전략적 실행)
+        if (currentStrategy.enableDetection && frameProcessingStats.get() % 2 == 0) {
+            ensureDetectorExecutor()
+            if (detectorInitialized && !isDetecting) {
+                isDetecting = true
+                detectorExecutor.submit {
+                    val detectionRef = managedBitmap.addRef()
+                    if (detectionRef != null) {
+                        try {
+                            detector?.detect(detectionRef.bitmap, frameId)
+                            Log.d(TAG, "🔍 Safe Detection 수행: frameId=$frameId")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Detection 오류: ${e.message}", e)
+                        } finally {
+                            detectionRef.release()
+                            isDetecting = false
+                        }
+                    } else {
+                        isDetecting = false
+                        Log.w(TAG, "⚠️ Detection 참조 획득 실패")
+                    }
+                }
+            }
+        }
+
+        // 🎯 원본 참조 해제
+        managedBitmap.release()
+
+        // 🎯 주기적 상태 로깅
+        if (frameProcessingStats.get() % 150 == 0) {
+            Log.i(TAG, "📊 ${advancedBitmapPool.getPoolStatus()}")
+            Log.i(TAG, "📊 ${safeFrameProcessor.getProcessorStatus()}")
+            Log.i(TAG, "📊 메모리 전략: $currentStrategy")
+        }
+    }
+
+    /**
+     * 🎯 처리 전략 동적 업데이트
+     */
+    private fun updateProcessingStrategy() {
+        val newStrategy = adaptiveMemoryManager.getCurrentStrategy()
+        if (newStrategy != currentStrategy) {
+            currentStrategy = newStrategy
+            Log.i(TAG, "🔄 처리 전략 업데이트: $newStrategy")
+
+            // Pool 크기가 변경된 경우 재초기화 고려
+            if (newStrategy.poolSize != currentStrategy.poolSize) {
+                // 실시간 재조정은 위험하므로 로그만 남김
+                Log.w(TAG, "⚠️ 풀 크기 변경 감지됨 - 다음 초기화에서 적용")
+            }
+        }
+    }
+
+    /**
+     * 🎯 최적화된 메모리 시스템 초기화
+     */
+    private fun initializeOptimizedMemorySystem(): Boolean {
+        return try {
+            val poolInitialized = advancedBitmapPool.initialize()
+            if (poolInitialized) {
+                Log.d(TAG, "🎯 최적화된 메모리 시스템 초기화 완료")
+                true
+            } else {
+                Log.e(TAG, "❌ 비트맵 풀 초기화 실패")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 최적화된 메모리 시스템 초기화 실패: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
+     * 🎯 카메라 리소스만 정리 (풀 유지)
+     */
+    private fun cleanupCameraResources() {
         try {
+            isSessionActive.set(false)
             captureSession?.stopRepeating()
             captureSession?.close()
             captureSession = null
@@ -851,12 +998,81 @@ class SensorCollector(private val context: Context) {
             cameraDevice = null
             imageReader?.close()
             imageReader = null
+        } catch (e: Exception) {
+            Log.e(TAG, "카메라 리소스 정리 오류: ${e.message}")
+        }
+    }
+
+
+    /**
+     * 🎯 OOM 응급 처리
+     */
+    private fun handleOutOfMemoryEmergency() {
+        Log.w(TAG, "🚨 OOM 응급 처리 시작")
+
+        // 풀 강제 정리
+        advancedBitmapPool.cleanup()
+
+        // GC 강제 실행
+        System.gc()
+        System.runFinalization()
+
+        // 풀 재초기화
+        advancedBitmapPool.initialize()
+
+        Log.w(TAG, "🚨 OOM 응급 처리 완료")
+    }
+
+    /**
+     * 🎯 카메라 스트리밍 중지 - 리소스 정리 최적화
+     */
+    fun stopCameraStreaming() {
+        if (!isStreaming.get()) return
+
+        isSessionActive.set(false)
+
+        try {
+            cleanupCameraResources()
             isStreaming.set(false)
             frameCount = 0
+            frameProcessingStats.set(0)
+
             detector?.close()
             detectorExecutor.shutdownNow()
+
+            // 🎯 Safe 프로세서와 풀 정리
+            safeFrameProcessor.cleanup()
+            advancedBitmapPool.cleanup()
+
+            Log.d(TAG, "🎯 Safe 카메라 스트리밍 중지 완료")
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping camera: ${e.message}")
+        }
+    }
+
+
+    fun closeCamera() {
+        try {
+            isSessionActive.set(false)
+            cameraOpenCloseLock.acquire()
+
+            cleanupCameraResources()
+            isStreaming.set(false)
+
+            // 🎯 완전 종료 시에만 풀 정리
+            if (::advancedBitmapPool.isInitialized) {
+                advancedBitmapPool.cleanup()
+            }
+
+            Log.d(TAG, "🎯 카메라 리소스 및 고급 메모리 시스템 정리 완료")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error closing camera resources: ${e.message}")
+        } finally {
+            captureSession = null
+            cameraDevice = null
+            imageReader = null
+            isStreaming.set(false)
+            cameraOpenCloseLock.release()
         }
     }
 
@@ -982,6 +1198,7 @@ class SensorCollector(private val context: Context) {
         }
     }
 
+    // ... 나머지 유틸리티 함수들은 기존과 동일 ...
     private fun validateImageSize(cameraId: String, size: Size, format: Int): Size {
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         try {
@@ -1104,29 +1321,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    fun closeCamera() {
-        try {
-            isSessionActive.set(false) // ✅ 세션 비활성화
-            cameraOpenCloseLock.acquire()
-            captureSession?.stopRepeating()
-            captureSession?.close()
-            captureSession = null
-            cameraDevice?.close()
-            cameraDevice = null
-            imageReader?.close()
-            imageReader = null
-            isStreaming.set(false)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing camera resources: ${e.message}")
-        } finally {
-            captureSession = null
-            cameraDevice = null
-            imageReader = null
-            isStreaming.set(false)
-            cameraOpenCloseLock.release()
-        }
-    }
-
     private fun getRotationDegrees(cameraId: String): Int {
         val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
         val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -1160,8 +1354,7 @@ class SensorCollector(private val context: Context) {
 
         val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
         return try {
-            // ✅ 2. 메모리 체크 강화
-            if (!canAllocateBitmap(bitmap.width, bitmap.height)) {
+            if (!canAllocateMemory(bitmap.width, bitmap.height)) {
                 Log.w(TAG, "Insufficient memory for bitmap rotation, skipping")
                 return bitmap
             }
@@ -1169,12 +1362,19 @@ class SensorCollector(private val context: Context) {
             Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
         } catch (e: OutOfMemoryError) {
             Log.e(TAG, "OutOfMemoryError rotating bitmap", e)
-            forceGarbageCollection()
+            System.gc()
             bitmap
         } catch (e: Exception) {
             Log.e(TAG, "Error rotating bitmap: ${e.message}", e)
             bitmap
         }
+    }
+
+    private fun canAllocateMemory(width: Int, height: Int): Boolean {
+        val runtime = Runtime.getRuntime()
+        val requiredMemory = width * height * 4L
+        val availableMemory = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+        return availableMemory > requiredMemory * 2
     }
 
     fun setFrameSkipInterval(interval: Int) {
