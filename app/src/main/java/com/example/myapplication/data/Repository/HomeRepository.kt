@@ -13,6 +13,7 @@ import com.example.myapplication.learning.yolo.BoundingBox
 import com.example.myapplication.data.logging.LoggerManager
 
 class HomeRepository(
+    private val context: Context, // Context 추가
     private val sensorCollector: SensorCollector,
     private val dataSynchronizer: DataSynchronizer,
 ) {
@@ -33,7 +34,8 @@ class HomeRepository(
             sensorData?.let { dataList.add(it) }
         }
         return if (dataList.isNotEmpty()) {
-            dataSynchronizer.synchronizeData(dataList)
+            val loggerManager = LoggerManager.getInstance(context, dataSynchronizer)
+            loggerManager.getSynchronizedData(dataList)
         } else {
             emptyList()
         }
@@ -46,7 +48,8 @@ class HomeRepository(
     suspend fun collectNewSensorData(): SensorData? {
         Log.d(TAG, "Collecting new sensor data")
         val newData = collectSensorDataAsync() ?: return null
-        val syncedData = dataSynchronizer.synchronizeData(listOf(newData))
+        val loggerManager = LoggerManager.getInstance(context, dataSynchronizer)
+        val syncedData = loggerManager.getSynchronizedData(listOf(newData))
         return syncedData.firstOrNull()
     }
 
@@ -216,8 +219,8 @@ class HomeRepository(
 
             append("=== 데이터 동기화 상태 ===\n")
             append("GPS 사용 가능: ${gpsStatus.isGpsAvailable}\n")
-            append("마지막 GPS 시간: ${gpsStatus.lastGpsTime}\n")
-            append("GPS 오프셋: ${gpsStatus.gpsMonoOffset}ms\n")
+            append("마지막 GPS 시간: ${gpsStatus.lastGpsUpdateTime}\n")
+            append("GPS 오프셋: ${gpsStatus.gpsTimeoutDuration}ms\n")
             append("GPS 큐 크기: ${queueStatus.gpsQueueSize}\n")
             append("IMU 큐 크기: ${queueStatus.imuQueueSize}\n")
             append("GNSS 큐 크기: ${queueStatus.gnssQueueSize}\n")

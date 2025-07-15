@@ -241,7 +241,6 @@ class SensorCollector(private val context: Context) {
                 }
 
                 if (::dataSynchronizer.isInitialized) {
-                    dataSynchronizer.updateTimeSync(gpsTimestamp, localTimestamp, monoTimestamp, isGpsTimeValid)
                     LoggerManager.getInstance(context, dataSynchronizer).pushGps(
                         location, localTimestamp, monoTimestamp
                     )
@@ -478,7 +477,6 @@ class SensorCollector(private val context: Context) {
 
         if (::dataSynchronizer.isInitialized) {
             LoggerManager.getInstance(context, dataSynchronizer).pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
-            dataSynchronizer.updateTimeSync(null, systemTimestamp, monoTimestamp, false)
         }
     }
 

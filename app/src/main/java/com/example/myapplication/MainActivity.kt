@@ -44,7 +44,7 @@ class MainActivity : AppCompatActivity() {
 
         sensorCollector = SensorCollector(this)
         val dataSynchronizer = DataSynchronizer()
-        homeRepository = HomeRepository(sensorCollector, dataSynchronizer)
+        homeRepository = HomeRepository(this, sensorCollector, dataSynchronizer)
 
         // SensorCollector에 DataSynchronizer 설정
         sensorCollector.setDataSynchronizer(dataSynchronizer)

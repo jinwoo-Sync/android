@@ -2,7 +2,6 @@ package com.example.myapplication.data.sync
 
 import android.util.Log
 import com.example.myapplication.model.*
-import com.example.myapplication.data.Logger.*
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import com.example.myapplication.DataStructure.CircularQueue
@@ -65,6 +64,24 @@ data class GpsStatusInfo(
     val isGpsAvailable: Boolean,
     val lastGpsUpdateTime: Long,
     val gpsTimeoutDuration: Long = 5000L
+)
+
+data class QueueStatusInfo(
+    val gpsQueueSize: Int,
+    val imuQueueSize: Int,
+    val gnssQueueSize: Int,
+    val cameraQueueSize: Int,
+    val totalDataPoints: Int
+)
+
+data class HybridSynchronizedDataEntry(
+    val hybridTime: Long,
+    val gpsAvailable: Boolean,
+    val gpsData: Triple<android.location.Location, Long, Long>?,
+    val imuData: Pair<FloatArray, Long>?,
+    val gnssData: GnssData?,
+    val cameraData: SensorData?,
+    val bboxData: List<BoundingBoxLog>?
 )
 
 class DataSynchronizer {
@@ -351,6 +368,18 @@ class DataSynchronizer {
             )
         }
     }
+
+    /**
+     * 큐 상태 반환 (HomeRepository용)
+     */
+    fun getQueueStatus(): QueueStatusInfo {
+        return QueueStatusInfo(0, 0, 0, 0, 0) // Placeholder
+    }
+
+    /**
+     * GPS 모노 오프셋 반환
+     */
+    fun getGpsMonoOffset(): Long = timeSyncOffset
 
     // 시간 처리 관련 메서드들
     fun isTimeProcessed(time: Long): Boolean {

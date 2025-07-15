@@ -1058,6 +1058,24 @@ class LoggerManager private constructor(
         }
     }
 
+    fun getSynchronizedData(dataList: List<SensorData>): List<SensorData> {
+        val cameraQueue = CircularQueue<CameraEntry>(dataList.size)
+        dataList.forEach { sensorData ->
+            cameraQueue.push(object : CameraEntry {
+                override val cameraData = sensorData
+                override val captureTime = sensorData.timestamp
+            })
+        }
+        val gpsQueue = CircularQueue<GpsEntry>(0)
+        val imuQueue = CircularQueue<ImuEntry>(0)
+        val gnssQueue = CircularQueue<GnssEntry>(0)
+        val bboxQueue = CircularQueue<BboxEntry>(0)
+
+        dataSynchronizer.performSynchronization(gpsQueue, imuQueue, gnssQueue, cameraQueue, bboxQueue)
+        val syncResults = dataSynchronizer.extractGpsSynchronizedData()
+        return syncResults.mapNotNull { it.cameraEntry?.cameraData }
+    }
+
     fun getSystemStatus(): String {
         val memoryInfo = resourceMonitor.getDetailedMemoryInfo()
         val warnings = resourceMonitor.checkMemoryWarnings()
@@ -1134,7 +1152,7 @@ CAPTURE_TIME	SESSION_START	SESSION_END	FIRST_FIX_TIME	SESSION_DURATION	TOTAL_SAT
 
     private val GPS_SYNC_HEADER = """
 # GPS Synchronized Data (Hybrid Logical Clock)
-HYBRID_TIME	GPS_STATUS	LAT	LON	ALT	ACC_X	ACC_Y	ACC_Z	GYRO_X	GYRO_Y	GYRO_Z	MAG_X	MAG_Y	MAG_Z	GNSS_TYPE	SAT_ID	CN0	CAMERA_FRAME_ID	BBOX_COUNT
+GPS_TIME	GPS_STATUS	LAT	LON	ALT	ACC_X	ACC_Y	ACC_Z	GYRO_X	GYRO_Y	GYRO_Z	MAG_X	MAG_Y	MAG_Z	GNSS_TYPE	SAT_ID	CN0	CAMERA_FRAME_ID	BBOX_COUNT
 """.trimIndent()
 
     private val RAW_GPS_HEADER = """
