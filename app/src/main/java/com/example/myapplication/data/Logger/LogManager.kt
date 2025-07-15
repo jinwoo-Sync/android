@@ -9,8 +9,7 @@ import androidx.annotation.RequiresApi
 import com.example.myapplication.data.VideoEncoder.SimpleVideoEncoder
 import com.example.myapplication.data.streaming.StreamingClient
 import com.example.myapplication.data.streaming.StreamingClientFactory
-import com.example.myapplication.data.sync.DataSynchronizer
-import com.example.myapplication.data.sync.HybridSynchronizedDataEntry
+import com.example.myapplication.data.sync.*
 import com.example.myapplication.model.*
 import com.example.myapplication.utils.ResourceMonitor
 import kotlinx.coroutines.*
@@ -20,9 +19,9 @@ import java.io.*
 import java.text.DecimalFormat
 import java.text.SimpleDateFormat
 import java.util.*
-import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
+import com.example.myapplication.DataStructure.CircularQueue
 
 class LoggerManager private constructor(
     private val context: Context,
@@ -37,18 +36,20 @@ class LoggerManager private constructor(
         private const val I_FRAME_INTERVAL = 2
         private const val BATCH_SIZE = 15
         private const val BATCH_TIMEOUT_MS = 4000L
+
         private const val MAX_FRAME_BUFFER = 45
         private const val MAX_GPS_QUEUE = 100
         private const val MAX_IMU_QUEUE = 5000
         private const val MAX_GNSS_QUEUE = 100
         private const val MAX_BBOX_QUEUE = 50
-        private const val MAX_CAMERA_QUEUE = 45
+        private const val MAX_CAMERA_QUEUE = 1200
         private const val MAX_COMPREHENSIVE_GNSS_QUEUE = 1000
         private const val MAX_SATELLITE_STATUS_QUEUE = 500
         private const val MAX_NAVIGATION_QUEUE = 200
         private const val MAX_ANTENNA_QUEUE = 50
         private const val MAX_GNSS_CLOCK_QUEUE = 500
         private const val MAX_GNSS_SESSION_QUEUE = 100
+
         private const val BUFFER_SIZE = 8192
         private const val GPS_BASED_BATCH_INTERVAL = 1000L
         private const val GPS_BATCH_SIZE = 10
@@ -64,50 +65,20 @@ class LoggerManager private constructor(
         }
     }
 
-    private val independentGpsQueue = ConcurrentLinkedQueue<IndependentGpsEntry>()
-    private val independentImuQueue = ConcurrentLinkedQueue<IndependentImuEntry>()
-    private val independentGnssQueue = ConcurrentLinkedQueue<IndependentGnssEntry>()
-    private val independentBboxQueue = ConcurrentLinkedQueue<IndependentBboxEntry>()
-    private val independentCameraQueue = ConcurrentLinkedQueue<IndependentCameraEntry>()
-    private val comprehensiveGnssQueue = ConcurrentLinkedQueue<IndependentComprehensiveGnssEntry>()
-    private val satelliteStatusQueue = ConcurrentLinkedQueue<IndependentSatelliteStatusEntry>()
-    private val navigationMessageQueue = ConcurrentLinkedQueue<IndependentNavigationEntry>()
-    private val antennaInfoQueue = ConcurrentLinkedQueue<IndependentAntennaEntry>()
-    private val gnssClockQueue = ConcurrentLinkedQueue<IndependentGnssClockEntry>()
-    private val gnssSessionQueue = ConcurrentLinkedQueue<IndependentGnssSessionEntry>()
-    private val frameBuffer = ConcurrentLinkedQueue<SensorData>()
-    private val memoryMonitor = MemoryMonitor()
-    private val queueAccessMutex = Mutex()
-    @Volatile
-    private var currentGpsStatus = false
-
-    // **리소스 모니터 추가**
-    private val resourceMonitor = ResourceMonitor.getInstance(context)
-
-    private inner class MemoryMonitor {
-        fun getMemoryPressure(): Float {
-            val runtime = Runtime.getRuntime()
-            val usedMemory = runtime.totalMemory() - runtime.freeMemory()
-            val maxMemory = runtime.maxMemory()
-            return (usedMemory.toFloat() / maxMemory.toFloat()).coerceIn(0f, 1f)
-        }
-
-        fun isMemoryPressureHigh(): Boolean = getMemoryPressure() > 0.8f
-    }
-
+    // DataSynchronizer 인터페이스 구현체들
     data class IndependentGpsEntry(
-        val location: Location,
-        val systemTime: Long,
-        val monoTime: Long,
-        val captureTime: Long = System.currentTimeMillis()
-    )
+        override val location: Location,
+        override val systemTime: Long,
+        override val monoTime: Long,
+        override val captureTime: Long = System.currentTimeMillis()
+    ) : GpsEntry
 
     data class IndependentImuEntry(
-        val imuData: FloatArray,
-        val systemTime: Long,
-        val monoTime: Long,
-        val captureTime: Long = System.currentTimeMillis()
-    ) {
+        override val imuData: FloatArray,
+        override val systemTime: Long,
+        override val monoTime: Long,
+        override val captureTime: Long = System.currentTimeMillis()
+    ) : ImuEntry {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (javaClass != other?.javaClass) return false
@@ -126,19 +97,19 @@ class LoggerManager private constructor(
     }
 
     data class IndependentGnssEntry(
-        val gnssData: GnssData,
-        val captureTime: Long = System.currentTimeMillis()
-    )
+        override val gnssData: GnssData,
+        override val captureTime: Long = System.currentTimeMillis()
+    ) : GnssEntry
 
     data class IndependentBboxEntry(
-        val bboxData: List<BoundingBoxLog>,
-        val captureTime: Long = System.currentTimeMillis()
-    )
+        override val bboxData: List<BoundingBoxLog>,
+        override val captureTime: Long = System.currentTimeMillis()
+    ) : BboxEntry
 
     data class IndependentCameraEntry(
-        val cameraData: SensorData,
-        val captureTime: Long = System.currentTimeMillis()
-    )
+        override val cameraData: SensorData,
+        override val captureTime: Long = System.currentTimeMillis()
+    ) : CameraEntry
 
     data class IndependentComprehensiveGnssEntry(
         val comprehensiveData: ComprehensiveGnssData,
@@ -171,6 +142,39 @@ class LoggerManager private constructor(
         val captureTime: Long = System.currentTimeMillis()
     )
 
+    // CircularQueue 기반 큐들 - 자동 크기 관리
+    private val independentGpsQueue = CircularQueue<IndependentGpsEntry>(MAX_GPS_QUEUE)
+    private val independentImuQueue = CircularQueue<IndependentImuEntry>(MAX_IMU_QUEUE)
+    private val independentGnssQueue = CircularQueue<IndependentGnssEntry>(MAX_GNSS_QUEUE)
+    private val independentBboxQueue = CircularQueue<IndependentBboxEntry>(MAX_BBOX_QUEUE)
+    private val independentCameraQueue = CircularQueue<IndependentCameraEntry>(MAX_CAMERA_QUEUE)
+    private val comprehensiveGnssQueue = CircularQueue<IndependentComprehensiveGnssEntry>(MAX_COMPREHENSIVE_GNSS_QUEUE)
+    private val satelliteStatusQueue = CircularQueue<IndependentSatelliteStatusEntry>(MAX_SATELLITE_STATUS_QUEUE)
+    private val navigationMessageQueue = CircularQueue<IndependentNavigationEntry>(MAX_NAVIGATION_QUEUE)
+    private val antennaInfoQueue = CircularQueue<IndependentAntennaEntry>(MAX_ANTENNA_QUEUE)
+    private val gnssClockQueue = CircularQueue<IndependentGnssClockEntry>(MAX_GNSS_CLOCK_QUEUE)
+    private val gnssSessionQueue = CircularQueue<IndependentGnssSessionEntry>(MAX_GNSS_SESSION_QUEUE)
+    private val frameBuffer = CircularQueue<SensorData>(MAX_FRAME_BUFFER)
+
+    private val memoryMonitor = MemoryMonitor()
+    private val queueAccessMutex = Mutex()
+    @Volatile
+    private var currentGpsStatus = false
+
+    // **리소스 모니터 추가**
+    private val resourceMonitor = ResourceMonitor.getInstance(context)
+
+    private inner class MemoryMonitor {
+        fun getMemoryPressure(): Float {
+            val runtime = Runtime.getRuntime()
+            val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+            val maxMemory = runtime.maxMemory()
+            return (usedMemory.toFloat() / maxMemory.toFloat()).coerceIn(0f, 1f)
+        }
+
+        fun isMemoryPressureHigh(): Boolean = getMemoryPressure() > 0.8f
+    }
+
     private var isLogSavingEnabled = false
     private var isLiveStreamingEnabled = false
     private var currentLogDirectory: File? = null
@@ -188,47 +192,27 @@ class LoggerManager private constructor(
         startQueueMonitoring()
     }
 
-    // 🚨 메모리 기반 큐 조작 함수들을 주석 처리
-    private fun <T> maintainAdaptiveQueueSize(
-        queue: ConcurrentLinkedQueue<T>,
-        baseSize: Int,
-        memoryPressure: Float
-    ) {
-        val adaptiveSize = (baseSize * (1.0f - memoryPressure * 0.5f)).toInt()
-        while (queue.size > adaptiveSize) {
-            queue.poll()
-        }
-    }
-
-    private fun <T> maintainQueueSize(queue: ConcurrentLinkedQueue<T>, maxSize: Int) {
-        val memoryPressure = memoryMonitor.getMemoryPressure()
-        maintainAdaptiveQueueSize(queue, maxSize, memoryPressure)
-    }
-
     fun pushComprehensiveGnss(comprehensiveData: ComprehensiveGnssData, clockData: GnssClockData?) {
         if (shouldSave()) {
             val comprehensiveEntry = IndependentComprehensiveGnssEntry(
                 comprehensiveData = comprehensiveData,
                 clockData = clockData
             )
-            comprehensiveGnssQueue.offer(comprehensiveEntry)
-            maintainQueueSize(comprehensiveGnssQueue, MAX_COMPREHENSIVE_GNSS_QUEUE)
+            comprehensiveGnssQueue.push(comprehensiveEntry) // 자동 크기 관리
         }
     }
 
     fun pushSatelliteStatus(satelliteStatus: GnssSatelliteStatus) {
         if (shouldSave()) {
             val statusEntry = IndependentSatelliteStatusEntry(satelliteStatus = satelliteStatus)
-            satelliteStatusQueue.offer(statusEntry)
-            maintainQueueSize(satelliteStatusQueue, MAX_SATELLITE_STATUS_QUEUE)
+            satelliteStatusQueue.push(statusEntry) // 자동 크기 관리
         }
     }
 
     fun pushNavigationMessage(navigationData: GnssNavigationData) {
         if (shouldSave()) {
             val navEntry = IndependentNavigationEntry(navigationData = navigationData)
-            navigationMessageQueue.offer(navEntry)
-            maintainQueueSize(navigationMessageQueue, MAX_NAVIGATION_QUEUE)
+            navigationMessageQueue.push(navEntry) // 자동 크기 관리
         }
     }
 
@@ -236,16 +220,14 @@ class LoggerManager private constructor(
     fun pushAntennaInfo(antennaData: GnssAntennaData) {
         if (shouldSave()) {
             val antennaEntry = IndependentAntennaEntry(antennaData = antennaData)
-            antennaInfoQueue.offer(antennaEntry)
-            maintainQueueSize(antennaInfoQueue, MAX_ANTENNA_QUEUE)
+            antennaInfoQueue.push(antennaEntry) // 자동 크기 관리
         }
     }
 
     fun pushGnssClockData(clockData: GnssClockData) {
         if (shouldSave()) {
             val clockEntry = IndependentGnssClockEntry(clockData = clockData)
-            gnssClockQueue.offer(clockEntry)
-            maintainQueueSize(gnssClockQueue, MAX_GNSS_CLOCK_QUEUE)
+            gnssClockQueue.push(clockEntry) // 자동 크기 관리
         }
     }
 
@@ -260,8 +242,7 @@ class LoggerManager private constructor(
             additionalInfo = "FirstFix=${ttffMs}ms"
         )
         val sessionEntry = IndependentGnssSessionEntry(sessionData = sessionSummary)
-        gnssSessionQueue.offer(sessionEntry)
-        maintainQueueSize(gnssSessionQueue, MAX_GNSS_SESSION_QUEUE)
+        gnssSessionQueue.push(sessionEntry) // 자동 크기 관리
     }
 
     fun recordSessionEnd(sessionDuration: Long, ttffMs: Long?) {
@@ -275,8 +256,7 @@ class LoggerManager private constructor(
             additionalInfo = "SessionEnd, Duration=${sessionDuration}ms"
         )
         val sessionEntry = IndependentGnssSessionEntry(sessionData = sessionSummary)
-        gnssSessionQueue.offer(sessionEntry)
-        maintainQueueSize(gnssSessionQueue, MAX_GNSS_SESSION_QUEUE)
+        gnssSessionQueue.push(sessionEntry) // 자동 크기 관리
     }
 
     fun pushGps(loc: Location, sysTs: Long = System.currentTimeMillis(), monoTs: Long = System.nanoTime()) {
@@ -286,8 +266,7 @@ class LoggerManager private constructor(
                 systemTime = sysTs,
                 monoTime = monoTs
             )
-            independentGpsQueue.offer(gpsEntry)
-            maintainQueueSize(independentGpsQueue, MAX_GPS_QUEUE)
+            independentGpsQueue.push(gpsEntry) // 자동 크기 관리
         }
     }
 
@@ -298,38 +277,29 @@ class LoggerManager private constructor(
                 systemTime = sysTs,
                 monoTime = monoTs
             )
-            independentImuQueue.offer(imuEntry)
-            maintainQueueSize(independentImuQueue, MAX_IMU_QUEUE)
+            independentImuQueue.push(imuEntry) // 자동 크기 관리
         }
     }
 
     fun pushGnss(g: GnssData) {
         if (shouldSave()) {
             val gnssEntry = IndependentGnssEntry(gnssData = g)
-            independentGnssQueue.offer(gnssEntry)
-            maintainQueueSize(independentGnssQueue, MAX_GNSS_QUEUE)
+            independentGnssQueue.push(gnssEntry) // 자동 크기 관리
         }
     }
 
     fun pushBoundingBox(bboxes: List<BoundingBoxLog>) {
         if (shouldSave()) {
             val bboxEntry = IndependentBboxEntry(bboxData = bboxes.toList())
-            independentBboxQueue.offer(bboxEntry)
-            maintainQueueSize(independentBboxQueue, MAX_BBOX_QUEUE)
+            independentBboxQueue.push(bboxEntry) // 자동 크기 관리
         }
     }
 
     fun pushCamera(data: SensorData) {
         if (shouldSave()) {
-            frameBuffer.offer(data)
-            // 🚨 frameBuffer만 기본 최대값으로 제한 유지 (완전히 무제한하면 너무 위험)
-            while (frameBuffer.size > MAX_FRAME_BUFFER) {
-                frameBuffer.poll()
-            }
+            frameBuffer.push(data) // 자동 크기 관리
             val cameraEntry = IndependentCameraEntry(cameraData = data)
-            independentCameraQueue.offer(cameraEntry)
-            // 🚨 메모리 기반 큐 크기 제한 주석 처리
-            maintainQueueSize(independentCameraQueue, MAX_CAMERA_QUEUE)
+            independentCameraQueue.push(cameraEntry) // 자동 크기 관리
         }
     }
 
@@ -344,48 +314,11 @@ class LoggerManager private constructor(
                             "Sat=${status.satelliteStatusQueueSize}, Nav=${status.navigationQueueSize}, " +
                             "Memory=${(memoryPressure * 100).toInt()}%")
                 }
-                // 🚨 메모리 압박 시 응급 정리 함수 호출 주석 처리
-                /*
-                if (memoryMonitor.isMemoryPressureHigh()) {
-                    performEmergencyMemoryCleanup()
-                }
-                */
                 currentGpsStatus = dataSynchronizer.getGpsStatus().isGpsAvailable
                 delay(10000)
             }
         }
     }
-
-    // 🚨 응급 메모리 정리 함수 전체를 주석 처리
-    /*
-    private suspend fun performEmergencyMemoryCleanup() {
-        Log.w(TAG, "🚨 응급 메모리 정리 시작")
-        resourceMonitor.logResourceStatus(TAG, "응급 정리 전")
-
-        queueAccessMutex.withLock {
-            while (independentImuQueue.size > MAX_IMU_QUEUE / 4) independentImuQueue.poll()
-            while (comprehensiveGnssQueue.size > MAX_COMPREHENSIVE_GNSS_QUEUE / 4) comprehensiveGnssQueue.poll()
-            while (satelliteStatusQueue.size > MAX_SATELLITE_STATUS_QUEUE / 4) satelliteStatusQueue.poll()
-            while (independentCameraQueue.size > MAX_CAMERA_QUEUE / 4) independentCameraQueue.poll()
-            while (frameBuffer.size > MAX_FRAME_BUFFER / 4) frameBuffer.poll()
-        }
-
-        videoEncoder?.let {
-            try {
-                it.stopRecording()
-                videoEncoder = null
-                Log.d(TAG, "응급 정리: 비디오 인코더 중지")
-            } catch (e: Exception) {
-                Log.w(TAG, "비디오 인코더 중지 실패: ${e.message}")
-            }
-        }
-
-        System.gc()
-        delay(200)
-        resourceMonitor.logResourceStatus(TAG, "응급 정리 후")
-        Log.d(TAG, "✅ 응급 메모리 정리 완료")
-    }
-    */
 
     private fun startBatchProcessor() {
         ioScope.launch {
@@ -393,7 +326,7 @@ class LoggerManager private constructor(
                 try {
                     val currentTime = System.currentTimeMillis()
                     val timeSinceLastBatch = currentTime - lastBatchTime.get()
-                    if (frameBuffer.size >= BATCH_SIZE || (frameBuffer.isNotEmpty() && timeSinceLastBatch >= BATCH_TIMEOUT_MS)) {
+                    if (frameBuffer.size() >= BATCH_SIZE || (frameBuffer.isNotEmpty() && timeSinceLastBatch >= BATCH_TIMEOUT_MS)) {
                         processBatch("자동 배치")
                     }
                     delay(500)
@@ -485,12 +418,6 @@ class LoggerManager private constructor(
                     }
                 }
 
-                queueAccessMutex.withLock {
-                    repeat(framesToProcess.size.coerceAtMost(independentCameraQueue.size)) {
-                        independentCameraQueue.poll()
-                    }
-                }
-
                 framesToProcess.clear()
                 saveCompleteGnssDataOptimized()
 
@@ -524,9 +451,15 @@ class LoggerManager private constructor(
         }
     }
 
+    /**
+     * 수정된 saveCompleteGnssDataOptimized 함수
+     */
     private suspend fun saveCompleteGnssDataOptimized() = withContext(Dispatchers.IO) {
         try {
             val commonDir = getCurrentDataDirectory()
+
+            processDataSynchronization()
+
             val jobs = listOf(
                 async { processComprehensiveGnssQueue(commonDir) },
                 async { processSatelliteStatusQueue(commonDir) },
@@ -537,7 +470,8 @@ class LoggerManager private constructor(
                 async { saveIndependentGpsData(commonDir) },
                 async { saveIndependentImuData(commonDir) },
                 async { saveIndependentGnssData(commonDir) },
-                async { saveSynchronizedGpsData(commonDir) }
+                async { saveGpsSynchronizedData(commonDir) },     // GPS 동기화 데이터
+                async { saveLocalSynchronizedData(commonDir) }    // Local 동기화 데이터
             )
             jobs.awaitAll()
         } catch (e: Exception) {
@@ -549,7 +483,7 @@ class LoggerManager private constructor(
         val file = File(dir, "comprehensive_gnss.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentComprehensiveGnssEntry>()
-            repeat(50.coerceAtMost(comprehensiveGnssQueue.size)) {
+            repeat(50.coerceAtMost(comprehensiveGnssQueue.size())) {
                 comprehensiveGnssQueue.poll()?.let { dataToSave.add(it) }
             }
             if (dataToSave.isNotEmpty()) {
@@ -562,7 +496,7 @@ class LoggerManager private constructor(
         val file = File(dir, "satellite_status.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentSatelliteStatusEntry>()
-            repeat(30.coerceAtMost(satelliteStatusQueue.size)) {
+            repeat(30.coerceAtMost(satelliteStatusQueue.size())) {
                 satelliteStatusQueue.poll()?.let { dataToSave.add(it) }
             }
             if (dataToSave.isNotEmpty()) {
@@ -575,7 +509,7 @@ class LoggerManager private constructor(
         val file = File(dir, "navigation_messages.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentNavigationEntry>()
-            repeat(20.coerceAtMost(navigationMessageQueue.size)) {
+            repeat(20.coerceAtMost(navigationMessageQueue.size())) {
                 navigationMessageQueue.poll()?.let { dataToSave.add(it) }
             }
             if (dataToSave.isNotEmpty()) {
@@ -588,7 +522,7 @@ class LoggerManager private constructor(
         val file = File(dir, "antenna_info.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentAntennaEntry>()
-            repeat(10.coerceAtMost(antennaInfoQueue.size)) {
+            repeat(10.coerceAtMost(antennaInfoQueue.size())) {
                 antennaInfoQueue.poll()?.let { dataToSave.add(it) }
             }
             if (dataToSave.isNotEmpty()) {
@@ -601,7 +535,7 @@ class LoggerManager private constructor(
         val file = File(dir, "gnss_clock.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentGnssClockEntry>()
-            repeat(20.coerceAtMost(gnssClockQueue.size)) {
+            repeat(20.coerceAtMost(gnssClockQueue.size())) {
                 gnssClockQueue.poll()?.let { dataToSave.add(it) }
             }
             if (dataToSave.isNotEmpty()) {
@@ -614,7 +548,7 @@ class LoggerManager private constructor(
         val file = File(dir, "gnss_sessions.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentGnssSessionEntry>()
-            repeat(10.coerceAtMost(gnssSessionQueue.size)) {
+            repeat(10.coerceAtMost(gnssSessionQueue.size())) {
                 gnssSessionQueue.poll()?.let { dataToSave.add(it) }
             }
             if (dataToSave.isNotEmpty()) {
@@ -623,11 +557,145 @@ class LoggerManager private constructor(
         }
     }
 
+    /**
+     * 동기화 처리 메서드 - CircularQueue 타입 캐스팅
+     */
+    private suspend fun processDataSynchronization() {
+        try {
+            // DataSynchronizer에 CircularQueue 참조 전달 (타입 캐스팅)
+            dataSynchronizer.performSynchronization(
+                gpsQueue = independentGpsQueue as CircularQueue<GpsEntry>,
+                imuQueue = independentImuQueue as CircularQueue<ImuEntry>,
+                gnssQueue = independentGnssQueue as CircularQueue<GnssEntry>,
+                cameraQueue = independentCameraQueue as CircularQueue<CameraEntry>,
+                bboxQueue = independentBboxQueue as CircularQueue<BboxEntry>
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "데이터 동기화 처리 실패: ${e.message}", e)
+        }
+    }
+
+    /**
+     * GPS 동기화 데이터 저장
+     */
+    private suspend fun saveGpsSynchronizedData(dir: File) = withContext(Dispatchers.IO) {
+        val file = File(dir, "gps_sync.txt")
+        val syncData = dataSynchronizer.extractGpsSynchronizedData()
+
+        if (syncData.isNotEmpty()) {
+            saveToFile(file, GPS_SYNC_HEADER, syncData, ::buildGpsSyncContent)
+            Log.d(TAG, "✅ GPS 동기화 데이터 저장: ${syncData.size}개")
+        }
+    }
+
+    /**
+     * Local 동기화 데이터 저장
+     */
+    private suspend fun saveLocalSynchronizedData(dir: File) = withContext(Dispatchers.IO) {
+        val file = File(dir, "local_sync.txt")
+        val localData = dataSynchronizer.extractLocalSynchronizedData()
+
+        if (localData.isNotEmpty()) {
+            saveToFile(file, LOCAL_SYNC_HEADER, localData, ::buildLocalSyncContent)
+            Log.d(TAG, "✅ Local 동기화 데이터 저장: ${localData.size}개")
+        }
+    }
+
+    /**
+     * GPS 동기화 데이터 내용 생성 (SyncMatchResult 타입용)
+     */
+    private fun buildGpsSyncContent(syncDataList: List<SyncMatchResult>): String {
+        return buildString(syncDataList.size * 400) {
+            for (syncResult in syncDataList) {
+                val gps = syncResult.gpsEntry?.location
+                val imu = syncResult.imuEntry?.imuData
+                val gnss = syncResult.gnssEntry?.gnssData
+                val camera = syncResult.cameraEntry?.cameraData
+                val bbox = syncResult.bboxEntry?.bboxData
+
+                append("${syncResult.hybridTime}\t")
+                append("${if (syncResult.gpsAvailable) "AVAILABLE" else "LOST"}\t")
+
+                // GPS 데이터
+                if (gps != null) {
+                    append("${gps.latitude}\t${gps.longitude}\t")
+                    append("${if (gps.hasAltitude()) gps.altitude else "NULL"}\t")
+                } else {
+                    append("NULL\tNULL\tNULL\t")
+                }
+
+                // IMU 데이터 (9축)
+                if (imu != null && imu.size >= 9) {
+                    append("${imu[0]}\t${imu[1]}\t${imu[2]}\t")      // 가속도
+                    append("${imu[3]}\t${imu[4]}\t${imu[5]}\t")      // 자이로
+                    append("${imu[6]}\t${imu[7]}\t${imu[8]}\t")      // 자기장
+                } else {
+                    append("NULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\t")
+                }
+
+                // GNSS 데이터
+                if (gnss != null) {
+                    append("${gnss.gnssType}\t${gnss.satelliteId}\t${gnss.signalStrength}\t")
+                } else {
+                    append("NULL\tNULL\tNULL\t")
+                }
+
+                // Camera 및 BBox 데이터
+                append("${camera?.frameId ?: "NULL"}\t")
+                append("${bbox?.size ?: "NULL"}")
+
+                // 누락된 데이터 타입 표시
+                if (syncResult.missingDataTypes.isNotEmpty()) {
+                    append("\t# Missing: ${syncResult.missingDataTypes.joinToString(", ")}")
+                }
+
+                append("\n")
+            }
+        }
+    }
+
+    /**
+     * Local 동기화 데이터 내용 생성
+     */
+    private fun buildLocalSyncContent(localDataList: List<LocalSyncResult>): String {
+        return buildString(localDataList.size * 200) {
+            for (localResult in localDataList) {
+                val imu = localResult.imuEntry?.imuData
+                val camera = localResult.cameraEntry?.cameraData
+                val bbox = localResult.bboxEntry?.bboxData
+
+                append("${localResult.localTime}\t")
+
+                // IMU 시간만
+                append("${localResult.imuEntry?.systemTime ?: "NULL"}\t")
+
+                // Camera 시간만
+                append("${camera?.timestamp ?: "NULL"}\t")
+
+                // BBox 시간만 (딥러닝 미검출 가능)
+                if (bbox != null) {
+                    append("${localResult.bboxEntry?.captureTime}\t")
+                    append("DETECTED")
+                } else {
+                    append("NULL\t")
+                    append("NOT_DETECTED")  // 딥러닝 미검출 로그
+                }
+
+                // 누락된 데이터 타입 표시
+                if (localResult.missingDataTypes.isNotEmpty()) {
+                    append("\t# Missing: ${localResult.missingDataTypes.joinToString(", ")}")
+                }
+
+                append("\n")
+            }
+        }
+    }
+
     private suspend fun saveIndependentGpsData(dir: File) = withContext(Dispatchers.IO) {
         val file = File(dir, "raw_gps.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentGpsEntry>()
-            repeat(5.coerceAtMost(independentGpsQueue.size)) {
+            repeat(5.coerceAtMost(independentGpsQueue.size())) {
                 independentGpsQueue.poll()?.let { dataToSave.add(it) }
             }
             if (dataToSave.isNotEmpty()) {
@@ -640,7 +708,7 @@ class LoggerManager private constructor(
         val file = File(dir, "raw_imu.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentImuEntry>()
-            repeat((BATCH_SIZE * 5).coerceAtMost(independentImuQueue.size)) {
+            repeat((BATCH_SIZE * 5).coerceAtMost(independentImuQueue.size())) {
                 independentImuQueue.poll()?.let { dataToSave.add(it) }
             }
             if (dataToSave.isNotEmpty()) {
@@ -653,25 +721,12 @@ class LoggerManager private constructor(
         val file = File(dir, "raw_gnss.txt")
         queueAccessMutex.withLock {
             val dataToSave = mutableListOf<IndependentGnssEntry>()
-            repeat(10.coerceAtMost(independentGnssQueue.size)) {
+            repeat(10.coerceAtMost(independentGnssQueue.size())) {
                 independentGnssQueue.poll()?.let { dataToSave.add(it) }
             }
             if (dataToSave.isNotEmpty()) {
                 saveToFile(file, RAW_GNSS_HEADER, dataToSave, ::buildIndependentGnssContent)
             }
-        }
-    }
-
-    private suspend fun saveSynchronizedGpsData(dir: File) = withContext(Dispatchers.IO) {
-        val file = File(dir, "gps_sync.txt")
-        val syncData = try {
-            dataSynchronizer.extractSynchronizedData(force = true)
-        } catch (e: Exception) {
-            Log.w(TAG, "DataSynchronizer.extractSynchronizedData 호출 실패: ${e.message}")
-            emptyList<HybridSynchronizedDataEntry>()
-        }
-        if (syncData.isNotEmpty()) {
-            saveToFile(file, GPS_SYNC_HEADER, syncData, ::buildGpsSyncContent)
         }
     }
 
@@ -855,38 +910,6 @@ class LoggerManager private constructor(
         }
     }
 
-    private fun buildGpsSyncContent(syncDataList: List<HybridSynchronizedDataEntry>): String {
-        return buildString(syncDataList.size * 200) {
-            for (entry in syncDataList) {
-                val gpsData = entry.gpsData ?: continue
-                val (loc, _, _) = gpsData
-                val imu = entry.imuData?.first
-                val gnss = entry.gnssData
-                val camera = entry.cameraData
-                val bbox = entry.bboxData
-                append("${entry.hybridTime}\t")
-                append("${if (entry.gpsAvailable) "AVAILABLE" else "LOST"}\t")
-                append("${loc.latitude}\t${loc.longitude}\t")
-                append("${if (loc.hasAltitude()) loc.altitude else "NULL"}\t")
-                if (imu != null && imu.size >= 9) {
-                    append("${imu[0]}\t${imu[1]}\t${imu[2]}\t")
-                    append("${imu[3]}\t${imu[4]}\t${imu[5]}\t")
-                    append("${imu[6]}\t${imu[7]}\t${imu[8]}\t")
-                } else {
-                    append("NULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\t")
-                }
-                if (gnss != null) {
-                    append("${gnss.gnssType}\t${gnss.satelliteId}\t${gnss.signalStrength}\t")
-                } else {
-                    append("NULL\tNULL\tNULL\t")
-                }
-                append("${camera?.frameId ?: "NULL"}\t")
-                append("${bbox?.size ?: "NULL"}")
-                append("\n")
-            }
-        }
-    }
-
     fun enableLogSaving() {
         resourceMonitor.logResourceStatus(TAG, "로그 저장 시작")
         isLogSavingEnabled = true
@@ -1002,22 +1025,22 @@ class LoggerManager private constructor(
 
     fun getIndependentQueueStatus(): IndependentQueueStatusInfo {
         return IndependentQueueStatusInfo(
-            gpsQueueSize = independentGpsQueue.size,
-            imuQueueSize = independentImuQueue.size,
-            gnssQueueSize = independentGnssQueue.size,
-            bboxQueueSize = independentBboxQueue.size,
-            cameraQueueSize = independentCameraQueue.size,
-            comprehensiveGnssQueueSize = comprehensiveGnssQueue.size,
-            satelliteStatusQueueSize = satelliteStatusQueue.size,
-            navigationQueueSize = navigationMessageQueue.size,
-            antennaQueueSize = antennaInfoQueue.size,
-            gnssClockQueueSize = gnssClockQueue.size,
-            gnssSessionQueueSize = gnssSessionQueue.size,
-            totalDataPoints = independentGpsQueue.size + independentImuQueue.size +
-                    independentGnssQueue.size + independentBboxQueue.size +
-                    independentCameraQueue.size + comprehensiveGnssQueue.size +
-                    satelliteStatusQueue.size + navigationMessageQueue.size +
-                    antennaInfoQueue.size + gnssClockQueue.size + gnssSessionQueue.size,
+            gpsQueueSize = independentGpsQueue.size(),
+            imuQueueSize = independentImuQueue.size(),
+            gnssQueueSize = independentGnssQueue.size(),
+            bboxQueueSize = independentBboxQueue.size(),
+            cameraQueueSize = independentCameraQueue.size(),
+            comprehensiveGnssQueueSize = comprehensiveGnssQueue.size(),
+            satelliteStatusQueueSize = satelliteStatusQueue.size(),
+            navigationQueueSize = navigationMessageQueue.size(),
+            antennaQueueSize = antennaInfoQueue.size(),
+            gnssClockQueueSize = gnssClockQueue.size(),
+            gnssSessionQueueSize = gnssSessionQueue.size(),
+            totalDataPoints = independentGpsQueue.size() + independentImuQueue.size() +
+                    independentGnssQueue.size() + independentBboxQueue.size() +
+                    independentCameraQueue.size() + comprehensiveGnssQueue.size() +
+                    satelliteStatusQueue.size() + navigationMessageQueue.size() +
+                    antennaInfoQueue.size() + gnssClockQueue.size() + gnssSessionQueue.size(),
             gpsStatus = currentGpsStatus,
             memoryPressure = memoryMonitor.getMemoryPressure()
         )
@@ -1052,7 +1075,7 @@ class LoggerManager private constructor(
             append("GNSS: ${queueStatus.gnssQueueSize}/${MAX_GNSS_QUEUE}\n")
             append("BBOX: ${queueStatus.bboxQueueSize}/${MAX_BBOX_QUEUE}\n")
             append("CAMERA: ${queueStatus.cameraQueueSize}/${MAX_CAMERA_QUEUE}\n")
-            append("프레임 버퍼: ${frameBuffer.size}/${MAX_FRAME_BUFFER}\n")
+            append("프레임 버퍼: ${frameBuffer.size()}/${MAX_FRAME_BUFFER}\n")
             append("=== 완전한 GNSS 큐 상태 ===\n")
             append("완전한 GNSS: ${queueStatus.comprehensiveGnssQueueSize}/${MAX_COMPREHENSIVE_GNSS_QUEUE}\n")
             append("위성 상태: ${queueStatus.satelliteStatusQueueSize}/${MAX_SATELLITE_STATUS_QUEUE}\n")
@@ -1127,5 +1150,11 @@ CAPTURE_TIME	SYS_TIME	MONO_TIME	ACC_X	ACC_Y	ACC_Z	GYRO_X	GYRO_Y	GYRO_Z	MAG_X	MAG
     private val RAW_GNSS_HEADER = """
 # Raw GNSS Measurements - Independent Queue Management
 CAPTURE_TIME	SYS_TIME	MONO_TIME	GNSS_TYPE	SAT_ID	CN0_DB_HZ	PSEUDORANGE_RATE	CARRIER_PHASE	ADDITIONAL_INFO	GPS_STATUS
+""".trimIndent()
+
+    private val LOCAL_SYNC_HEADER = """
+# Local Synchronized Data (GPS Signal Lost)
+# Camera, IMU, BBox timing data only
+LOCAL_TIME	IMU_TIME	CAMERA_TIME	BBOX_TIME	BBOX_STATUS
 """.trimIndent()
 }

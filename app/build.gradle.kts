@@ -1,4 +1,3 @@
-// app/build.gradle.kts
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -13,6 +12,7 @@ android {
             keyAlias = "key0"
         }
     }
+
     namespace = "com.example.myapplication"
     compileSdk = 35
 
@@ -22,50 +22,48 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
-
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        signingConfig = signingConfigs.getByName("release")
+        // signingConfig 제거 - buildTypes에서 개별 관리
     }
 
     buildTypes {
+        debug {
+            isDebuggable = true
+            applicationIdSuffix = ".debug"
+            // debug는 기본 debug signing 사용
+        }
+
         release {
-            isMinifyEnabled = false // 이 부분이 요청하신 내용입니다.
+            isMinifyEnabled = true // Production에서는 true 권장
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-        }
-        debug {
-            isDebuggable = true // Correct property name for Kotlin DSL
-            applicationIdSuffix = ".debug"
+            signingConfig = signingConfigs.getByName("release") // 여기서만 적용
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+
     kotlinOptions {
         jvmTarget = "11"
     }
+
     buildFeatures {
         viewBinding = true
-    }
-    bundle {
-        storeArchive {
-            enable = false
-        }
+        buildConfig = true // LeakCanary BuildConfig 접근용
     }
 
-    // FFmpeg 네이티브 라이브러리 지원
     packaging {
-        jniLibs {
-            // 여러 ABI 중 특정 ABI만 포함하고 싶을 때 사용 (선택 사항)
-            // useLegacyPackaging = true // 필요 시 사용
-        }
         resources {
-            // pickFirst를 resources 블록 안으로 이동
-            pickFirsts += "**/libc++_shared.so"
-            pickFirsts += "**/libjsc.so"
+            pickFirsts += setOf(
+                "**/libc++_shared.so",
+                "**/libjsc.so"
+            )
         }
     }
 }

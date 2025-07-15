@@ -1,333 +1,365 @@
 package com.example.myapplication.data.sync
 
-import com.example.myapplication.model.*
 import android.util.Log
-import java.util.*
-import kotlin.math.*
+import com.example.myapplication.model.*
+import com.example.myapplication.data.Logger.*
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.abs
+import com.example.myapplication.DataStructure.CircularQueue
 
-/**
- * ✅ Kalman Filter 기반 시간 동기화 클래스
- */
-data class TimeMeasurement(
-    val gpsTime: Long,
-    val localTime: Long,
-    val monoTime: Long,
-    val uncertainty: Double
-)
-
-data class FilteredTime(
-    val hybridTime: Long,
-    val confidence: Double
-)
-
-/**
- * ✅ 간단한 Kalman Filter 구현
- */
-class KalmanFilter {
-    private var state = 0.0 // 시간 오프셋 추정값
-    private var errorCovariance = 1000.0 // 초기 불확실성
-    private val processNoise = 0.1 // 프로세스 노이즈
-    private val measurementNoise = 1.0 // 측정 노이즈
-
-    fun update(measurement: TimeMeasurement): FilteredTime {
-        // 예측 단계
-        val predictedState = state
-        val predictedErrorCovariance = errorCovariance + processNoise
-
-        // 업데이트 단계
-        val kalmanGain = predictedErrorCovariance / (predictedErrorCovariance + measurementNoise)
-        val innovation = (measurement.gpsTime - measurement.localTime) - predictedState
-
-        state = predictedState + kalmanGain * innovation
-        errorCovariance = (1 - kalmanGain) * predictedErrorCovariance
-
-        // 필터링된 하이브리드 시간 계산
-        val hybridTime = measurement.localTime + state.toLong()
-        val confidence = 1.0 / (1.0 + errorCovariance)
-
-        return FilteredTime(hybridTime, confidence)
-    }
-
-    fun reset() {
-        state = 0.0
-        errorCovariance = 1000.0
-    }
+enum class TimeSyncMode {
+    GPS_BASED,    // GPS 시간 기준 동기화
+    LOCAL_BASED   // Local 시간 기준 동기화
 }
 
-class DataSynchronizer {
-    private val TAG = "DataSynchronizer"
-
-    @Volatile private var currentSyncMode = TimeSyncMode.LOCAL_BASED
-    @Volatile private var isGpsAvailable = false
-    @Volatile private var lastValidTimeMapping: TimeMapping? = null
-    @Volatile private var gpsLostStartTime: Long = 0L
-
-    private val synchronizedTimeKeys = Collections.synchronizedSet(TreeSet<Long>())
-
-    // ✅ Kalman Filter 기반 시간 동기화
-    private val timeKalmanFilter = KalmanFilter()
-
-    // ✅ 고정밀도 시간 동기화 히스토리
-    private val timeSyncHistory = Collections.synchronizedList(mutableListOf<TimeMeasurement>())
-    private val maxHistorySize = 100
-
-    /**
-     * ✅ 개선된 정밀 시간 동기화
-     */
-    fun updateTimeSyncPrecise(
-        gpsTimestamp: Long?,
-        localTimestamp: Long,
-        monoTimestamp: Long,
-        clockUncertainty: Double?
-    ) {
-        val effectiveGpsTime = gpsTimestamp ?: localTimestamp
-        val isGpsTimeValid = gpsTimestamp != null &&
-                abs(gpsTimestamp - localTimestamp) < 86400000L
-
-        val measurement = TimeMeasurement(
-            gpsTime = effectiveGpsTime,
-            localTime = localTimestamp,
-            monoTime = monoTimestamp,
-            uncertainty = clockUncertainty ?: 1000.0 // 기본 1ms 불확실성
-        )
-
-        // ✅ 타임스탬프 히스토리 관리
-        synchronized(timeSyncHistory) {
-            timeSyncHistory.add(measurement)
-            while (timeSyncHistory.size > maxHistorySize) {
-                timeSyncHistory.removeAt(0)
-            }
-        }
-
-        if (isGpsTimeValid) {
-            currentSyncMode = TimeSyncMode.GPS_BASED
-            isGpsAvailable = true
-
-            // ✅ Kalman Filter로 최적 시간 추정
-            val filteredTime = timeKalmanFilter.update(measurement)
-
-            lastValidTimeMapping = TimeMapping(
-                gpsTime = effectiveGpsTime,
-                localTime = localTimestamp,
-                monoTime = monoTimestamp,
-                syncMode = TimeSyncMode.GPS_BASED,
-                gpsOffset = effectiveGpsTime - localTimestamp,
-                confidence = filteredTime.confidence
-            )
-
-            val hybridKey = filteredTime.hybridTime
-            synchronized(synchronizedTimeKeys) {
-                synchronizedTimeKeys.add(hybridKey)
-            }
-
-            gpsLostStartTime = 0L // GPS 복구 시 리셋
-
-            // Log.d(TAG, "⏰ GPS 기반 정밀 시간 동기화: hybridKey=${hybridKey}, confidence=${filteredTime.confidence}")
-        } else {
-            if (isGpsAvailable && gpsLostStartTime == 0L) {
-                gpsLostStartTime = System.currentTimeMillis()
-                Log.w(TAG, "⚠️ GPS 신호 손실 감지")
-            }
-
-            // ✅ GPS 손실 시 점진적 모드 전환
-            if (gpsLostStartTime > 0 && System.currentTimeMillis() - gpsLostStartTime > 5000L) {
-                currentSyncMode = TimeSyncMode.LOCAL_BASED
-                isGpsAvailable = false
-                timeKalmanFilter.reset() // 필터 리셋
-                //Log.w(TAG, "🔄 로컬 시간 기반으로 동기화 모드 전환")
-            }
-
-            val hybridKey = when (currentSyncMode) {
-                TimeSyncMode.GPS_BASED -> {
-                    // GPS 손실 직후에는 마지막 유효한 오프셋 사용
-                    lastValidTimeMapping?.let { mapping ->
-                        localTimestamp + mapping.gpsOffset
-                    } ?: localTimestamp
-                }
-                TimeSyncMode.LOCAL_BASED -> localTimestamp
-            }
-
-            synchronized(synchronizedTimeKeys) {
-                synchronizedTimeKeys.add(hybridKey)
-            }
-
-            // Log.d(TAG, "⏰ 시간 동기화: mode=${currentSyncMode}, hybridKey=${hybridKey}")
-        }
-    }
-
-    /**
-     * ✅ 기존 메서드와의 호환성 유지
-     */
-    fun updateTimeSync(
-        gpsTimestamp: Long?,
-        localTimestamp: Long,
-        monoTimestamp: Long,
-        isGpsTimeValid: Boolean
-    ) {
-        updateTimeSyncPrecise(gpsTimestamp, localTimestamp, monoTimestamp, null)
-    }
-
-    /**
-     * ✅ 시간 동기화 품질 분석
-     */
-    fun getTimeSyncQuality(): TimeSyncQuality {
-        val recentMeasurements = synchronized(timeSyncHistory) {
-            timeSyncHistory.takeLast(10)
-        }
-
-        if (recentMeasurements.isEmpty()) {
-            return TimeSyncQuality(
-                averageUncertainty = Double.MAX_VALUE,
-                maxUncertainty = Double.MAX_VALUE,
-                minUncertainty = Double.MAX_VALUE,
-                stabilityScore = 0.0,
-                measurementCount = 0
-            )
-        }
-
-        val uncertainties = recentMeasurements.map { it.uncertainty }
-        val avgUncertainty = uncertainties.average()
-        val maxUncertainty = uncertainties.maxOrNull() ?: Double.MAX_VALUE
-        val minUncertainty = uncertainties.minOrNull() ?: Double.MAX_VALUE
-
-        // ✅ 안정성 점수 계산 (불확실성의 변동성 기반)
-        val variance = uncertainties.map { (it - avgUncertainty).pow(2) }.average()
-        val stabilityScore = max(0.0, 1.0 - sqrt(variance) / avgUncertainty)
-
-        return TimeSyncQuality(
-            averageUncertainty = avgUncertainty,
-            maxUncertainty = maxUncertainty,
-            minUncertainty = minUncertainty,
-            stabilityScore = stabilityScore,
-            measurementCount = recentMeasurements.size
-        )
-    }
-
-    /**
-     * ✅ 고정밀도 시간 예측
-     */
-    fun predictTime(localTime: Long): Long {
-        return when (currentSyncMode) {
-            TimeSyncMode.GPS_BASED -> {
-                lastValidTimeMapping?.let { mapping ->
-                    localTime + mapping.gpsOffset
-                } ?: localTime
-            }
-            TimeSyncMode.LOCAL_BASED -> localTime
-        }
-    }
-
-    /**
-     * ✅ 시간 동기화 상태 리셋
-     */
-    fun resetTimeSync() {
-        timeKalmanFilter.reset()
-        synchronized(timeSyncHistory) {
-            timeSyncHistory.clear()
-        }
-        synchronized(synchronizedTimeKeys) {
-            synchronizedTimeKeys.clear()
-        }
-        isGpsAvailable = false
-        lastValidTimeMapping = null
-        gpsLostStartTime = 0L
-        currentSyncMode = TimeSyncMode.LOCAL_BASED
-        Log.d(TAG, "🔄 시간 동기화 시스템 리셋 완료")
-    }
-
-    fun getGpsStatus(): GpsSyncStatusInfo {
-        return GpsSyncStatusInfo(
-            isGpsAvailable = isGpsAvailable,
-            lastGpsTime = lastValidTimeMapping?.gpsTime ?: 0L,
-            gpsMonoOffset = lastValidTimeMapping?.gpsOffset ?: 0L,
-            syncMode = currentSyncMode,
-            timeSyncQuality = getTimeSyncQuality(),
-            gpsLostDuration = if (gpsLostStartTime > 0) System.currentTimeMillis() - gpsLostStartTime else 0L
-        )
-    }
-
-    fun getQueueStatus(): QueueStatusInfo {
-        return QueueStatusInfo(
-            gpsQueueSize = 0,
-            imuQueueSize = 0,
-            gnssQueueSize = 0,
-            cameraQueueSize = 0,
-            totalDataPoints = synchronizedTimeKeys.size,
-            timeSyncHistorySize = timeSyncHistory.size,
-            currentSyncMode = currentSyncMode
-        )
-    }
-
-    fun synchronizeData(data: List<SensorData>): List<SensorData> {
-        return data.sortedBy { predictTime(it.timestamp) }
-    }
-
-    fun extractSynchronizedData(force: Boolean = false): List<HybridSynchronizedDataEntry> {
-        // ✅ 향후 구현 예정 - 현재는 빈 리스트 반환
-        return emptyList()
-    }
-
-    fun cleanOldTimeKeys() {
-        val currentTime = System.currentTimeMillis()
-        val cleanupThreshold = currentTime - 60000L
-        synchronized(synchronizedTimeKeys) {
-            synchronizedTimeKeys.removeIf { it < cleanupThreshold }
-        }
-
-        // ✅ 히스토리 정리
-        synchronized(timeSyncHistory) {
-            timeSyncHistory.removeIf { it.localTime < cleanupThreshold }
-        }
-    }
-
-    fun clearAll() {
-        resetTimeSync()
-        Log.d(TAG, "✅ DataSynchronizer 전체 정리 완료")
-    }
+// LoggerManager의 Entry 클래스들을 위한 인터페이스 정의
+interface GpsEntry {
+    val location: android.location.Location
+    val systemTime: Long
+    val monoTime: Long
+    val captureTime: Long
 }
 
-/**
- * ✅ 확장된 GPS 동기화 상태 정보
- */
-data class GpsSyncStatusInfo(
-    val isGpsAvailable: Boolean,
-    val lastGpsTime: Long,
-    val gpsMonoOffset: Long,
-    val syncMode: TimeSyncMode,
-    val timeSyncQuality: TimeSyncQuality,
-    val gpsLostDuration: Long
-)
+interface ImuEntry {
+    val imuData: FloatArray
+    val systemTime: Long
+    val monoTime: Long
+    val captureTime: Long
+}
 
-/**
- * ✅ 확장된 큐 상태 정보
- */
-data class QueueStatusInfo(
-    val gpsQueueSize: Int,
-    val imuQueueSize: Int,
-    val gnssQueueSize: Int,
-    val cameraQueueSize: Int,
-    val totalDataPoints: Int,
-    val timeSyncHistorySize: Int,
-    val currentSyncMode: TimeSyncMode
-)
+interface GnssEntry {
+    val gnssData: GnssData
+    val captureTime: Long
+}
 
-/**
- * ✅ 시간 동기화 품질 정보
- */
-data class TimeSyncQuality(
-    val averageUncertainty: Double,
-    val maxUncertainty: Double,
-    val minUncertainty: Double,
-    val stabilityScore: Double, // 0.0 ~ 1.0 (1.0이 최고)
-    val measurementCount: Int
-)
+interface CameraEntry {
+    val cameraData: SensorData
+    val captureTime: Long
+}
 
-data class HybridSynchronizedDataEntry(
+interface BboxEntry {
+    val bboxData: List<BoundingBoxLog>
+    val captureTime: Long
+}
+
+data class SyncMatchResult(
     val hybridTime: Long,
     val gpsAvailable: Boolean,
-    val gpsData: Triple<android.location.Location, Long, Long>?,
-    val imuData: Pair<FloatArray, Long>?,
-    val gnssData: GnssData?,
-    val cameraData: SensorData?,
-    val bboxData: List<BoundingBoxLog>?
+    val gpsEntry: GpsEntry?,
+    val imuEntry: ImuEntry?,
+    val gnssEntry: GnssEntry?,
+    val cameraEntry: CameraEntry?,
+    val bboxEntry: BboxEntry?,
+    val missingDataTypes: List<String> = emptyList()
 )
+
+data class LocalSyncResult(
+    val localTime: Long,
+    val cameraEntry: CameraEntry?,
+    val imuEntry: ImuEntry?,
+    val bboxEntry: BboxEntry?,
+    val missingDataTypes: List<String> = emptyList()
+)
+
+data class GpsStatusInfo(
+    val isGpsAvailable: Boolean,
+    val lastGpsUpdateTime: Long,
+    val gpsTimeoutDuration: Long = 5000L
+)
+
+class DataSynchronizer {
+    companion object {
+        private const val TAG = "DataSynchronizer"
+        private const val GPS_TIMEOUT_MS = 5000L
+        private const val SYNC_WINDOW_MS = 50L // ±50ms 동기화 윈도우
+        private const val MAX_SYNC_RESULTS = 100
+    }
+
+    private val processedTimeStamps = ConcurrentHashMap.newKeySet<Long>()
+    private var timeSyncOffset: Long = 0L
+    private var lastGpsUpdateTime: Long = 0L
+    private var currentSyncMode: TimeSyncMode = TimeSyncMode.LOCAL_BASED
+
+    // 동기화 결과 캐시 - CircularQueue 사용
+    private val syncResultCache = CircularQueue<SyncMatchResult>(MAX_SYNC_RESULTS)
+    private val localSyncCache = CircularQueue<LocalSyncResult>(MAX_SYNC_RESULTS)
+
+    /**
+     * GPS 시간 동기화 업데이트
+     */
+    fun updateTimeSync(gpsTimestamp: Long, localTimestamp: Long) {
+        timeSyncOffset = gpsTimestamp - localTimestamp
+        lastGpsUpdateTime = localTimestamp
+
+        // GPS가 다시 사용 가능해지면 GPS_BASED 모드로 전환
+        if (currentSyncMode == TimeSyncMode.LOCAL_BASED) {
+            currentSyncMode = TimeSyncMode.GPS_BASED
+            Log.d(TAG, "📡 GPS 신호 복구: LOCAL_BASED → GPS_BASED")
+        }
+    }
+
+    /**
+     * 하이브리드 시간 예측
+     */
+    fun predictTime(timestamp: Long): Long {
+        return if (isGpsAvailable()) {
+            timestamp + timeSyncOffset
+        } else {
+            timestamp // GPS 타임아웃 시 로컬 시간 사용
+        }
+    }
+
+    /**
+     * GPS 상태 확인
+     */
+    fun getGpsStatus(): GpsStatusInfo {
+        val isAvailable = isGpsAvailable()
+        return GpsStatusInfo(
+            isGpsAvailable = isAvailable,
+            lastGpsUpdateTime = lastGpsUpdateTime,
+            gpsTimeoutDuration = GPS_TIMEOUT_MS
+        )
+    }
+
+    private fun isGpsAvailable(): Boolean {
+        return (System.currentTimeMillis() - lastGpsUpdateTime) < GPS_TIMEOUT_MS
+    }
+
+    /**
+     * 동기화 모드 업데이트
+     */
+    private fun updateSyncMode() {
+        val wasGpsBased = (currentSyncMode == TimeSyncMode.GPS_BASED)
+        val isGpsNowAvailable = isGpsAvailable()
+
+        when {
+            wasGpsBased && !isGpsNowAvailable -> {
+                currentSyncMode = TimeSyncMode.LOCAL_BASED
+                Log.w(TAG, "🔴 GPS 신호 손실: GPS_BASED → LOCAL_BASED")
+            }
+            !wasGpsBased && isGpsNowAvailable -> {
+                currentSyncMode = TimeSyncMode.GPS_BASED
+                Log.d(TAG, "📡 GPS 신호 복구: LOCAL_BASED → GPS_BASED")
+            }
+        }
+    }
+
+    /**
+     * CircularQueue들을 참조로 받아서 동기화 수행 (데이터 복사 없음)
+     */
+    fun performSynchronization(
+        gpsQueue: CircularQueue<GpsEntry>,
+        imuQueue: CircularQueue<ImuEntry>,
+        gnssQueue: CircularQueue<GnssEntry>,
+        cameraQueue: CircularQueue<CameraEntry>,
+        bboxQueue: CircularQueue<BboxEntry>
+    ) {
+        updateSyncMode()
+
+        when (currentSyncMode) {
+            TimeSyncMode.GPS_BASED -> {
+                performGpsSynchronization(gpsQueue, imuQueue, gnssQueue, cameraQueue, bboxQueue)
+            }
+            TimeSyncMode.LOCAL_BASED -> {
+                performLocalSynchronization(imuQueue, cameraQueue, bboxQueue)
+            }
+        }
+    }
+
+    /**
+     * GPS 기반 동기화 (모든 센서 데이터 포함)
+     */
+    private fun performGpsSynchronization(
+        gpsQueue: CircularQueue<GpsEntry>,
+        imuQueue: CircularQueue<ImuEntry>,
+        gnssQueue: CircularQueue<GnssEntry>,
+        cameraQueue: CircularQueue<CameraEntry>,
+        bboxQueue: CircularQueue<BboxEntry>
+    ) {
+        // GPS 시간을 기준으로 동기화
+        for (gpsEntry in gpsQueue) {
+            val gpsHybridTime = predictTime(gpsEntry.systemTime)
+
+            if (isTimeProcessed(gpsHybridTime)) continue
+
+            val syncResult = findSyncMatch(
+                targetTime = gpsHybridTime,
+                gpsEntry = gpsEntry,
+                imuQueue = imuQueue,
+                gnssQueue = gnssQueue,
+                cameraQueue = cameraQueue,
+                bboxQueue = bboxQueue
+            )
+
+            if (syncResult != null) {
+                syncResultCache.push(syncResult) // CircularQueue 자동 크기 관리
+                markTimeAsProcessed(gpsHybridTime)
+            }
+        }
+    }
+
+    /**
+     * Local 기반 동기화 (Camera, IMU, BBox만)
+     */
+    private fun performLocalSynchronization(
+        imuQueue: CircularQueue<ImuEntry>,
+        cameraQueue: CircularQueue<CameraEntry>,
+        bboxQueue: CircularQueue<BboxEntry>
+    ) {
+        // IMU 시간을 기준으로 Local 동기화
+        for (imuEntry in imuQueue) {
+            val localTime = imuEntry.systemTime
+
+            if (isTimeProcessed(localTime)) continue
+
+            val localResult = findLocalMatch(
+                targetTime = localTime,
+                imuEntry = imuEntry,
+                cameraQueue = cameraQueue,
+                bboxQueue = bboxQueue
+            )
+
+            if (localResult != null) {
+                localSyncCache.push(localResult) // CircularQueue 자동 크기 관리
+                markTimeAsProcessed(localTime)
+            }
+        }
+    }
+
+    /**
+     * GPS 기반 동기화 매칭 (모든 센서 필요)
+     */
+    private fun findSyncMatch(
+        targetTime: Long,
+        gpsEntry: GpsEntry,
+        imuQueue: CircularQueue<ImuEntry>,
+        gnssQueue: CircularQueue<GnssEntry>,
+        cameraQueue: CircularQueue<CameraEntry>,
+        bboxQueue: CircularQueue<BboxEntry>
+    ): SyncMatchResult? {
+
+        val missingTypes = mutableListOf<String>()
+
+        // CircularQueue의 findClosest 메서드 사용
+        val imuMatch = imuQueue.findClosest(
+            predicate = { entry -> predictTime(entry.systemTime) },
+            targetTime = targetTime,
+            windowMs = SYNC_WINDOW_MS
+        )
+        if (imuMatch == null) missingTypes.add("IMU")
+
+        val gnssMatch = gnssQueue.findClosest(
+            predicate = { entry -> entry.gnssData.gpsTimestamp },
+            targetTime = targetTime,
+            windowMs = SYNC_WINDOW_MS
+        )
+        if (gnssMatch == null) missingTypes.add("GNSS")
+
+        val cameraMatch = cameraQueue.findClosest(
+            predicate = { entry -> predictTime(entry.cameraData.timestamp) },
+            targetTime = targetTime,
+            windowMs = SYNC_WINDOW_MS
+        )
+        if (cameraMatch == null) missingTypes.add("CAMERA")
+
+        val bboxMatch = bboxQueue.findClosest(
+            predicate = { entry -> entry.captureTime },
+            targetTime = targetTime,
+            windowMs = SYNC_WINDOW_MS
+        )
+        if (bboxMatch == null) missingTypes.add("BBOX")
+
+        return SyncMatchResult(
+            hybridTime = targetTime,
+            gpsAvailable = true,
+            gpsEntry = gpsEntry,
+            imuEntry = imuMatch,
+            gnssEntry = gnssMatch,
+            cameraEntry = cameraMatch,
+            bboxEntry = bboxMatch,
+            missingDataTypes = missingTypes
+        )
+    }
+
+    /**
+     * Local 기반 동기화 매칭 (Camera, IMU, BBox만)
+     */
+    private fun findLocalMatch(
+        targetTime: Long,
+        imuEntry: ImuEntry,
+        cameraQueue: CircularQueue<CameraEntry>,
+        bboxQueue: CircularQueue<BboxEntry>
+    ): LocalSyncResult? {
+
+        val missingTypes = mutableListOf<String>()
+
+        val cameraMatch = cameraQueue.findClosest(
+            predicate = { entry -> entry.cameraData.timestamp },
+            targetTime = targetTime,
+            windowMs = SYNC_WINDOW_MS
+        )
+        if (cameraMatch == null) missingTypes.add("CAMERA")
+
+        val bboxMatch = bboxQueue.findClosest(
+            predicate = { entry -> entry.captureTime },
+            targetTime = targetTime,
+            windowMs = SYNC_WINDOW_MS
+        )
+        if (bboxMatch == null) missingTypes.add("BBOX")
+
+        return LocalSyncResult(
+            localTime = targetTime,
+            cameraEntry = cameraMatch,
+            imuEntry = imuEntry,
+            bboxEntry = bboxMatch,
+            missingDataTypes = missingTypes
+        )
+    }
+
+    /**
+     * GPS 동기화된 데이터 추출 (gps_sync.txt용)
+     */
+    fun extractGpsSynchronizedData(): List<SyncMatchResult> {
+        return syncResultCache.snapshot() // 전체 스냅샷 반환
+    }
+
+    /**
+     * Local 동기화된 데이터 추출 (local_sync.txt용)
+     */
+    fun extractLocalSynchronizedData(): List<LocalSyncResult> {
+        return localSyncCache.snapshot() // 전체 스냅샷 반환
+    }
+
+    /**
+     * 기존 호환성을 위한 메서드
+     */
+    fun extractSynchronizedData(force: Boolean = false): List<HybridSynchronizedDataEntry> {
+        val gpsResults = extractGpsSynchronizedData()
+        return gpsResults.map { syncResult ->
+            HybridSynchronizedDataEntry(
+                hybridTime = syncResult.hybridTime,
+                gpsAvailable = syncResult.gpsAvailable,
+                gpsData = syncResult.gpsEntry?.let {
+                    Triple(it.location, it.systemTime, it.monoTime)
+                },
+                imuData = syncResult.imuEntry?.let {
+                    Pair(it.imuData, it.systemTime)
+                },
+                gnssData = syncResult.gnssEntry?.gnssData,
+                cameraData = syncResult.cameraEntry?.cameraData,
+                bboxData = syncResult.bboxEntry?.bboxData
+            )
+        }
+    }
+
+    // 시간 처리 관련 메서드들
+    fun isTimeProcessed(time: Long): Boolean {
+        return processedTimeStamps.contains(time)
+    }
+
+    fun markTimeAsProcessed(time: Long) {
+        processedTimeStamps.add(time)
+    }
+
+    fun getCurrentSyncMode(): TimeSyncMode = currentSyncMode
+}

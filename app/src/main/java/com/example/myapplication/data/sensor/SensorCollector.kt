@@ -17,6 +17,7 @@ import android.location.*
 import android.media.Image
 import android.media.ImageReader
 import android.os.Build
+import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.util.Range
@@ -35,7 +36,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import com.google.android.gms.location.Priority // 최신 API를 위한 Priority import
+import com.google.android.gms.location.Priority
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -93,6 +94,11 @@ class SensorCollector(private val context: Context) {
     private var captureSession: CameraCaptureSession? = null
     private val cameraOpenCloseLock = Semaphore(1)
     private val isStreaming = AtomicBoolean(false)
+
+    // ✅ 1. Flush 충돌 방지를 위한 상태 관리
+    private val isSessionActive = AtomicBoolean(false)
+    private val frameProcessingLock = Object()
+
     private val TAG = "SensorCollector"
     private var frameSkipInterval = 10
     private var frameCount = 0
@@ -113,7 +119,6 @@ class SensorCollector(private val context: Context) {
     private var latestGyroscope = FloatArray(3) { 0f }
     private var latestMagnetometer = FloatArray(3) { 0f }
 
-    // GNSS 콜백 등록 상태
     private var isGnssCallbackRegistered = AtomicBoolean(false)
     private var gnssSessionStartTime: Long = 0L
     private var firstFixTime: Long? = null
@@ -136,7 +141,6 @@ class SensorCollector(private val context: Context) {
         aeMode = CameraMetadata.CONTROL_AE_MODE_ON_AUTO_FLASH
     )
 
-    // GPS 및 IMU 설정
     private val gpsConfig = GpsConfig(
         gpsTimestamp = 0L,
         localTimestamp = 0L,
@@ -155,7 +159,6 @@ class SensorCollector(private val context: Context) {
         samplingRateHz = 50,
     )
 
-    // 콜백 타입
     private var gpsCallback: ((SensorData_String) -> Unit)? = null
     private var imuCallback: ((SensorData_String) -> Unit)? = null
     private var gnssCallback: ((SensorData_String) -> Unit)? = null
@@ -165,6 +168,19 @@ class SensorCollector(private val context: Context) {
 
     init {
         // Detector 초기화는 DataSynchronizer 설정 후에 수행
+    }
+
+    // ✅ 2. 메모리 체크 유틸리티 추가
+    private fun canAllocateBitmap(width: Int, height: Int): Boolean {
+        val runtime = Runtime.getRuntime()
+        val requiredMemory = width * height * 4L // ARGB_8888
+        val availableMemory = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+        return availableMemory > requiredMemory * 3 // 3배 안전 마진
+    }
+
+    private fun forceGarbageCollection() {
+        System.gc()
+        Thread.yield()
     }
 
     private fun initializeDetector() {
@@ -203,11 +219,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    // ========== ✅ 완전한 GNSS 콜백 시스템 ==========
-
-    /**
-     * ✅ GPS 위치 콜백 - FusedLocationProviderClient를 통해 받은 위치 정보.
-     */
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(locationResult: LocationResult) {
             locationResult.lastLocation?.let { location ->
@@ -222,7 +233,6 @@ class SensorCollector(private val context: Context) {
                     monoTimestamp = monoTimestamp
                 )
 
-                // ✅ 메인 스레드에서 콜백 호출
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
                     synchronized(this@SensorCollector) {
                         gpsCallback?.invoke(sensorData)
@@ -240,9 +250,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * ✅ GNSS 측정 콜백 - API 24+ 지원
-     */
     @RequiresApi(Build.VERSION_CODES.N)
     private val gnssMeasurementsCallback = object : GnssMeasurementsEvent.Callback() {
         override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
@@ -280,7 +287,6 @@ class SensorCollector(private val context: Context) {
                     else -> "Unknown"
                 }
 
-                // ✅ 실제 Android API 메서드만 사용
                 val comprehensiveData = ComprehensiveGnssData(
                     gpsTimestamp = gpsTimestamp,
                     localTimestamp = localTimestamp,
@@ -293,7 +299,6 @@ class SensorCollector(private val context: Context) {
                     signalStrength = measurement.cn0DbHz.toDouble(),
                     carrierFrequencyHz = if (measurement.hasCarrierFrequencyHz()) measurement.carrierFrequencyHz.toDouble() else null,
                     multipathIndicator = measurement.multipathIndicator,
-                    // ✅ has* 메서드가 없는 필드들은 직접 값 체크
                     pseudorangeRate = measurement.pseudorangeRateMetersPerSecond.takeIf { !it.isNaN() },
                     pseudorangeRateUncertainty = measurement.pseudorangeRateUncertaintyMetersPerSecond.takeIf { !it.isNaN() },
                     accumulatedDeltaRange = measurement.accumulatedDeltaRangeMeters.takeIf { !it.isNaN() },
@@ -331,9 +336,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * ✅ GNSS 위성 상태 콜백
-     */
     @RequiresApi(Build.VERSION_CODES.N)
     private val gnssStatusCallback = object : GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(status: GnssStatus) {
@@ -353,7 +355,6 @@ class SensorCollector(private val context: Context) {
                     constellationType = status.getConstellationType(i),
                     svid = status.getSvid(i),
                     cn0DbHz = status.getCn0DbHz(i),
-                    // ✅ 실제 존재하지 않는 메서드들 제거
                     hasCarrierFrequency = false,
                     carrierFrequencyHz = null,
                     azimuthDegrees = status.getAzimuthDegrees(i),
@@ -392,9 +393,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * ✅ GNSS 내비게이션 메시지 콜백 (API 24+)
-     */
     @RequiresApi(Build.VERSION_CODES.N)
     private val gnssNavigationMessageCallback = object : GnssNavigationMessage.Callback() {
         override fun onGnssNavigationMessageReceived(message: GnssNavigationMessage) {
@@ -421,8 +419,6 @@ class SensorCollector(private val context: Context) {
             }
         }
     }
-
-    // ========== IMU 센서 리스너들 ==========
 
     private val accelerometerListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
@@ -470,17 +466,14 @@ class SensorCollector(private val context: Context) {
             latestMagnetometer.copyInto(this, 6, 0, 3)
         }
 
-        // ✅ IMU 콜백 강화
         val sensorData = SensorData_String(
             value = "ACC[${latestAccelerometer.joinToString(",")}] GYRO[${latestGyroscope.joinToString(",")}] MAG[${latestMagnetometer.joinToString(",")}]",
             timestamp = systemTimestamp,
             monoTimestamp = monoTimestamp
         )
 
-        // ✅ 메인 스레드에서 콜백 호출
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             imuCallback?.invoke(sensorData)
-            //Log.d(TAG, "✅ IMU 콜백 호출: ${sensorData.value}")
         }
 
         if (::dataSynchronizer.isInitialized) {
@@ -489,11 +482,9 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    // DataSynchronizer 설정 메서드
     fun setDataSynchronizer(synchronizer: DataSynchronizer) {
         this.dataSynchronizer = synchronizer
         Log.d(TAG, "DataSynchronizer 설정 완료")
-        // DataSynchronizer 설정 후 Detector 초기화
         initializeDetector()
     }
 
@@ -638,166 +629,162 @@ class SensorCollector(private val context: Context) {
                 2
             ).apply {
                 setOnImageAvailableListener({ reader ->
-                    reader.acquireLatestImage()?.use { image ->
-                        var originalBitmap: Bitmap? = null
-                        var currentBitmap: Bitmap? = null
-                        var finalBitmap: Bitmap? = null
-                        var detectionBitmap: Bitmap? = null
+                    // ✅ 1. Flush 상태 체크로 충돌 방지
+                    if (!isSessionActive.get()) {
+                        Log.d(TAG, "Session not active, skipping frame")
+                        return@setOnImageAvailableListener
+                    }
 
-                        try {
-                            // ✅ 1단계: 원본 비트맵 생성
-                            originalBitmap = when (cameraConfig.imageFormat) {
-                                ImageFormat.JPEG -> {
-                                    val buffer = image.planes[0].buffer
-                                    val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
-                                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    // ✅ 3. 동시성 제어
+                    synchronized(frameProcessingLock) {
+                        reader.acquireLatestImage()?.use { image ->
+                            var originalBitmap: Bitmap? = null
+                            var currentBitmap: Bitmap? = null
+                            var finalBitmap: Bitmap? = null
+                            var detectionBitmap: Bitmap? = null
+
+                            try {
+                                // ✅ 2. 메모리 체크
+                                if (!canAllocateBitmap(image.width, image.height)) {
+                                    Log.w(TAG, "Insufficient memory, skipping frame")
+                                    forceGarbageCollection()
+                                    return@use
                                 }
-                                ImageFormat.YUV_420_888 -> yuvToBitmap(image)
-                                else -> null
-                            }
 
-                            if (originalBitmap == null || originalBitmap.isRecycled) {
-                                Log.e(TAG, "❌ Failed to create bitmap from camera frame")
-                                coroutineScope.launch(Dispatchers.Main) { callback(null) }
-                                return@use
-                            }
-
-                            currentBitmap = originalBitmap
-
-                            // ✅ 2단계: 스케일링 (필요한 경우만)
-                            if (currentBitmap.width != 840 || currentBitmap.height != 840) {
-                                val scaledBitmap = Bitmap.createScaledBitmap(currentBitmap, 840, 840, true)
-                                if (scaledBitmap != currentBitmap && !currentBitmap.isRecycled) {
-                                    currentBitmap.recycle() // 원본 해제
-                                }
-                                currentBitmap = scaledBitmap
-                            }
-
-                            // ✅ 3단계: 회전 처리 (안전하게)
-                            val rotationDegrees = getRotationDegrees(cameraId)
-                            if (rotationDegrees != 0) {
-                                val rotatedBitmap = safeRotateBitmap(currentBitmap, rotationDegrees)
-                                if (rotatedBitmap != null && rotatedBitmap != currentBitmap && !currentBitmap.isRecycled) {
-                                    currentBitmap.recycle() // 이전 비트맵 해제
-                                    currentBitmap = rotatedBitmap
-                                }
-                            }
-
-                            val frameId = System.currentTimeMillis()
-                            val systemTime = System.currentTimeMillis()
-                            val monoTime = System.nanoTime()
-
-                            // ✅ 4단계: UI용 복사본 생성 (메모리 안전)
-                            if (currentBitmap != null && !currentBitmap.isRecycled) {
-                                finalBitmap = try {
-                                    // ✅ 메모리 체크
-                                    val runtime = Runtime.getRuntime()
-                                    val availableMemory = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
-                                    val requiredMemory = currentBitmap.width * currentBitmap.height * 4L
-
-                                    if (availableMemory < requiredMemory * 3) { // 안전 마진 3배
-                                        Log.w(TAG, "Insufficient memory for bitmap copy, using original")
-                                        currentBitmap // 복사 대신 원본 사용
-                                    } else {
-                                        currentBitmap.copy(currentBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                                originalBitmap = when (cameraConfig.imageFormat) {
+                                    ImageFormat.JPEG -> {
+                                        val buffer = image.planes[0].buffer
+                                        val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
+                                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                                     }
-                                } catch (e: OutOfMemoryError) {
-                                    Log.e(TAG, "OutOfMemoryError creating bitmap copy", e)
-                                    System.gc()
-                                    currentBitmap // 복사 실패 시 원본 사용
+                                    ImageFormat.YUV_420_888 -> yuvToBitmap(image)
+                                    else -> null
                                 }
 
-                                if (finalBitmap != null) {
-                                    val sensorData = SensorData(
-                                        value = "Streaming: ${image.timestamp}",
-                                        bitmap = finalBitmap,
-                                        timestamp = systemTime,
-                                        monoTimestamp = monoTime,
-                                        frameId = frameId
-                                    )
+                                if (originalBitmap == null || originalBitmap.isRecycled) {
+                                    Log.e(TAG, "Failed to create bitmap from camera frame")
+                                    coroutineScope.launch(Dispatchers.Main) { callback(null) }
+                                    return@use
+                                }
 
-                                    // LoggerManager에 전달
-                                    if (::dataSynchronizer.isInitialized) {
-                                        LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+                                currentBitmap = originalBitmap
+
+                                if (currentBitmap.width != 840 || currentBitmap.height != 840) {
+                                    val scaledBitmap = Bitmap.createScaledBitmap(currentBitmap, 840, 840, true)
+                                    if (scaledBitmap != currentBitmap && !currentBitmap.isRecycled) {
+                                        currentBitmap.recycle()
+                                    }
+                                    currentBitmap = scaledBitmap
+                                }
+
+                                val rotationDegrees = getRotationDegrees(cameraId)
+                                if (rotationDegrees != 0) {
+                                    val rotatedBitmap = safeRotateBitmap(currentBitmap, rotationDegrees)
+                                    if (rotatedBitmap != null && rotatedBitmap != currentBitmap && !currentBitmap.isRecycled) {
+                                        currentBitmap.recycle()
+                                        currentBitmap = rotatedBitmap
+                                    }
+                                }
+
+                                val frameId = System.nanoTime()
+                                val systemTime = System.currentTimeMillis()
+                                val monoTime = System.nanoTime()
+
+                                if (currentBitmap != null && !currentBitmap.isRecycled) {
+                                    finalBitmap = try {
+                                        if (canAllocateBitmap(currentBitmap.width, currentBitmap.height)) {
+                                            currentBitmap.copy(currentBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                                        } else {
+                                            Log.w(TAG, "Insufficient memory for bitmap copy, using original")
+                                            currentBitmap
+                                        }
+                                    } catch (e: OutOfMemoryError) {
+                                        Log.e(TAG, "OutOfMemoryError creating bitmap copy", e)
+                                        forceGarbageCollection()
+                                        currentBitmap
                                     }
 
-                                    frameCount++
+                                    if (finalBitmap != null) {
+                                        val sensorData = SensorData(
+                                            value = "Streaming: ${image.timestamp}",
+                                            bitmap = finalBitmap,
+                                            timestamp = systemTime,
+                                            monoTimestamp = monoTime,
+                                            frameId = frameId
+                                        )
 
-                                    // UI 콜백 (메인 스레드)
-                                    coroutineScope.launch(Dispatchers.Main) {
-                                        callback(sensorData)
-                                        Log.d(TAG, "✅ UI callback called with frameId: $frameId")
-                                    }
+                                        if (::dataSynchronizer.isInitialized) {
+                                            LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+                                        }
 
-                                    // ✅ 5단계: Detection 처리 (별도 복사본)
-                                    if (frameCount % frameSkipInterval == 0) {
-                                        ensureDetectorExecutor()
-                                        if (detectorInitialized && !isDetecting) {
-                                            isDetecting = true
-                                            detectorExecutor.submit {
-                                                try {
-                                                    // ✅ Detection용 별도 복사본 생성 (메모리 안전)
-                                                    detectionBitmap = try {
-                                                        val runtime = Runtime.getRuntime()
-                                                        val availableMemory = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
-                                                        val requiredMemory = finalBitmap.width * finalBitmap.height * 4L
+                                        frameCount++
 
-                                                        if (availableMemory < requiredMemory * 2) {
-                                                            Log.w(TAG, "Insufficient memory for detection bitmap, skipping")
-                                                            null
-                                                        } else {
-                                                            finalBitmap.copy(finalBitmap.config ?: Bitmap.Config.ARGB_8888, false)
-                                                        }
-                                                    } catch (e: OutOfMemoryError) {
-                                                        Log.e(TAG, "OutOfMemoryError creating detection bitmap", e)
-                                                        System.gc()
-                                                        null
-                                                    }
+                                        coroutineScope.launch(Dispatchers.Main) {
+                                            callback(sensorData)
+                                            Log.d(TAG, "UI callback called with frameId: $frameId")
+                                        }
 
-                                                    if (detectionBitmap != null && !detectionBitmap!!.isRecycled) {
-                                                        detector?.detect(detectionBitmap!!, frameId)
-                                                    }
-                                                } catch (e: Exception) {
-                                                    Log.e(TAG, "Error in Detector.detect: ${e.message}", e)
-                                                } finally {
-                                                    // ✅ Detection 비트맵 안전하게 해제
+                                        if (frameCount % frameSkipInterval == 0) {
+                                            ensureDetectorExecutor()
+                                            if (detectorInitialized && !isDetecting) {
+                                                isDetecting = true
+                                                detectorExecutor.submit {
                                                     try {
-                                                        detectionBitmap?.let { bitmap ->
-                                                            if (!bitmap.isRecycled) {
-                                                                bitmap.recycle()
+                                                        // ✅ 4. Detection용 안전한 비트맵 생성
+                                                        detectionBitmap = try {
+                                                            if (canAllocateBitmap(finalBitmap.width, finalBitmap.height)) {
+                                                                finalBitmap.copy(finalBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                                                            } else {
+                                                                Log.w(TAG, "Insufficient memory for detection bitmap, skipping")
+                                                                null
                                                             }
+                                                        } catch (e: OutOfMemoryError) {
+                                                            Log.e(TAG, "OutOfMemoryError creating detection bitmap", e)
+                                                            forceGarbageCollection()
+                                                            null
+                                                        }
+
+                                                        if (detectionBitmap != null && !detectionBitmap!!.isRecycled) {
+                                                            detector?.detect(detectionBitmap!!, frameId)
                                                         }
                                                     } catch (e: Exception) {
-                                                        Log.w(TAG, "Error recycling detection bitmap: ${e.message}")
+                                                        Log.e(TAG, "Error in Detector.detect: ${e.message}", e)
+                                                    } finally {
+                                                        try {
+                                                            detectionBitmap?.let { bitmap ->
+                                                                if (!bitmap.isRecycled) {
+                                                                    bitmap.recycle()
+                                                                }
+                                                            }
+                                                        } catch (e: Exception) {
+                                                            Log.w(TAG, "Error recycling detection bitmap: ${e.message}")
+                                                        }
+                                                        detectionBitmap = null
+                                                        isDetecting = false
                                                     }
-                                                    detectionBitmap = null
-                                                    isDetecting = false
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
 
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error processing bitmap: ${e.message}", e)
-                            coroutineScope.launch(Dispatchers.Main) { callback(null) }
-                        } finally {
-                            // ✅ 6단계: 작업용 비트맵들 안전하게 해제
-                            try {
-                                // currentBitmap과 finalBitmap이 같은 경우 중복 해제 방지
-                                if (currentBitmap != null && currentBitmap != finalBitmap && !currentBitmap.isRecycled) {
-                                    currentBitmap.recycle()
-                                }
                             } catch (e: Exception) {
-                                Log.w(TAG, "Error recycling current bitmap: ${e.message}")
+                                Log.e(TAG, "Error processing bitmap: ${e.message}", e)
+                                coroutineScope.launch(Dispatchers.Main) { callback(null) }
+                            } finally {
+                                try {
+                                    if (currentBitmap != null && currentBitmap != finalBitmap && !currentBitmap.isRecycled) {
+                                        currentBitmap.recycle()
+                                    }
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Error recycling current bitmap: ${e.message}")
+                                }
                             }
                         }
                     }
                 }, null)
             }
 
-            // 나머지 카메라 설정 코드는 동일...
             if (!cameraOpenCloseLock.tryAcquire(2, TimeUnit.SECONDS)) {
                 callback(null)
                 return
@@ -817,10 +804,11 @@ class SensorCollector(private val context: Context) {
                                     captureSession = session
                                     session.setRepeatingRequest(builder.build(), cameraConfig.captureCallback, null)
                                     isStreaming.set(true)
-                                    Log.d(TAG, "✅ Camera session configured and streaming started")
+                                    isSessionActive.set(true) // ✅ 세션 활성화
+                                    Log.d(TAG, "Camera session configured and streaming started")
                                 }
                                 override fun onConfigureFailed(session: CameraCaptureSession) {
-                                    Log.e(TAG, "❌ Camera session configuration failed")
+                                    Log.e(TAG, "Camera session configuration failed")
                                     callback(null)
                                     closeCamera()
                                 }
@@ -828,7 +816,7 @@ class SensorCollector(private val context: Context) {
                             null
                         )
                     } ?: run {
-                        Log.e(TAG, "❌ ImageReader surface is null")
+                        Log.e(TAG, "ImageReader surface is null")
                         callback(null)
                     }
                 }
@@ -845,7 +833,7 @@ class SensorCollector(private val context: Context) {
             }, null)
 
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Error in startCameraStreaming: ${e.message}", e)
+            Log.e(TAG, "Error in startCameraStreaming: ${e.message}", e)
             callback(null)
             closeCamera()
         }
@@ -853,6 +841,10 @@ class SensorCollector(private val context: Context) {
 
     fun stopCameraStreaming() {
         if (!isStreaming.get()) return
+
+        // ✅ 1. 세션 비활성화로 flush 충돌 방지
+        isSessionActive.set(false)
+
         try {
             captureSession?.stopRepeating()
             captureSession?.close()
@@ -870,9 +862,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * ✅ 최신 LocationRequest API 사용
-     */
     @Suppress("DEPRECATION")
     fun startSensorStreaming(
         gpsCallback: ((SensorData_String) -> Unit)? = null,
@@ -890,14 +879,13 @@ class SensorCollector(private val context: Context) {
             return
         }
 
-        // ✅ GNSS 콜백 등록 (기존 로직 유지)
         if (!isGnssCallbackRegistered.getAndSet(true)) {
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     locationManager.registerGnssMeasurementsCallback(gnssMeasurementsCallback)
                     locationManager.registerGnssStatusCallback(gnssStatusCallback)
                     locationManager.registerGnssNavigationMessageCallback(gnssNavigationMessageCallback)
-                    Log.d(TAG, "✅ GNSS 콜백들 등록 성공")
+                    Log.d(TAG, "GNSS 콜백들 등록 성공")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "GNSS 콜백 등록 실패: ${e.message}", e)
@@ -905,7 +893,6 @@ class SensorCollector(private val context: Context) {
             }
         }
 
-        // ✅ GPS 위치 요청
         val locationRequest = com.google.android.gms.location.LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
             .setMinUpdateIntervalMillis(500L)
             .setMaxUpdateDelayMillis(2000L)
@@ -915,12 +902,10 @@ class SensorCollector(private val context: Context) {
         fusedLocationClient.requestLocationUpdates(
             locationRequest,
             locationCallback,
-            Looper.getMainLooper() // ✅ 메인 루퍼 사용
+            Looper.getMainLooper()
         )
 
-        // ✅ IMU 센서 등록 개선 - 더 안전한 방법
         try {
-            // 센서 등록 전에 기존 리스너 해제
             sensorManager.unregisterListener(accelerometerListener)
             sensorManager.unregisterListener(gyroscopeListener)
             sensorManager.unregisterListener(magnetometerListener)
@@ -933,7 +918,7 @@ class SensorCollector(private val context: Context) {
                 val success = sensorManager.registerListener(
                     accelerometerListener,
                     accelSensor,
-                    SensorManager.SENSOR_DELAY_GAME // ✅ 더 안정적인 레이트 사용
+                    SensorManager.SENSOR_DELAY_GAME
                 )
                 Log.d(TAG, "가속도계 등록 ${if (success) "성공" else "실패"}")
             }
@@ -960,18 +945,13 @@ class SensorCollector(private val context: Context) {
             Log.e(TAG, "센서 등록 중 오류: ${e.message}", e)
         }
 
-        Log.d(TAG, "✅ 모든 센서 스트리밍 시작 완료")
+        Log.d(TAG, "모든 센서 스트리밍 시작 완료")
     }
 
-    /**
-     * ✅ stopSensorStreaming 함수 업데이트
-     */
     fun stopSensorStreaming() {
         try {
-            // ✅ GPS 콜백 해제
             fusedLocationClient.removeLocationUpdates(locationCallback)
 
-            // ✅ GNSS 콜백 해제
             if (isGnssCallbackRegistered.getAndSet(false)) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     locationManager.unregisterGnssMeasurementsCallback(gnssMeasurementsCallback)
@@ -980,15 +960,12 @@ class SensorCollector(private val context: Context) {
                 }
             }
 
-            // ✅ IMU 센서 해제
             sensorManager.unregisterListener(accelerometerListener)
             sensorManager.unregisterListener(gyroscopeListener)
             sensorManager.unregisterListener(magnetometerListener)
 
-            // ✅ Detector 정리
             detector?.close()
 
-            // ✅ ExecutorService 정리
             detectorExecutor.shutdown()
             try {
                 if (!detectorExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -999,10 +976,9 @@ class SensorCollector(private val context: Context) {
                 Thread.currentThread().interrupt()
             }
 
-            // ✅ 코루틴 스코프 정리
             coroutineScope.cancel()
 
-            Log.d(TAG, "✅ 모든 센서 스트리밍 중지 및 리소스 정리 완료")
+            Log.d(TAG, "모든 센서 스트리밍 중지 및 리소스 정리 완료")
         } catch (e: Exception) {
             Log.e(TAG, "센서 스트리밍 중지 오류: ${e.message}", e)
         }
@@ -1132,6 +1108,7 @@ class SensorCollector(private val context: Context) {
 
     fun closeCamera() {
         try {
+            isSessionActive.set(false) // ✅ 세션 비활성화
             cameraOpenCloseLock.acquire()
             captureSession?.stopRepeating()
             captureSession?.close()
@@ -1185,25 +1162,20 @@ class SensorCollector(private val context: Context) {
 
         val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
         return try {
-            // ✅ 메모리 체크
-            val runtime = Runtime.getRuntime()
-            val availableMemory = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
-            val requiredMemory = bitmap.width * bitmap.height * 4L // ARGB_8888 기준
-
-            if (availableMemory < requiredMemory * 2) { // 안전 마진 2배
+            // ✅ 2. 메모리 체크 강화
+            if (!canAllocateBitmap(bitmap.width, bitmap.height)) {
                 Log.w(TAG, "Insufficient memory for bitmap rotation, skipping")
-                return bitmap // 회전하지 않고 원본 반환
+                return bitmap
             }
 
             Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
         } catch (e: OutOfMemoryError) {
             Log.e(TAG, "OutOfMemoryError rotating bitmap", e)
-            // 메모리 부족 시 원본 반환 (해제하지 않음)
-            System.gc()
+            forceGarbageCollection()
             bitmap
         } catch (e: Exception) {
             Log.e(TAG, "Error rotating bitmap: ${e.message}", e)
-            bitmap // 에러 시 원본 반환
+            bitmap
         }
     }
 

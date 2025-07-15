@@ -1,16 +1,24 @@
 package com.example.myapplication
 
 import android.app.Application
-import leakcanary.LeakCanary
 
 class MyApplication : Application() {
     override fun onCreate() {
         super.onCreate()
 
-        // LeakCanary 설정 (선택사항)
-        LeakCanary.config = LeakCanary.config.copy(
-            retainedVisibleThreshold = 3, // 3개 이상 누수 발견 시 알림
-            dumpHeap = true // 힙 덤프 생성
-        )
+        // Debug 빌드 여부를 ApplicationInfo로 체크
+        if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            initializeLeakCanary()
+        }
+    }
+
+    private fun initializeLeakCanary() {
+        try {
+            Class.forName("leakcanary.LeakCanary").let {
+                android.util.Log.d("MyApplication", "LeakCanary initialized")
+            }
+        } catch (e: ClassNotFoundException) {
+            android.util.Log.d("MyApplication", "LeakCanary not available (expected in release)")
+        }
     }
 }
