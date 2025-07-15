@@ -16,6 +16,7 @@ kotlinx-coroutines = "1.6.4"
 google-play-services-location = "21.0.1"
 tensorflow-lite = "2.16.1"
 tensorflow-lite-support = "0.4.4"
+foundationJvmstubs = "1.8.3"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -40,6 +41,7 @@ tensorflow-lite-api = { group = "org.tensorflow", name = "tensorflow-lite-api", 
 tensorflow-lite-gpu = { group = "org.tensorflow", name = "tensorflow-lite-gpu", version.ref = "tensorflow-lite" }
 tensorflow-lite-select-tf-ops = { group = "org.tensorflow", name = "tensorflow-lite-select-tf-ops", version.ref = "tensorflow-lite" }
 tensorflow-lite-metadata = { group = "org.tensorflow", name = "tensorflow-lite-metadata", version.ref = "tensorflow-lite-support" }
+androidx-foundation-jvmstubs = { group = "androidx.compose.foundation", name = "foundation-jvmstubs", version.ref = "foundationJvmstubs" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

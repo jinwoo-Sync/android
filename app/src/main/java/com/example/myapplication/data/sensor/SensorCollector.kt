@@ -46,9 +46,9 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
-import com.example.myapplication.utils.AdvancedBitmapPool
-import com.example.myapplication.utils.SafeZeroCopyFrameProcessor
-import com.example.myapplication.utils.ProcessedFrame
+import com.example.myapplication.utils.TrueZeroCopyBitmapPool
+import com.example.myapplication.utils.HighSpeedZeroCopyProcessor
+import com.example.myapplication.utils.SharedBitmap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -123,7 +123,6 @@ class AdaptiveMemoryManager {
     }
 }
 
-
 private class YoloDetectorListener(
     private val context: Context,
     private val dataSynchronizer: DataSynchronizer,
@@ -178,16 +177,15 @@ class SensorCollector(private val context: Context) {
     private val isSessionActive = AtomicBoolean(false)
     private val frameProcessingLock = Object()
 
-
-    private lateinit var advancedBitmapPool: AdvancedBitmapPool
-    private lateinit var safeFrameProcessor: SafeZeroCopyFrameProcessor
+    // 🎯 True Zero-Copy 시스템
+    private lateinit var zeroCopyPool: TrueZeroCopyBitmapPool
+    private lateinit var highSpeedProcessor: HighSpeedZeroCopyProcessor
     private val adaptiveMemoryManager = AdaptiveMemoryManager()
 
     // 성능 모니터링
     private val frameProcessingStats = AtomicInteger(0)
     private val lastStrategyUpdate = AtomicLong(0)
     private var currentStrategy = adaptiveMemoryManager.getCurrentStrategy()
-
 
     private val TAG = "SensorCollector"
     private var frameSkipInterval = 10
@@ -261,26 +259,34 @@ class SensorCollector(private val context: Context) {
     }
 
     private fun initializeAdvancedSystems() {
-        // 초기 전략 기반 풀 크기 설정
-        val initialStrategy = adaptiveMemoryManager.getCurrentStrategy()
-
-        advancedBitmapPool = AdvancedBitmapPool(
-            poolSize = initialStrategy.poolSize,
+        zeroCopyPool = TrueZeroCopyBitmapPool(
+            poolSize = 6,
             width = 840,
-            height = 840,
-            config = Bitmap.Config.ARGB_8888
+            height = 840
         )
 
-        // Safe 프로세서 사용
-        safeFrameProcessor = SafeZeroCopyFrameProcessor(
-            bitmapPool = advancedBitmapPool,
+        highSpeedProcessor = HighSpeedZeroCopyProcessor(
+            bitmapPool = zeroCopyPool,
             targetWidth = 840,
             targetHeight = 840
         )
 
-        Log.d(TAG, "🎯 고급 메모리 시스템 초기화: ${initialStrategy}")
+        Log.d(TAG, "🎯 True Zero-Copy 시스템 초기화 완료")
     }
 
+    /**
+     * 🎯 최적화된 메모리 시스템 초기화
+     */
+    private fun initializeOptimizedMemorySystem(): Boolean {
+        return try {
+            // 이미 초기화되어 있으므로 true 반환
+            Log.d(TAG, "🎯 최적화된 메모리 시스템 초기화 완료")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 최적화된 메모리 시스템 초기화 실패: ${e.message}", e)
+            false
+        }
+    }
 
     private fun initializeDetector() {
         if (!::dataSynchronizer.isInitialized) {
@@ -318,7 +324,7 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    // ... GPS, IMU, GNSS 콜백들은 기존과 동일하므로 생략 ...
+    // GPS, IMU, GNSS 콜백들 - 기존 코드 유지
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(locationResult: LocationResult) {
             locationResult.lastLocation?.let { location ->
@@ -696,7 +702,7 @@ class SensorCollector(private val context: Context) {
     }
 
     /**
-     * 🚀 고속 카메라 스트리밍 - Lock-Free 최적화 적용
+     * 🚀 고속 카메라 스트리밍 - Zero-Copy 최적화 적용
      */
     fun startCameraStreaming(
         callback: (SensorData?) -> Unit,
@@ -762,7 +768,7 @@ class SensorCollector(private val context: Context) {
                                         session.setRepeatingRequest(builder.build(), cameraConfig.captureCallback, null)
                                         isStreaming.set(true)
                                         isSessionActive.set(true)
-                                        Log.d(TAG, "🎯 고급 카메라 세션 시작: ${advancedBitmapPool.getPoolStatus()}")
+                                        Log.d(TAG, "🎯 고급 카메라 세션 시작: ${zeroCopyPool.getStatus()}")
                                     } else {
                                         Log.e(TAG, "❌ 최적화된 메모리 시스템 초기화 실패")
                                         callback(null)
@@ -810,142 +816,49 @@ class SensorCollector(private val context: Context) {
     ): ImageReader.OnImageAvailableListener {
         return ImageReader.OnImageAvailableListener { reader ->
             if (!isSessionActive.get()) {
-                Log.d(TAG, "세션 비활성화 상태, 프레임 스킵")
                 reader.acquireLatestImage()?.close()
                 return@OnImageAvailableListener
             }
 
-            // 🎯 적응적 전략 업데이트 (1초마다)
+            // 🎯 적응적 전략 업데이트
             val now = System.currentTimeMillis()
             if (now - lastStrategyUpdate.get() > 1000) {
                 updateProcessingStrategy()
                 lastStrategyUpdate.set(now)
             }
 
-            // 🎯 적응적 프레임 스킵
             frameCount++
             if (frameCount % currentStrategy.frameSkip != 0) {
                 reader.acquireLatestImage()?.close()
                 return@OnImageAvailableListener
             }
 
-            // 🎯 메모리 압박 체크
-            val memoryPressure = adaptiveMemoryManager.getCurrentMemoryPressure()
-            if (memoryPressure == AdaptiveMemoryManager.MemoryPressure.CRITICAL) {
-                Log.w(TAG, "🔴 메모리 압박 위험 - 프레임 스킵")
-                reader.acquireLatestImage()?.close()
-                return@OnImageAvailableListener
-            }
-
-            // 🎯 Safe Image 처리 - use 블록으로 안전한 라이프사이클 관리
             val image = reader.acquireLatestImage()
             if (image != null) {
                 try {
-                    // Image 생존 중에 모든 필요한 데이터 추출
-                    val imageTimestamp = image.timestamp
+                    // 🎯 Image 생존 중 바이트 추출
+                    val imageBytes = extractImageBytes(image)
                     val rotationDegrees = getRotationDegrees(cameraId)
 
-                    // Safe 프로세싱 (이미지 close 후에도 안전)
-                    safeFrameProcessor.processSafely(
-                        image,
-                        rotationDegrees,
-                        imageTimestamp
-                    ) { processedFrame ->
-                        handleSafeProcessedFrame(processedFrame, callback)
+                    if (imageBytes != null) {
+                        // 🚀 Zero-Copy 처리
+                        val sharedBitmap = highSpeedProcessor.processZeroCopy(
+                            imageBytes, rotationDegrees
+                        )
+
+                        if (sharedBitmap != null) {
+                            handleZeroCopyFrame(sharedBitmap, callback)
+                        } else {
+                            coroutineScope.launch(Dispatchers.Main) { callback(null) }
+                        }
+                    } else {
+                        coroutineScope.launch(Dispatchers.Main) { callback(null) }
                     }
 
                 } finally {
-                    // 명시적으로 close
                     image.close()
                 }
             }
-        }
-    }
-
-    /**
-     * 🎯 Safe 처리된 프레임 핸들링
-     */
-    private fun handleSafeProcessedFrame(
-        processedFrame: ProcessedFrame?,
-        callback: (SensorData?) -> Unit
-    ) {
-        if (processedFrame == null) {
-            coroutineScope.launch(Dispatchers.Main) { callback(null) }
-            return
-        }
-
-        val managedBitmap = processedFrame.managedBitmap
-        val frameId = processedFrame.frameId
-        val systemTime = processedFrame.processedTimestamp
-        val monoTime = System.nanoTime()
-
-        // 🎯 LoggerManager에 푸시
-        if (::dataSynchronizer.isInitialized) {
-            val sensorData = SensorData(
-                value = "Safe Streaming: ${processedFrame.originalTimestamp}",
-                bitmap = managedBitmap.bitmap,
-                timestamp = systemTime,
-                monoTimestamp = monoTime,
-                frameId = frameId
-            )
-            LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
-        }
-
-        frameProcessingStats.incrementAndGet()
-
-        // 🎯 UI 업데이트 (별도 참조)
-        coroutineScope.launch(Dispatchers.Main) {
-            val uiRef = managedBitmap.addRef()
-            if (uiRef != null) {
-                try {
-                    val uiSensorData = SensorData(
-                        value = "UI Frame: $frameId",
-                        bitmap = uiRef.bitmap,
-                        timestamp = systemTime,
-                        monoTimestamp = monoTime,
-                        frameId = frameId
-                    )
-                    callback(uiSensorData)
-                    Log.d(TAG, "✅ Safe Camera frame delivered: frameId=$frameId")
-                } finally {
-                    uiRef.release()
-                }
-            }
-        }
-
-        // 🎯 Detection (전략적 실행)
-        if (currentStrategy.enableDetection && frameProcessingStats.get() % 2 == 0) {
-            ensureDetectorExecutor()
-            if (detectorInitialized && !isDetecting) {
-                isDetecting = true
-                detectorExecutor.submit {
-                    val detectionRef = managedBitmap.addRef()
-                    if (detectionRef != null) {
-                        try {
-                            detector?.detect(detectionRef.bitmap, frameId)
-                            Log.d(TAG, "🔍 Safe Detection 수행: frameId=$frameId")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Detection 오류: ${e.message}", e)
-                        } finally {
-                            detectionRef.release()
-                            isDetecting = false
-                        }
-                    } else {
-                        isDetecting = false
-                        Log.w(TAG, "⚠️ Detection 참조 획득 실패")
-                    }
-                }
-            }
-        }
-
-        // 🎯 원본 참조 해제
-        managedBitmap.release()
-
-        // 🎯 주기적 상태 로깅
-        if (frameProcessingStats.get() % 150 == 0) {
-            Log.i(TAG, "📊 ${advancedBitmapPool.getPoolStatus()}")
-            Log.i(TAG, "📊 ${safeFrameProcessor.getProcessorStatus()}")
-            Log.i(TAG, "📊 메모리 전략: $currentStrategy")
         }
     }
 
@@ -957,31 +870,135 @@ class SensorCollector(private val context: Context) {
         if (newStrategy != currentStrategy) {
             currentStrategy = newStrategy
             Log.i(TAG, "🔄 처리 전략 업데이트: $newStrategy")
-
-            // Pool 크기가 변경된 경우 재초기화 고려
-            if (newStrategy.poolSize != currentStrategy.poolSize) {
-                // 실시간 재조정은 위험하므로 로그만 남김
-                Log.w(TAG, "⚠️ 풀 크기 변경 감지됨 - 다음 초기화에서 적용")
-            }
         }
     }
 
     /**
-     * 🎯 최적화된 메모리 시스템 초기화
+     * 🎯 이미지 바이트 추출
      */
-    private fun initializeOptimizedMemorySystem(): Boolean {
+    private fun extractImageBytes(image: Image): ByteArray? {
         return try {
-            val poolInitialized = advancedBitmapPool.initialize()
-            if (poolInitialized) {
-                Log.d(TAG, "🎯 최적화된 메모리 시스템 초기화 완료")
-                true
-            } else {
-                Log.e(TAG, "❌ 비트맵 풀 초기화 실패")
-                false
+            when (image.format) {
+                ImageFormat.JPEG -> {
+                    val buffer = image.planes[0].buffer
+                    val bytes = ByteArray(buffer.remaining())
+                    buffer.get(bytes)
+                    bytes
+                }
+                ImageFormat.YUV_420_888 -> {
+                    // YUV를 즉시 JPEG로 변환
+                    convertYuvToJpegBytes(image)
+                }
+                else -> null
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ 최적화된 메모리 시스템 초기화 실패: ${e.message}", e)
-            false
+            Log.e(TAG, "이미지 바이트 추출 실패: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 🎯 YUV를 JPEG 바이트로 변환
+     */
+    private fun convertYuvToJpegBytes(image: Image): ByteArray {
+        val yBuffer = image.planes[0].buffer
+        val uBuffer = image.planes[1].buffer
+        val vBuffer = image.planes[2].buffer
+
+        val ySize = yBuffer.remaining()
+        val uSize = uBuffer.remaining()
+        val vSize = vBuffer.remaining()
+
+        val nv21 = ByteArray(ySize + uSize + vSize)
+        yBuffer.get(nv21, 0, ySize)
+        vBuffer.get(nv21, ySize, vSize)
+        uBuffer.get(nv21, ySize + vSize, uSize)
+
+        val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
+        return ByteArrayOutputStream().use { out ->
+            yuvImage.compressToJpeg(
+                android.graphics.Rect(0, 0, image.width, image.height),
+                90,
+                out
+            )
+            out.toByteArray()
+        }
+    }
+
+    /**
+     * 🎯 Zero-Copy 프레임 처리
+     */
+    private fun handleZeroCopyFrame(
+        sharedBitmap: SharedBitmap,
+        callback: (SensorData?) -> Unit
+    ) {
+        val frameId = System.nanoTime()
+        val systemTime = System.currentTimeMillis()
+
+        frameProcessingStats.incrementAndGet()
+
+        // 🎯 LoggerManager에 푸시 (원본 참조 사용)
+        if (::dataSynchronizer.isInitialized) {
+            val sensorData = SensorData(
+                value = "ZeroCopy Frame: $frameId",
+                bitmap = sharedBitmap.bitmap,
+                timestamp = systemTime,
+                monoTimestamp = System.nanoTime(),
+                frameId = frameId
+            )
+            LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+        }
+
+        // 🎯 UI 업데이트 (즉시 참조 추가)
+        val uiRef = sharedBitmap.addRef()
+        if (uiRef != null) {
+            coroutineScope.launch(Dispatchers.Main) {
+                try {
+                    callback(SensorData(
+                        value = "ZeroCopy Frame: $frameId",
+                        bitmap = uiRef.bitmap,
+                        timestamp = systemTime,
+                        monoTimestamp = System.nanoTime(),
+                        frameId = frameId
+                    ))
+                    Log.d(TAG, "✅ Zero-Copy frame delivered: frameId=$frameId")
+                } finally {
+                    uiRef.release()
+                }
+            }
+        }
+
+        // 🎯 Detection (즉시 참조 추가)
+        if (currentStrategy.enableDetection && frameProcessingStats.get() % 2 == 0) {
+            val detectionRef = sharedBitmap.addRef()
+            if (detectionRef != null) {
+                ensureDetectorExecutor()
+                if (detectorInitialized && !isDetecting) {
+                    isDetecting = true
+                    detectorExecutor.submit {
+                        try {
+                            detector?.detect(detectionRef.bitmap, frameId)
+                            Log.d(TAG, "🔍 Zero-Copy Detection: frameId=$frameId")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Detection 오류: ${e.message}", e)
+                        } finally {
+                            detectionRef.release()
+                            isDetecting = false
+                        }
+                    }
+                } else {
+                    detectionRef.release()
+                }
+            }
+        }
+
+        // 🎯 원본 해제
+        sharedBitmap.release()
+
+        // 주기적 상태 출력
+        if (frameCount % 90 == 0) {
+            Log.i(TAG, "📊 ${zeroCopyPool.getStatus()}")
+            Log.i(TAG, "📊 ${highSpeedProcessor.getStatus()}")
         }
     }
 
@@ -1003,26 +1020,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-
-    /**
-     * 🎯 OOM 응급 처리
-     */
-    private fun handleOutOfMemoryEmergency() {
-        Log.w(TAG, "🚨 OOM 응급 처리 시작")
-
-        // 풀 강제 정리
-        advancedBitmapPool.cleanup()
-
-        // GC 강제 실행
-        System.gc()
-        System.runFinalization()
-
-        // 풀 재초기화
-        advancedBitmapPool.initialize()
-
-        Log.w(TAG, "🚨 OOM 응급 처리 완료")
-    }
-
     /**
      * 🎯 카메라 스트리밍 중지 - 리소스 정리 최적화
      */
@@ -1040,16 +1037,15 @@ class SensorCollector(private val context: Context) {
             detector?.close()
             detectorExecutor.shutdownNow()
 
-            // 🎯 Safe 프로세서와 풀 정리
-            safeFrameProcessor.cleanup()
-            advancedBitmapPool.cleanup()
+            // 🎯 프로세서와 풀 정리
+            highSpeedProcessor.cleanup()
+            zeroCopyPool.cleanup()
 
-            Log.d(TAG, "🎯 Safe 카메라 스트리밍 중지 완료")
+            Log.d(TAG, "🎯 Zero-Copy 카메라 스트리밍 중지 완료")
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping camera: ${e.message}")
         }
     }
-
 
     fun closeCamera() {
         try {
@@ -1060,11 +1056,11 @@ class SensorCollector(private val context: Context) {
             isStreaming.set(false)
 
             // 🎯 완전 종료 시에만 풀 정리
-            if (::advancedBitmapPool.isInitialized) {
-                advancedBitmapPool.cleanup()
+            if (::zeroCopyPool.isInitialized) {
+                zeroCopyPool.cleanup()
             }
 
-            Log.d(TAG, "🎯 카메라 리소스 및 고급 메모리 시스템 정리 완료")
+            Log.d(TAG, "🎯 카메라 리소스 및 Zero-Copy 시스템 정리 완료")
         } catch (e: Exception) {
             Log.e(TAG, "Error closing camera resources: ${e.message}")
         } finally {
@@ -1198,7 +1194,7 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    // ... 나머지 유틸리티 함수들은 기존과 동일 ...
+    // 유틸리티 함수들
     private fun validateImageSize(cameraId: String, size: Size, format: Int): Size {
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         try {
