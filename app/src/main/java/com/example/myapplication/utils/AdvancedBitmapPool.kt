@@ -8,10 +8,10 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * 🎯 진짜 Zero-Copy 비트맵 풀 - GC Pressure 최소화 + 개선된 디버깅
+ * 🎯 확장된 Zero-Copy 비트맵 풀 - 단순히 크기만 늘린 안전한 버전
  */
 class TrueZeroCopyBitmapPool(
-    private val poolSize: Int = 6,
+    private val poolSize: Int = 20, // 기본 20개로 증가
     private val width: Int = 840,
     private val height: Int = 840
 ) {
@@ -31,15 +31,22 @@ class TrueZeroCopyBitmapPool(
     private val totalReused = AtomicInteger(0)
 
     init {
-        // 풀 사전 초기화
-        repeat(poolSize) {
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            availableBitmaps.offer(bitmap)
-            totalCreated.incrementAndGet()
+        // 🛠️ 풀 사전 초기화 - for문으로 변경 (break 에러 해결)
+        for (i in 0 until poolSize) {
+            try {
+                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                availableBitmaps.offer(bitmap)
+                totalCreated.incrementAndGet()
+            } catch (e: OutOfMemoryError) {
+                Log.w(TAG, "⚠️ 초기화 중 OOM: ${i + 1}/${poolSize}")
+                System.gc()
+                break // ✅ for문에서는 break 사용 가능
+            }
         }
 
-        // Canvas/Paint 풀 초기화
-        repeat(4) {
+        // Canvas/Paint 풀 초기화 - 풀 크기에 맞춰 증가
+        val helperPoolSize = (poolSize * 0.3).toInt().coerceAtLeast(4)
+        for (i in 0 until helperPoolSize) {
             canvasPool.offer(Canvas())
             paintPool.offer(Paint().apply {
                 isFilterBitmap = true
@@ -48,7 +55,7 @@ class TrueZeroCopyBitmapPool(
             matrixPool.offer(Matrix())
         }
 
-        Log.d(TAG, "🎯 Zero-Copy 풀 초기화 완료: $poolSize bitmaps")
+        Log.d(TAG, "🎯 확장된 Zero-Copy 풀 초기화 완료: ${availableBitmaps.size}/${poolSize} bitmaps")
     }
 
     /**
@@ -161,7 +168,8 @@ class TrueZeroCopyBitmapPool(
         }
 
         return buildString {
-            appendLine("=== 비트맵 풀 상세 상태 ===")
+            appendLine("=== 확장된 비트맵 풀 상태 ===")
+            appendLine("Pool Size: $poolSize")
             appendLine("Available: ${availableBitmaps.size}/${poolSize}")
             appendLine("Active: ${activeBitmaps.size}")
             appendLine("Created: ${totalCreated.get()}")
@@ -179,7 +187,8 @@ class TrueZeroCopyBitmapPool(
      */
     fun getReusableCanvas(): Canvas = canvasPool.poll() ?: Canvas()
     fun returnReusableCanvas(canvas: Canvas) {
-        if (canvasPool.size < 4) {
+        val maxCanvasPoolSize = (poolSize * 0.3).toInt().coerceAtLeast(4)
+        if (canvasPool.size < maxCanvasPoolSize) {
             canvas.setBitmap(null)
             canvasPool.offer(canvas)
         }
@@ -190,19 +199,21 @@ class TrueZeroCopyBitmapPool(
         isAntiAlias = false
     }
     fun returnReusablePaint(paint: Paint) {
-        if (paintPool.size < 4) paintPool.offer(paint)
+        val maxPaintPoolSize = (poolSize * 0.3).toInt().coerceAtLeast(4)
+        if (paintPool.size < maxPaintPoolSize) paintPool.offer(paint)
     }
 
     fun getReusableMatrix(): Matrix = matrixPool.poll() ?: Matrix()
     fun returnReusableMatrix(matrix: Matrix) {
-        if (matrixPool.size < 4) {
+        val maxMatrixPoolSize = (poolSize * 0.3).toInt().coerceAtLeast(4)
+        if (matrixPool.size < maxMatrixPoolSize) {
             matrix.reset()
             matrixPool.offer(matrix)
         }
     }
 
     fun getStatus(): String {
-        return "ZeroCopyPool: Available=${availableBitmaps.size}, " +
+        return "ZeroCopyPool: Available=${availableBitmaps.size}/${poolSize}, " +
                 "Active=${activeBitmaps.size}, Created=${totalCreated.get()}, " +
                 "Reused=${totalReused.get()}"
     }
@@ -272,7 +283,7 @@ class SharedBitmap(
 }
 
 /**
- * 🚀 고속 Zero-Copy 프레임 프로세서 - 개선된 로깅
+ * 🚀 고속 Zero-Copy 프레임 프로세서 - 크래시 방지 강화
  */
 class HighSpeedZeroCopyProcessor(
     private val bitmapPool: TrueZeroCopyBitmapPool,
@@ -283,7 +294,7 @@ class HighSpeedZeroCopyProcessor(
     private val processedFrames = AtomicLong(0)
 
     /**
-     * 🚀 Zero-Copy 프레임 처리 - 모든 객체 재사용
+     * 🛡️ 안전한 Zero-Copy 프레임 처리 - 크래시 방지
      */
     fun processZeroCopy(
         imageBytes: ByteArray,
@@ -292,22 +303,38 @@ class HighSpeedZeroCopyProcessor(
         val sharedBitmap = bitmapPool.acquireSharedBitmap() ?: return null
         val bitmapHash = sharedBitmap.bitmap.hashCode().toString(16)
 
+        // 🛡️ 1단계: 비트맵 유효성 사전 검증
+        if (!isValidBitmap(sharedBitmap.bitmap)) {
+            Log.e(TAG, "❌ Invalid bitmap detected before processing: @$bitmapHash")
+            sharedBitmap.release()
+            return null
+        }
+
         // 재사용 객체들 획득
         val canvas = bitmapPool.getReusableCanvas()
         val paint = bitmapPool.getReusablePaint()
         val matrix = bitmapPool.getReusableMatrix()
 
         try {
-            // Canvas를 공유 비트맵에 바인딩
-            canvas.setBitmap(sharedBitmap.bitmap)
+            // 🛡️ 2단계: Canvas 바인딩 안전성 검증
+            if (!safeSetCanvasBitmap(canvas, sharedBitmap.bitmap)) {
+                Log.e(TAG, "❌ Canvas.setBitmap() failed for @$bitmapHash")
+                sharedBitmap.release()
+                return null
+            }
 
-            // 🚀 클리어 제거: 새 프레임으로 완전히 덮어씌우므로 불필요
-            // canvas.drawColor(Color.BLACK, PorterDuff.Mode.CLEAR)
-
-            // 원본 비트맵 디코딩 (이것만 새로 생성)
+            // 🛡️ 3단계: 소스 비트맵 디코딩 및 검증
             val sourceBitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-            if (sourceBitmap == null) {
-                Log.w(TAG, "⚠️ Source bitmap decode failed for @$bitmapHash")
+            if (sourceBitmap == null || sourceBitmap.isRecycled) {
+                Log.w(TAG, "⚠️ Source bitmap decode failed or recycled for @$bitmapHash")
+                sharedBitmap.release()
+                return null
+            }
+
+            // 🛡️ 4단계: 변환 중 재검증
+            if (!isValidBitmap(sharedBitmap.bitmap)) {
+                Log.e(TAG, "❌ Target bitmap became invalid during processing: @$bitmapHash")
+                sourceBitmap.recycle()
                 sharedBitmap.release()
                 return null
             }
@@ -326,26 +353,100 @@ class HighSpeedZeroCopyProcessor(
                 )
             }
 
-            // 🎯 핵심: 한 번의 drawBitmap으로 모든 변환 완료 (이전 내용 완전 덮어씌움)
-            canvas.drawBitmap(sourceBitmap, matrix, paint)
+            // 🛡️ 5단계: 안전한 drawBitmap 실행
+            try {
+                canvas.drawBitmap(sourceBitmap, matrix, paint)
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Canvas.drawBitmap failed for @$bitmapHash: ${e.message}", e)
+                sourceBitmap.recycle()
+                sharedBitmap.release()
+                return null
+            }
 
-            // 원본 즉시 해제 (GC 압박 최소화)
+            // 원본 즉시 해제
             sourceBitmap.recycle()
 
+            // 🛡️ 6단계: 최종 결과 검증
+            if (!isValidBitmap(sharedBitmap.bitmap)) {
+                Log.e(TAG, "❌ Final bitmap validation failed: @$bitmapHash")
+                sharedBitmap.release()
+                return null
+            }
+
             val frameNum = processedFrames.incrementAndGet()
-            Log.d(TAG, "✅ Zero-Copy 처리 완료: @$bitmapHash, frame=$frameNum")
+            Log.d(TAG, "✅ Safe Zero-Copy 처리 완료: @$bitmapHash, frame=$frameNum")
 
             return sharedBitmap
 
+        } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "💥 OOM during Zero-Copy processing @$bitmapHash", e)
+            sharedBitmap.release()
+            System.gc()
+            return null
         } catch (e: Exception) {
-            Log.e(TAG, "Zero-Copy 처리 실패 @$bitmapHash: ${e.message}", e)
+            Log.e(TAG, "💥 Unexpected error during Zero-Copy processing @$bitmapHash: ${e.message}", e)
             sharedBitmap.release()
             return null
         } finally {
-            // 재사용 객체들 반환
-            bitmapPool.returnReusableCanvas(canvas)
-            bitmapPool.returnReusablePaint(paint)
-            bitmapPool.returnReusableMatrix(matrix)
+            // 재사용 객체들 안전하게 반환
+            try {
+                bitmapPool.returnReusableCanvas(canvas)
+                bitmapPool.returnReusablePaint(paint)
+                bitmapPool.returnReusableMatrix(matrix)
+            } catch (e: Exception) {
+                Log.w(TAG, "⚠️ Error returning reusable objects: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 🛡️ 비트맵 유효성 검증
+     */
+    private fun isValidBitmap(bitmap: Bitmap?): Boolean {
+        return try {
+            bitmap != null &&
+                    !bitmap.isRecycled &&
+                    bitmap.width > 0 &&
+                    bitmap.height > 0 &&
+                    bitmap.config != null
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Bitmap validation exception: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 🛡️ 안전한 Canvas.setBitmap() 호출
+     */
+    private fun safeSetCanvasBitmap(canvas: Canvas, bitmap: Bitmap): Boolean {
+        return try {
+            // 사전 검증
+            if (!isValidBitmap(bitmap)) {
+                Log.w(TAG, "⚠️ Cannot set invalid bitmap to canvas")
+                return false
+            }
+
+            // 네이티브 크래시를 방지하기 위한 추가 검증
+            if (bitmap.width <= 0 || bitmap.height <= 0) {
+                Log.w(TAG, "⚠️ Cannot set bitmap with invalid dimensions: ${bitmap.width}x${bitmap.height}")
+                return false
+            }
+
+            // 안전한 setBitmap 호출
+            canvas.setBitmap(bitmap)
+
+            // 설정 후 검증
+            return canvas.width > 0 && canvas.height > 0
+
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "❌ IllegalStateException in Canvas.setBitmap(): ${e.message}", e)
+            false
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "❌ RuntimeException in Canvas.setBitmap(): ${e.message}", e)
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Unexpected exception in Canvas.setBitmap(): ${e.message}", e)
+            false
         }
     }
 

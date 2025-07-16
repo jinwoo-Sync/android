@@ -10,7 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.myapplication.data.repository.HomeRepository
 import com.example.myapplication.data.sensor.SensorCollector
 import com.example.myapplication.learning.yolo.BoundingBox
-import com.example.myapplication.utils.SharedBitmap
+import com.example.myapplication.model.SensorData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -20,12 +20,9 @@ class HomeViewModel(
 ) : ViewModel() {
     private val TAG = "HomeViewModel"
 
-    // 🎯 UI 전용 비트맵 생명주기 관리
-    private var currentUIBitmap: SharedBitmap? = null
-    private val uiBitmapLock = Object()
-
-    private val _cameraFrame = MutableLiveData<Bitmap?>()
-    val cameraFrame: LiveData<Bitmap?> = _cameraFrame
+    // 🎯 SensorData 전체를 전달하도록 수정 (frameId 포함)
+    private val _cameraFrame = MutableLiveData<SensorData?>()
+    val cameraFrame: LiveData<SensorData?> = _cameraFrame
 
     private val _boundingBoxes = MutableLiveData<List<BoundingBox>>()
     val boundingBoxes: LiveData<List<BoundingBox>> = _boundingBoxes
@@ -88,48 +85,21 @@ class HomeViewModel(
     }
 
     /**
-     * 🎯 UI 비트맵 안전 교체 - 이전 참조 완전 해제 후 새 참조 설정
+     * 🎯 단순화된 카메라 프레임 업데이트 (SensorData 전체 전달)
      */
-    private fun updateCameraFrame(newSharedBitmap: SharedBitmap?) {
-        synchronized(uiBitmapLock) {
-            // 이전 UI 비트맵 해제
-            currentUIBitmap?.release()
-            currentUIBitmap = null
-
-            if (newSharedBitmap != null && newSharedBitmap.isValid()) {
-                // 새 UI 전용 참조 생성 (생명주기 연장)
-                currentUIBitmap = newSharedBitmap.addRef()
-
-                if (currentUIBitmap != null) {
-                    _cameraFrame.postValue(currentUIBitmap!!.bitmap)
-                    Log.d(TAG, "✅ UI Frame updated with protected reference: @${currentUIBitmap!!.bitmap.hashCode().toString(16)}")
-                } else {
-                    _cameraFrame.postValue(null)
-                    Log.w(TAG, "⚠️ Failed to create UI reference")
-                }
+    private fun updateCameraFrame(sensorData: SensorData?) {
+        try {
+            if (sensorData?.bitmap != null && !sensorData.bitmap.isRecycled) {
+                _cameraFrame.postValue(sensorData)
+                Log.d(TAG, "✅ UI Frame updated: ${sensorData.bitmap.width}x${sensorData.bitmap.height}")
+                Log.d(TAG, "✅ Camera frame received: frameId=${sensorData.frameId}, bitmap=true")
             } else {
                 _cameraFrame.postValue(null)
                 Log.d(TAG, "🧹 UI frame cleared")
             }
-        }
-    }
-
-    /**
-     * 🎯 일반 비트맵 업데이트 (기존 호환성 유지)
-     */
-    private fun updateCameraFrame(bitmap: Bitmap?) {
-        synchronized(uiBitmapLock) {
-            // 이전 UI 비트맵 해제
-            currentUIBitmap?.release()
-            currentUIBitmap = null
-
-            if (bitmap != null && !bitmap.isRecycled) {
-                _cameraFrame.postValue(bitmap)
-                Log.d(TAG, "✅ UI Frame updated: ${bitmap.width}x${bitmap.height}")
-            } else {
-                _cameraFrame.postValue(null)
-                Log.d(TAG, "🧹 UI frame cleared")
-            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Camera frame 업데이트 오류: ${e.message}", e)
+            _cameraFrame.postValue(null)
         }
     }
 
@@ -222,7 +192,7 @@ class HomeViewModel(
                     try {
                         _boundingBoxes.value = boundingBoxes
                         _inferenceTime.value = "${inferenceTime}ms"
-                        Log.d(TAG, "🎯 UI 업데이트 완료: ${boundingBoxes.size}개 바운딩박스")
+                        Log.d(TAG, "🎯 UI 업데이트 완료: ${boundingBoxes.size}개 바운딩박스, ${inferenceTime}ms")
                     } catch (e: Exception) {
                         Log.e(TAG, "🎯 UI 업데이트 실패: ${e.message}", e)
                     }
@@ -300,17 +270,17 @@ class HomeViewModel(
             try {
                 homeRepository.cameraStreamFlow.collect { sensorData ->
                     if (sensorData != null) {
-                        updateCameraFrame(sensorData.bitmap)
-                        Log.d(TAG, "✅ Camera frame received: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
+                        updateCameraFrame(sensorData)
+                        Log.d(TAG, "✅ Valid frame pushed: frameId=${sensorData.frameId}, size=${sensorData.bitmap?.width}x${sensorData.bitmap?.height}")
                     } else {
                         Log.w(TAG, "⚠️ Received null sensor data from camera flow")
-                        updateCameraFrame(null as Bitmap?)
+                        updateCameraFrame(null)
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Camera Flow 구독 오류: ${e.message}", e)
                 _text.postValue("카메라 스트리밍 오류: ${e.message}")
-                updateCameraFrame(null as Bitmap?)
+                updateCameraFrame(null)
             }
         }
     }
@@ -332,7 +302,7 @@ class HomeViewModel(
         homeRepository.stopCameraStreaming()
         _text.value = "카메라 스트리밍 중지됨"
 
-        updateCameraFrame(null as Bitmap?)
+        updateCameraFrame(null)
         _boundingBoxes.postValue(emptyList())
         _inferenceTime.postValue("0ms")
 
@@ -366,7 +336,7 @@ class HomeViewModel(
         }
 
         val sensorData = homeRepository.collectNewSensorData()
-        updateCameraFrame(sensorData?.bitmap)
+        updateCameraFrame(sensorData)
 
         if (sensorData != null) {
             if (_isStreaming.value == true) {
@@ -420,12 +390,6 @@ class HomeViewModel(
     override fun onCleared() {
         super.onCleared()
         Log.d("HomeViewModel", "🧹 ViewModel 정리 시작")
-
-        synchronized(uiBitmapLock) {
-            currentUIBitmap?.release()
-            currentUIBitmap = null
-            Log.d(TAG, "✅ UI Bitmap references cleared")
-        }
 
         isCameraStreamingJob?.cancel()
         homeRepository.stopCameraStreaming()

@@ -81,7 +81,7 @@ class HomeRepository(
     }
 
     /**
-     * ✅ 카메라 스트리밍 시작 - 개선된 비트맵 관리
+     * ✅ 카메라 스트리밍 시작 - Raw 비트맵 그대로 전달
      */
     fun startCameraStreaming() {
         if (isStreamingActive) {
@@ -90,17 +90,20 @@ class HomeRepository(
         }
 
         isStreamingActive = true
-        Log.d(TAG, "Starting camera streaming with enhanced bitmap management")
+        Log.d(TAG, "Starting camera streaming with Raw → UI Pool separation")
 
         sensorCollector.startCameraStreaming(
             callback = { sensorData ->
-                if (sensorData?.bitmap != null && !sensorData.bitmap.isRecycled) {
-                    // 🎯 유효한 비트맵만 플로우에 전달
+                // 🎯 Raw 비트맵을 그대로 전달 (복사는 HomeFragment에서 처리)
+                if (sensorData?.bitmap != null &&
+                    !sensorData.bitmap.isRecycled &&
+                    sensorData.bitmap.width > 0 &&
+                    sensorData.bitmap.height > 0) {
+
                     _cameraStreamFlow.value = sensorData
-                    Log.d(TAG, "✅ Valid frame pushed: frameId=${sensorData.frameId}, size=${sensorData.bitmap.width}x${sensorData.bitmap.height}")
+                    Log.d(TAG, "✅ Raw frame forwarded to UI: frameId=${sensorData.frameId}, size=${sensorData.bitmap.width}x${sensorData.bitmap.height}")
                 } else {
-                    // 🚫 무효한 비트맵 필터링
-                    Log.w(TAG, "⚠️ Invalid frame filtered out: bitmap=${sensorData?.bitmap}, recycled=${sensorData?.bitmap?.isRecycled}")
+                    Log.w(TAG, "⚠️ Invalid raw frame filtered out: bitmap=${sensorData?.bitmap}, recycled=${sensorData?.bitmap?.isRecycled}")
                     // null을 보내지 않고 그냥 무시
                 }
             },
