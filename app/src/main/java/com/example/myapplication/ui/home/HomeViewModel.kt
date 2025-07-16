@@ -155,7 +155,7 @@ class HomeViewModel(
                     append("\nMonoTS: ${sensorDataString.monoTimestamp}")
                 }
                 _gpsData.postValue(gpsInfo)
-                Log.d("HomeViewModel", "✅ GPS 데이터 UI 업데이트: ${sensorDataString.value}")
+                //Log.d("HomeViewModel", "✅ GPS 데이터 UI 업데이트: ${sensorDataString.value}")
                 updateSyncStatus()
             },
             imuCallback = { sensorDataString ->

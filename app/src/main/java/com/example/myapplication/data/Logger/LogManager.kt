@@ -34,10 +34,18 @@ class LoggerManager private constructor(
         private const val VIDEO_FPS = 15
         private const val VIDEO_BITRATE = 1_200_000
         private const val I_FRAME_INTERVAL = 2
+
+        // ✅ 기존 동기화용 설정 (유지)
         private const val BATCH_SIZE = 15
         private const val BATCH_TIMEOUT_MS = 4000L
-
         private const val MAX_FRAME_BUFFER = 45
+
+        // ✅ 비디오 전용 설정 (새로 추가)
+        private const val MAX_VIDEO_FRAME_BUFFER = 1800  // 15fps * 120초 = 2분분량
+        private const val VIDEO_BATCH_SIZE = 45          // 3초분 배치 처리
+        private const val VIDEO_BATCH_TIMEOUT_MS = 1500L // 1.5초 타임아웃
+        private const val VIDEO_PROCESSING_INTERVAL = 150L // 150ms마다 체크
+
         private const val MAX_GPS_QUEUE = 100
         private const val MAX_IMU_QUEUE = 5000
         private const val MAX_GNSS_QUEUE = 100
@@ -65,7 +73,32 @@ class LoggerManager private constructor(
         }
     }
 
-    // DataSynchronizer 인터페이스 구현체들
+    // ✅ 비디오 프레임 전용 데이터 클래스
+    data class VideoFrameEntry(
+        val bitmap: android.graphics.Bitmap,
+        val frameId: Long,
+        val timestamp: Long,
+        val monoTimestamp: Long,
+        val sequenceNumber: Long,
+        val captureTime: Long = System.currentTimeMillis()
+    )
+
+    // ✅ 비디오 프레임 메타데이터 클래스
+    data class VideoFrameMetadata(
+        val frameId: Long,
+        val sequenceNumber: Long,
+        val timestamp: Long,
+        val monoTimestamp: Long,
+        val captureTime: Long,
+        val encodingTime: Long,
+        val sessionId: String,
+        val width: Int,
+        val height: Int,
+        val bitmapSizeMB: Double,
+        val encodingSuccess: Boolean
+    )
+
+    // DataSynchronizer 인터페이스 구현체들 (기존 유지)
     data class IndependentGpsEntry(
         override val location: Location,
         override val systemTime: Long,
@@ -142,7 +175,7 @@ class LoggerManager private constructor(
         val captureTime: Long = System.currentTimeMillis()
     )
 
-    // CircularQueue 기반 큐들 - 자동 크기 관리
+    // ✅ 기존 CircularQueue들 (동기화용)
     private val independentGpsQueue = CircularQueue<IndependentGpsEntry>(MAX_GPS_QUEUE)
     private val independentImuQueue = CircularQueue<IndependentImuEntry>(MAX_IMU_QUEUE)
     private val independentGnssQueue = CircularQueue<IndependentGnssEntry>(MAX_GNSS_QUEUE)
@@ -156,8 +189,18 @@ class LoggerManager private constructor(
     private val gnssSessionQueue = CircularQueue<IndependentGnssSessionEntry>(MAX_GNSS_SESSION_QUEUE)
     private val frameBuffer = CircularQueue<SensorData>(MAX_FRAME_BUFFER)
 
+    // ✅ 비디오 전용 시스템 (새로 추가)
+    private val videoFrameQueue = CircularQueue<VideoFrameEntry>(MAX_VIDEO_FRAME_BUFFER)
+    private val videoMetadataList = mutableListOf<VideoFrameMetadata>()
+    private val videoProcessingScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val lastVideoProcessTime = AtomicLong(System.currentTimeMillis())
+    private val videoFrameCounter = AtomicLong(0)
+    private val videoSequenceNumber = AtomicLong(0)
+
     private val memoryMonitor = MemoryMonitor()
     private val queueAccessMutex = Mutex()
+    private val videoMetadataMutex = Mutex()
+
     @Volatile
     private var currentGpsStatus = false
 
@@ -188,31 +231,328 @@ class LoggerManager private constructor(
     private var currentSessionTimestamp: String? = null
 
     init {
-        startBatchProcessor()
+        startBatchProcessor()        // 기존 동기화 배치 프로세서
+        startVideoProcessor()        // ✅ 비디오 전용 프로세서
         startQueueMonitoring()
     }
 
+    // ✅ 비디오 전용 프로세서 시작
+    private fun startVideoProcessor() {
+        videoProcessingScope.launch {
+            Log.d(TAG, "🎬 비디오 전용 프로세서 시작 (버퍼: ${MAX_VIDEO_FRAME_BUFFER}프레임)")
+            while (isActive) {
+                try {
+                    val currentTime = System.currentTimeMillis()
+                    val timeSinceLastProcess = currentTime - lastVideoProcessTime.get()
+
+                    if (videoFrameQueue.size() >= VIDEO_BATCH_SIZE ||
+                        (videoFrameQueue.isNotEmpty() && timeSinceLastProcess >= VIDEO_BATCH_TIMEOUT_MS)) {
+                        processVideoFrames("비디오 전용 배치")
+                    }
+                    delay(VIDEO_PROCESSING_INTERVAL)
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ 비디오 프로세서 오류: ${e.message}", e)
+                    delay(1000) // 오류 시 1초 대기
+                }
+            }
+        }
+    }
+
+    // ✅ 기존 pushCamera 메서드 - 형식 완전 유지하면서 비디오 큐에 안전 복사
+    fun pushCamera(data: SensorData) {
+        if (shouldSave()) {
+            // 기존 동기화 처리 (기존 형식 완전 유지)
+            frameBuffer.push(data)
+            val cameraEntry = IndependentCameraEntry(cameraData = data)
+            independentCameraQueue.push(cameraEntry)
+
+            // ✅ 비디오 전용 큐에 안전 복사 추가
+            data.bitmap?.let { originalBitmap ->
+                if (!originalBitmap.isRecycled && originalBitmap.width > 0 && originalBitmap.height > 0) {
+                    try {
+                        // 비디오 전용 복사본 생성
+                        val videoBitmap = originalBitmap.config?.let { originalBitmap.copy(it, false) }
+                        val sequenceNum = videoSequenceNumber.incrementAndGet()
+                        val videoEntry = videoBitmap?.let {
+                            VideoFrameEntry(
+                                bitmap = it,
+                                frameId = data.frameId,
+                                timestamp = data.timestamp,
+                                monoTimestamp = data.monoTimestamp,
+                                sequenceNumber = sequenceNum
+                            )
+                        }
+                        if (videoEntry != null) {
+                            videoFrameQueue.push(videoEntry)
+                        }
+
+                        val frameNum = videoFrameCounter.incrementAndGet()
+                        Log.d(TAG, "🎬 비디오 프레임 추가: #$frameNum, seq=$sequenceNum, frameId=${data.frameId}, 큐=${videoFrameQueue.size()}/${MAX_VIDEO_FRAME_BUFFER}")
+
+                        // 큐 상태 경고
+                        val queuePercent = (videoFrameQueue.size() * 100 / MAX_VIDEO_FRAME_BUFFER)
+                        if (queuePercent > 80) {
+                            Log.w(TAG, "⚠️ 비디오 큐 사용률 높음: ${queuePercent}% (${videoFrameQueue.size()}/${MAX_VIDEO_FRAME_BUFFER})")
+                        }
+
+                    } catch (e: OutOfMemoryError) {
+                        Log.e(TAG, "❌ 비디오 비트맵 복사 OOM: frameId=${data.frameId}", e)
+                        // 응급 처리 - 오래된 프레임들 정리
+                        clearOldVideoFrames(50)
+                        System.gc()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ 비디오 비트맵 복사 실패: frameId=${data.frameId}, ${e.message}", e)
+                    }
+                }
+            }
+        }
+    }
+
+    // ✅ 비디오 전용 프레임 처리
+    private suspend fun processVideoFrames(reason: String) = withContext(Dispatchers.IO) {
+        if (videoFrameQueue.isEmpty()) return@withContext
+
+        videoSessionMutex.withLock {
+            try {
+                val startTime = System.currentTimeMillis()
+                Log.d(TAG, "🎬 비디오 처리 시작: $reason, 큐=${videoFrameQueue.size()}")
+
+                val commonDirectory = getCurrentDataDirectory()
+                val currentMinuteId = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
+
+                // 비디오 인코더 세션 관리
+                if (videoEncoder?.getSessionId() != currentMinuteId) {
+                    if (videoEncoder?.isRecording() == true) {
+                        Log.d(TAG, "🎬 기존 비디오 세션 종료: ${videoEncoder?.getSessionId()}")
+                        videoEncoder?.stopRecording()
+
+                        // ✅ 이전 세션 메타데이터 저장
+                        saveVideoMetadata()
+                    }
+                    videoEncoder = null
+                    System.gc()
+                    delay(100)
+                }
+
+                if (videoEncoder == null) {
+                    videoEncoder = SimpleVideoEncoder(context)
+                    videoEncoder!!.setOutputDirectory(commonDirectory)
+                    val started = videoEncoder!!.startRecording()
+                    if (!started) {
+                        Log.e(TAG, "❌ 비디오 인코더 시작 실패")
+                        return@withLock
+                    }
+                    currentSessionTimestamp = videoEncoder!!.getSessionId()
+                    Log.d(TAG, "🎬 새 비디오 세션 시작: $currentSessionTimestamp")
+                }
+
+                // ✅ 비디오 큐에서 프레임 배치 처리
+                val framesToProcess = mutableListOf<VideoFrameEntry>()
+                var batchSize = VIDEO_BATCH_SIZE
+
+                // 메모리 압박 상태면 배치 크기 줄이기
+                val memoryPressure = memoryMonitor.getMemoryPressure()
+                if (memoryPressure > 0.8f) {
+                    batchSize = (VIDEO_BATCH_SIZE * 0.5).toInt()
+                    Log.w(TAG, "⚠️ 메모리 압박으로 비디오 배치 크기 감소: $batchSize")
+                }
+
+                repeat(batchSize.coerceAtMost(videoFrameQueue.size())) {
+                    videoFrameQueue.poll()?.let { framesToProcess.add(it) }
+                }
+
+                var encodedCount = 0
+                var skippedCount = 0
+
+                for (frameEntry in framesToProcess) {
+                    val encodingStartTime = System.currentTimeMillis()
+                    var encodingSuccess = false
+
+                    try {
+                        if (!frameEntry.bitmap.isRecycled &&
+                            frameEntry.bitmap.width > 0 &&
+                            frameEntry.bitmap.height > 0) {
+
+                            if (videoEncoder?.addFrame(frameEntry.bitmap) == true) {
+                                encodedCount++
+                                encodingSuccess = true
+                                Log.d(TAG, "🎬 프레임 인코딩 성공: seq=${frameEntry.sequenceNumber}, frameId=${frameEntry.frameId}")
+                            } else {
+                                skippedCount++
+                                Log.w(TAG, "⚠️ 프레임 인코딩 실패: seq=${frameEntry.sequenceNumber}, frameId=${frameEntry.frameId}")
+                            }
+                        } else {
+                            skippedCount++
+                            Log.w(TAG, "⚠️ 유효하지 않은 프레임: seq=${frameEntry.sequenceNumber}, frameId=${frameEntry.frameId}")
+                        }
+                    } catch (e: Exception) {
+                        skippedCount++
+                        Log.e(TAG, "❌ 프레임 처리 오류: seq=${frameEntry.sequenceNumber}, frameId=${frameEntry.frameId}, ${e.message}")
+                    }
+
+                    // ✅ 비디오 프레임 메타데이터 기록
+                    val bitmapSizeMB = if (!frameEntry.bitmap.isRecycled) {
+                        resourceMonitor.getBitmapMemoryUsage(frameEntry.bitmap).sizeMB
+                    } else 0.0
+
+                    val metadata = VideoFrameMetadata(
+                        frameId = frameEntry.frameId,
+                        sequenceNumber = frameEntry.sequenceNumber,
+                        timestamp = frameEntry.timestamp,
+                        monoTimestamp = frameEntry.monoTimestamp,
+                        captureTime = frameEntry.captureTime,
+                        encodingTime = encodingStartTime,
+                        sessionId = currentSessionTimestamp ?: "unknown",
+                        width = if (!frameEntry.bitmap.isRecycled) frameEntry.bitmap.width else 0,
+                        height = if (!frameEntry.bitmap.isRecycled) frameEntry.bitmap.height else 0,
+                        bitmapSizeMB = bitmapSizeMB,
+                        encodingSuccess = encodingSuccess
+                    )
+
+                    videoMetadataMutex.withLock {
+                        videoMetadataList.add(metadata)
+                    }
+
+                    // 비트맵 즉시 해제
+                    if (!frameEntry.bitmap.isRecycled) {
+                        try {
+                            frameEntry.bitmap.recycle()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "비트맵 해제 실패: ${e.message}")
+                        }
+                    }
+                }
+
+                framesToProcess.clear()
+                lastVideoProcessTime.set(System.currentTimeMillis())
+
+                val processingTime = System.currentTimeMillis() - startTime
+                Log.d(TAG, "🎬 비디오 배치 완료: 인코딩=$encodedCount, 스킵=$skippedCount, " +
+                        "처리시간=${processingTime}ms, 남은큐=${videoFrameQueue.size()}, 메타데이터=${videoMetadataList.size}")
+
+                // ✅ 메타데이터가 500개 이상 쌓이면 중간 저장
+                if (videoMetadataList.size >= 500) {
+                    saveVideoMetadata()
+                }
+
+            } catch (e: OutOfMemoryError) {
+                Log.e(TAG, "❌ 비디오 처리 OOM", e)
+                // 응급 처리
+                clearOldVideoFrames(100) // 100개 프레임 강제 해제
+                videoEncoder?.stopRecording()
+                videoEncoder = null
+                System.gc()
+                delay(1000)
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ 비디오 처리 예외: ${e.message}", e)
+                System.gc()
+            }
+        }
+    }
+
+    // ✅ 응급 비디오 프레임 정리
+    private fun clearOldVideoFrames(count: Int) {
+        repeat(count.coerceAtMost(videoFrameQueue.size())) {
+            videoFrameQueue.poll()?.let { frameEntry ->
+                if (!frameEntry.bitmap.isRecycled) {
+                    frameEntry.bitmap.recycle()
+                }
+            }
+        }
+        Log.w(TAG, "🗑️ 응급 비디오 프레임 정리: ${count}개, 남은=${videoFrameQueue.size()}")
+    }
+
+    // ✅ 비디오 프레임 메타데이터 저장
+    private suspend fun saveVideoMetadata() = withContext(Dispatchers.IO) {
+        try {
+            val commonDir = getCurrentDataDirectory()
+            val metadataFile = File(commonDir, "video_frame_metadata.txt")
+
+            videoMetadataMutex.withLock {
+                if (videoMetadataList.isNotEmpty()) {
+                    saveToFile(metadataFile, VIDEO_METADATA_HEADER, videoMetadataList.toList(), ::buildVideoMetadataContent)
+                    val savedCount = videoMetadataList.size
+                    videoMetadataList.clear()
+                    Log.d(TAG, "✅ 비디오 메타데이터 저장: ${savedCount}개")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 비디오 메타데이터 저장 실패: ${e.message}", e)
+        }
+    }
+
+    // ✅ 비디오 메타데이터 내용 생성
+    private fun buildVideoMetadataContent(metadataList: List<VideoFrameMetadata>): String {
+        return buildString(metadataList.size * 200) {
+            for (metadata in metadataList) {
+                append("${metadata.frameId}\t")
+                append("${metadata.sequenceNumber}\t")
+                append("${metadata.timestamp}\t")
+                append("${metadata.monoTimestamp}\t")
+                append("${metadata.captureTime}\t")
+                append("${metadata.encodingTime}\t")
+                append("${metadata.sessionId}\t")
+                append("${metadata.width}\t")
+                append("${metadata.height}\t")
+                append("${String.format("%.3f", metadata.bitmapSizeMB)}\t")
+                append("${if (metadata.encodingSuccess) "SUCCESS" else "FAILED"}")
+                append("\n")
+            }
+        }
+    }
+
+    // ✅ 비디오 상태 모니터링
+    fun getVideoStatus(): String {
+        val totalFrames = videoFrameCounter.get()
+        val queueSize = videoFrameQueue.size()
+        val queuePercent = (queueSize * 100 / MAX_VIDEO_FRAME_BUFFER)
+        val lastProcessTime = System.currentTimeMillis() - lastVideoProcessTime.get()
+        val metadataCount = videoMetadataList.size
+
+        return buildString {
+            appendLine("=== 비디오 저장 상태 ===")
+            appendLine("총 처리 프레임: $totalFrames")
+            appendLine("비디오 큐: $queueSize/${MAX_VIDEO_FRAME_BUFFER} (${queuePercent}%)")
+            appendLine("예상 저장 시간: ${queueSize / 15}초분") // 15fps 기준
+            appendLine("마지막 처리: ${lastProcessTime}ms 전")
+            appendLine("메타데이터 대기: ${metadataCount}개")
+            appendLine("인코더 상태: ${getVideoEncoderStatus()}")
+
+            // 경고 표시
+            if (queuePercent > 80) {
+                appendLine("⚠️ 큐 사용률 높음: ${queuePercent}%")
+            }
+            if (lastProcessTime > 5000) {
+                appendLine("⚠️ 처리 지연: ${lastProcessTime}ms")
+            }
+            if (metadataCount > 300) {
+                appendLine("⚠️ 메타데이터 대기 많음: ${metadataCount}개")
+            }
+        }
+    }
+
+    // 나머지 기존 메서드들은 그대로 유지...
     fun pushComprehensiveGnss(comprehensiveData: ComprehensiveGnssData, clockData: GnssClockData?) {
         if (shouldSave()) {
             val comprehensiveEntry = IndependentComprehensiveGnssEntry(
                 comprehensiveData = comprehensiveData,
                 clockData = clockData
             )
-            comprehensiveGnssQueue.push(comprehensiveEntry) // 자동 크기 관리
+            comprehensiveGnssQueue.push(comprehensiveEntry)
         }
     }
 
     fun pushSatelliteStatus(satelliteStatus: GnssSatelliteStatus) {
         if (shouldSave()) {
             val statusEntry = IndependentSatelliteStatusEntry(satelliteStatus = satelliteStatus)
-            satelliteStatusQueue.push(statusEntry) // 자동 크기 관리
+            satelliteStatusQueue.push(statusEntry)
         }
     }
 
     fun pushNavigationMessage(navigationData: GnssNavigationData) {
         if (shouldSave()) {
             val navEntry = IndependentNavigationEntry(navigationData = navigationData)
-            navigationMessageQueue.push(navEntry) // 자동 크기 관리
+            navigationMessageQueue.push(navEntry)
         }
     }
 
@@ -220,14 +560,14 @@ class LoggerManager private constructor(
     fun pushAntennaInfo(antennaData: GnssAntennaData) {
         if (shouldSave()) {
             val antennaEntry = IndependentAntennaEntry(antennaData = antennaData)
-            antennaInfoQueue.push(antennaEntry) // 자동 크기 관리
+            antennaInfoQueue.push(antennaEntry)
         }
     }
 
     fun pushGnssClockData(clockData: GnssClockData) {
         if (shouldSave()) {
             val clockEntry = IndependentGnssClockEntry(clockData = clockData)
-            gnssClockQueue.push(clockEntry) // 자동 크기 관리
+            gnssClockQueue.push(clockEntry)
         }
     }
 
@@ -242,7 +582,7 @@ class LoggerManager private constructor(
             additionalInfo = "FirstFix=${ttffMs}ms"
         )
         val sessionEntry = IndependentGnssSessionEntry(sessionData = sessionSummary)
-        gnssSessionQueue.push(sessionEntry) // 자동 크기 관리
+        gnssSessionQueue.push(sessionEntry)
     }
 
     fun recordSessionEnd(sessionDuration: Long, ttffMs: Long?) {
@@ -256,7 +596,7 @@ class LoggerManager private constructor(
             additionalInfo = "SessionEnd, Duration=${sessionDuration}ms"
         )
         val sessionEntry = IndependentGnssSessionEntry(sessionData = sessionSummary)
-        gnssSessionQueue.push(sessionEntry) // 자동 크기 관리
+        gnssSessionQueue.push(sessionEntry)
     }
 
     fun pushGps(loc: Location, sysTs: Long = System.currentTimeMillis(), monoTs: Long = System.nanoTime()) {
@@ -266,7 +606,7 @@ class LoggerManager private constructor(
                 systemTime = sysTs,
                 monoTime = monoTs
             )
-            independentGpsQueue.push(gpsEntry) // 자동 크기 관리
+            independentGpsQueue.push(gpsEntry)
         }
     }
 
@@ -277,29 +617,21 @@ class LoggerManager private constructor(
                 systemTime = sysTs,
                 monoTime = monoTs
             )
-            independentImuQueue.push(imuEntry) // 자동 크기 관리
+            independentImuQueue.push(imuEntry)
         }
     }
 
     fun pushGnss(g: GnssData) {
         if (shouldSave()) {
             val gnssEntry = IndependentGnssEntry(gnssData = g)
-            independentGnssQueue.push(gnssEntry) // 자동 크기 관리
+            independentGnssQueue.push(gnssEntry)
         }
     }
 
     fun pushBoundingBox(bboxes: List<BoundingBoxLog>) {
         if (shouldSave()) {
             val bboxEntry = IndependentBboxEntry(bboxData = bboxes.toList())
-            independentBboxQueue.push(bboxEntry) // 자동 크기 관리
-        }
-    }
-
-    fun pushCamera(data: SensorData) {
-        if (shouldSave()) {
-            frameBuffer.push(data) // 자동 크기 관리
-            val cameraEntry = IndependentCameraEntry(cameraData = data)
-            independentCameraQueue.push(cameraEntry) // 자동 크기 관리
+            independentBboxQueue.push(bboxEntry)
         }
     }
 
@@ -312,6 +644,7 @@ class LoggerManager private constructor(
                     Log.d(TAG, "큐 상태: GPS=${status.gpsQueueSize}, IMU=${status.imuQueueSize}, " +
                             "GNSS=${status.gnssQueueSize}, CompGNSS=${status.comprehensiveGnssQueueSize}, " +
                             "Sat=${status.satelliteStatusQueueSize}, Nav=${status.navigationQueueSize}, " +
+                            "Video=${videoFrameQueue.size()}/${MAX_VIDEO_FRAME_BUFFER}, " +
                             "Memory=${(memoryPressure * 100).toInt()}%")
                 }
                 currentGpsStatus = dataSynchronizer.getGpsStatus().isGpsAvailable
@@ -342,110 +675,20 @@ class LoggerManager private constructor(
 
         encoderMutex.withLock {
             try {
-                resourceMonitor.logAppResourceStatus(TAG, "배치 처리 시작: $reason")
-
-                val appMemory = resourceMonitor.getAppMemoryInfo()
-                val warnings = resourceMonitor.checkAppMemoryWarnings()
-
-                if (warnings.isNotEmpty()) {
-                    Log.w(TAG, "⚠️ 앱 메모리 경고: ${warnings.joinToString(", ")}")
-                }
-
-                // 앱 힙 메모리가 90% 이상이면 배치 지연
-                if (appMemory.heapUsagePercent > 90.0) {
-                    Log.w(TAG, "🔴 앱 힙 메모리 위험: ${appMemory.heapUsagePercent}%, 배치 처리 지연")
-                    System.gc()
-                    delay(200)
-                    return@withLock
-                }
-
-                // Native 힙 메모리가 200MB 이상이면 비트맵 정리 필요
-                if (appMemory.nativeHeapMB > 200) {
-                    Log.w(TAG, "🔴 Native 메모리 과다: ${appMemory.nativeHeapMB}MB, 비트맵 정리 필요")
-                }
-
-                val commonDirectory = getCurrentDataDirectory()
-                val currentMinuteId = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
-
-                if (videoEncoder != null && videoEncoder!!.getSessionId() != currentMinuteId) {
-                    Log.d(TAG, "🎬 비디오 인코더 세션 변경: ${videoEncoder!!.getSessionId()} -> $currentMinuteId")
-                    videoEncoder?.stopRecording()
-                    videoEncoder = null
-                    System.gc()
-                    delay(50)
-                }
-
-                if (videoEncoder == null || !videoEncoder!!.isRecording()) {
-                    videoEncoder = SimpleVideoEncoder(context)
-                    videoEncoder!!.setOutputDirectory(commonDirectory)
-                    val started = videoEncoder!!.startRecording()
-                    if (!started) {
-                        Log.e(TAG, "비디오 인코더 시작 실패")
-                        resourceMonitor.logAppResourceStatus(TAG, "비디오 인코더 시작 실패")
-                        return@withLock
-                    }
-                    currentSessionTimestamp = videoEncoder!!.getSessionId()
-                }
-
-                val framesToProcess = mutableListOf<SensorData>()
-                while (frameBuffer.isNotEmpty() && framesToProcess.size < BATCH_SIZE) {
-                    frameBuffer.poll()?.let { framesToProcess.add(it) }
-                }
-
-                var encodedFrames = 0
-                for (frame in framesToProcess) {
-                    frame.bitmap?.let { bitmap ->
-                        val bitmapInfo = resourceMonitor.getBitmapMemoryUsage(bitmap)
-                        if (!bitmapInfo.isValid) {
-                            Log.w(TAG, "⚠️ 유효하지 않은 비트맵 감지: ${bitmapInfo.config}")
-                            return@let
-                        }
-                        if (bitmapInfo.sizeMB > 10) {
-                            Log.w(TAG, "⚠️ 큰 비트맵 감지: ${bitmapInfo.sizeMB}MB (${bitmapInfo.width}x${bitmapInfo.height})")
-                        }
-                        if (!bitmap.isRecycled && bitmap.width > 0 && bitmap.height > 0) {
-                            if (videoEncoder?.addFrame(bitmap) == true) {
-                                encodedFrames++
-                            }
-                        }
-                        if (!bitmap.isRecycled) {
-                            try {
-                                bitmap.recycle()
-                            } catch (e: Exception) {
-                                Log.w(TAG, "비트맵 재활용 실패: ${e.message}")
-                            }
-                        }
-                    }
-                }
-
-                framesToProcess.clear()
                 saveCompleteGnssDataOptimized()
-
                 lastBatchTime.set(System.currentTimeMillis())
-                resourceMonitor.logAppResourceStatus(TAG, "배치 처리 완료: ${encodedFrames}프레임")
-                Log.d(TAG, "$reason 완료: ${encodedFrames}프레임, 앱 힙 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
+
+                val queueStatus = getIndependentQueueStatus()
+                Log.d(TAG, "$reason 완료: 동기화 처리 완료")
 
             } catch (e: OutOfMemoryError) {
                 Log.e(TAG, "❌ 메모리 부족으로 배치 처리 실패", e)
-                resourceMonitor.logAppResourceStatus(TAG, "메모리 부족 발생")
-
-                // OOM 발생 시 최소한의 정리
-                try {
                     frameBuffer.clear()
                     independentCameraQueue.clear()
-                    videoEncoder?.stopRecording()
-                    videoEncoder = null
-                    Log.w(TAG, "🚨 OOM 응급 정리 완료")
-                } catch (cleanupError: Exception) {
-                    Log.e(TAG, "응급 정리 중 오류: ${cleanupError.message}")
-                }
-
                 System.gc()
-                delay(500) // OOM 후 충분한 대기
-
+                delay(500)
             } catch (e: Exception) {
                 Log.e(TAG, "배치 처리 실패: ${e.message}", e)
-                resourceMonitor.logAppResourceStatus(TAG, "배치 처리 예외: ${e.message}")
                 System.gc()
             }
         }
@@ -470,15 +713,14 @@ class LoggerManager private constructor(
                 async { saveIndependentGpsData(commonDir) },
                 async { saveIndependentImuData(commonDir) },
                 async { saveIndependentGnssData(commonDir) },
-                async { saveGpsSynchronizedData(commonDir) },     // GPS 동기화 데이터
-                async { saveLocalSynchronizedData(commonDir) }    // Local 동기화 데이터
+                async { saveGpsSynchronizedData(commonDir) },
+                async { saveLocalSynchronizedData(commonDir) }
             )
             jobs.awaitAll()
         } catch (e: Exception) {
             Log.e(TAG, "완전한 GNSS 데이터 저장 실패: ${e.message}", e)
         }
     }
-
     private suspend fun processComprehensiveGnssQueue(dir: File) = withContext(Dispatchers.IO) {
         val file = File(dir, "comprehensive_gnss.txt")
         queueAccessMutex.withLock {
@@ -910,10 +1152,25 @@ class LoggerManager private constructor(
         }
     }
 
+
+    // ✅ 로그 저장 활성화 시 메타데이터 헤더 파일 생성
     fun enableLogSaving() {
         resourceMonitor.logResourceStatus(TAG, "로그 저장 시작")
         isLogSavingEnabled = true
         currentLogDirectory = createLogDirectory()
+
+        // ✅ 비디오 메타데이터 헤더 파일 미리 생성
+        ioScope.launch {
+            try {
+                val metadataFile = File(currentLogDirectory, "video_frame_metadata.txt")
+                if (!metadataFile.exists()) {
+                    metadataFile.writeText(VIDEO_METADATA_HEADER + "\n")
+                    Log.d(TAG, "✅ 비디오 메타데이터 헤더 파일 생성")
+                }
+        } catch (e: Exception) {
+                Log.e(TAG, "❌ 비디오 메타데이터 헤더 생성 실패: ${e.message}", e)
+        }
+    }
 
         if (videoEncoder == null) {
             videoEncoder = SimpleVideoEncoder(context)
@@ -930,11 +1187,18 @@ class LoggerManager private constructor(
         }
     }
 
+    // ✅ 로그 저장 비활성화 시 남은 메타데이터 저장
     fun disableLogSaving() {
         resourceMonitor.logResourceStatus(TAG, "로그 저장 중지 시작")
         isLogSavingEnabled = false
+
+        // ✅ 비디오 인코더 중지 및 남은 메타데이터 저장
+        runBlocking {
         videoEncoder?.stopRecording()
         videoEncoder = null
+            saveVideoMetadata() // 남은 메타데이터 저장
+        }
+
         currentLogDirectory = null
         System.gc()
         runBlocking { delay(100) }
@@ -1005,6 +1269,7 @@ class LoggerManager private constructor(
             Log.e(TAG, "❌ Streaming 비활성화 실패: ${e.message}", e)
         }
     }
+    // ... 나머지 메서드들 (기존과 동일)
 
     data class IndependentQueueStatusInfo(
         val gpsQueueSize: Int,
@@ -1018,6 +1283,8 @@ class LoggerManager private constructor(
         val antennaQueueSize: Int,
         val gnssClockQueueSize: Int,
         val gnssSessionQueueSize: Int,
+        val videoQueueSize: Int,        // ✅ 비디오 큐 상태 추가
+        val videoMetadataCount: Int,    // ✅ 비디오 메타데이터 개수 추가
         val totalDataPoints: Int,
         val gpsStatus: Boolean,
         val memoryPressure: Float
@@ -1036,11 +1303,14 @@ class LoggerManager private constructor(
             antennaQueueSize = antennaInfoQueue.size(),
             gnssClockQueueSize = gnssClockQueue.size(),
             gnssSessionQueueSize = gnssSessionQueue.size(),
+            videoQueueSize = videoFrameQueue.size(),               // ✅ 추가
+            videoMetadataCount = videoMetadataList.size,           // ✅ 추가
             totalDataPoints = independentGpsQueue.size() + independentImuQueue.size() +
                     independentGnssQueue.size() + independentBboxQueue.size() +
                     independentCameraQueue.size() + comprehensiveGnssQueue.size() +
                     satelliteStatusQueue.size() + navigationMessageQueue.size() +
-                    antennaInfoQueue.size() + gnssClockQueue.size() + gnssSessionQueue.size(),
+                    antennaInfoQueue.size() + gnssClockQueue.size() + gnssSessionQueue.size() +
+                    videoFrameQueue.size(),                        // ✅ 비디오 큐 포함
             gpsStatus = currentGpsStatus,
             memoryPressure = memoryMonitor.getMemoryPressure()
         )
@@ -1094,6 +1364,9 @@ class LoggerManager private constructor(
             append("BBOX: ${queueStatus.bboxQueueSize}/${MAX_BBOX_QUEUE}\n")
             append("CAMERA: ${queueStatus.cameraQueueSize}/${MAX_CAMERA_QUEUE}\n")
             append("프레임 버퍼: ${frameBuffer.size()}/${MAX_FRAME_BUFFER}\n")
+            append("=== 비디오 전용 큐 상태 ===\n")                      // ✅ 추가
+            append("비디오 큐: ${queueStatus.videoQueueSize}/${MAX_VIDEO_FRAME_BUFFER}\n")     // ✅ 추가
+            append("비디오 메타데이터: ${queueStatus.videoMetadataCount}개\n")                // ✅ 추가
             append("=== 완전한 GNSS 큐 상태 ===\n")
             append("완전한 GNSS: ${queueStatus.comprehensiveGnssQueueSize}/${MAX_COMPREHENSIVE_GNSS_QUEUE}\n")
             append("위성 상태: ${queueStatus.satelliteStatusQueueSize}/${MAX_SATELLITE_STATUS_QUEUE}\n")
@@ -1119,6 +1392,14 @@ class LoggerManager private constructor(
 
     private inline fun shouldSave() = isLogSavingEnabled
     private inline fun shouldLiveStream() = isLiveStreamingEnabled
+
+    // ✅ 비디오 프레임 메타데이터 헤더
+    private val VIDEO_METADATA_HEADER = """
+# Video Frame Metadata - Complete Frame Processing Information
+# This file contains metadata for each frame saved to the .mp4 video file
+# Use this file to synchronize video frames with other sensor data (GPS, IMU, GNSS, etc.)
+FRAME_ID	SEQUENCE_NUMBER	TIMESTAMP	MONO_TIMESTAMP	CAPTURE_TIME	ENCODING_TIME	SESSION_ID	WIDTH	HEIGHT	BITMAP_SIZE_MB	ENCODING_STATUS
+""".trimIndent()
 
     private val COMPREHENSIVE_GNSS_HEADER = """
 # Comprehensive GNSS Measurements Data - Complete Raw Signal Information

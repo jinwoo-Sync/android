@@ -332,10 +332,11 @@ class SensorCollector(private val context: Context) {
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
                     synchronized(this@SensorCollector) {
                         gpsCallback?.invoke(sensorData)
-                        Log.d(
-                            TAG,
-                            "✅ GPS 콜백 호출: Lat=${location.latitude}, Lon=${location.longitude}"
-                        )
+                        /**
+                         * Log.d(
+                        *    TAG,
+                        *    "✅ GPS 콜백 호출: Lat=${location.latitude}, Lon=${location.longitude}"
+                        ) */
                     }
                 }
 

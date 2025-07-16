@@ -403,7 +403,7 @@ class HomeFragment : Fragment() {
 
         viewModel.gpsData.observe(viewLifecycleOwner) { data ->
             binding.gpsLogText.text = data
-            Log.d("HomeFragment", "📍 GPS 데이터 UI 업데이트: $data")
+            //Log.d("HomeFragment", "📍 GPS 데이터 UI 업데이트: $data")
         }
 
         viewModel.gnssData.observe(viewLifecycleOwner) { data ->

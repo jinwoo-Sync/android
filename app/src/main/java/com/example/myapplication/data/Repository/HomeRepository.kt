@@ -192,6 +192,35 @@ class HomeRepository(
         }
     }
 
+    // ✅ 비디오 상태 모니터링
+    fun getVideoStatus(): String {
+        return try {
+            val loggerManager = LoggerManager.getInstance(context, dataSynchronizer)
+            loggerManager.getVideoStatus()
+        } catch (e: Exception) {
+            Log.e(TAG, "비디오 상태 조회 실패: ${e.message}", e)
+            "비디오 상태 조회 실패: ${e.message}"
+        }
+    }
+
+    // ✅ 완전한 시스템 상태
+    fun getCompleteSystemStatus(): String {
+        return buildString {
+            appendLine("=== 전체 시스템 상태 ===")
+            appendLine(getSyncStatus())
+            appendLine()
+            appendLine(getVideoStatus())
+            appendLine()
+
+            try {
+                val loggerManager = LoggerManager.getInstance(context, dataSynchronizer)
+                appendLine(loggerManager.getSystemStatus())
+            } catch (e: Exception) {
+                appendLine("시스템 상태 조회 실패: ${e.message}")
+            }
+        }
+    }
+
     /**
      * 서버 스트리밍 기능 설정 (WebSocket)
      */
