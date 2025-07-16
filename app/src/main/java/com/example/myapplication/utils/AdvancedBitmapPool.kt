@@ -4,6 +4,7 @@ import android.graphics.*
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -110,12 +111,21 @@ class TrueZeroCopyBitmapPool(
             Log.d(TAG, "📉 Reference decreased: @${bitmap.hashCode().toString(16)} -> $newCount")
 
             if (newCount <= 0) {
-                activeBitmaps.remove(bitmap)
-                returnToPool(bitmap)
-                Log.d(TAG, "🔄 Bitmap returned to pool: available=${availableBitmaps.size}")
+                // 🛡️ 참조 제거 전 UI 안전성 확보
+                synchronized(activeBitmaps) {
+                    activeBitmaps.remove(bitmap)
+                }
+
+                // 🛡️ 비트맵 반환 전 유효성 재확인
+                if (!bitmap.isRecycled && bitmap.width > 0 && bitmap.height > 0) {
+                    returnToPool(bitmap)
+                    Log.d(TAG, "🔄 Bitmap safely returned: available=${availableBitmaps.size}")
+                } else {
+                    Log.w(TAG, "⚠️ 무효한 비트맵 반환 차단: @${bitmap.hashCode().toString(16)}")
+                }
             }
         } else {
-            Log.w(TAG, "⚠️ Attempted to release unknown bitmap: @${bitmap.hashCode().toString(16)}")
+            Log.w(TAG, "⚠️ Unknown bitmap release attempt: @${bitmap.hashCode().toString(16)}")
         }
     }
 
@@ -123,16 +133,18 @@ class TrueZeroCopyBitmapPool(
      * 🎯 비트맵 풀 반환 - 클리어하지 않고 다음 프레임에서 덮어씌우기
      */
     private fun returnToPool(bitmap: Bitmap) {
+        // 🛡️ UI가 접근할 수 있는 최소 시간 확보
         if (!bitmap.isRecycled && availableBitmaps.size < poolSize) {
-            // 🚀 클리어 제거: 다음 프레임에서 새 데이터로 덮어씌우므로 불필요
             availableBitmaps.offer(bitmap)
-            Log.d(TAG, "✅ 비트맵 풀 반환: @${bitmap.hashCode().toString(16)}, available=${availableBitmaps.size}")
+            Log.d(TAG, "✅ Bitmap returned to pool: @${bitmap.hashCode().toString(16)}")
         } else {
-            // 풀이 가득 찼거나 비트맵 손상 시 해제
-            if (!bitmap.isRecycled) {
-                bitmap.recycle()
-                Log.d(TAG, "♻️ 비트맵 해제: @${bitmap.hashCode().toString(16)} (풀 가득참 또는 손상)")
-            }
+            // 🛡️ 지연된 recycle로 UI 크래시 방지
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                if (!bitmap.isRecycled) {
+                    bitmap.recycle()
+                    Log.d(TAG, "♻️ Delayed bitmap recycle: @${bitmap.hashCode().toString(16)}")
+                }
+            }, 100) // 100ms 후 안전한 해제
         }
     }
 
@@ -257,11 +269,18 @@ class SharedBitmap(
 ) {
     private val TAG = "SharedBitmap"
     private val bitmapHash = bitmap.hashCode().toString(16)
+    private val isReleased = AtomicBoolean(false)  // 🎯 추가
 
     /**
-     * 🚀 빠른 참조 추가 (UI/Detection 동시 사용)
+     * 🛡️ 안전한 참조 추가 - Double-Check Locking
      */
     fun addRef(): SharedBitmap? {
+        // 이미 해제된 경우 즉시 실패
+        if (isReleased.get() || bitmap.isRecycled) {
+            Log.w(TAG, "⚠️ 이미 해제된 비트맵 참조 시도: @$bitmapHash")
+            return null
+        }
+
         return if (pool.addReference(bitmap)) {
             Log.d(TAG, "📈 참조 추가 성공: @$bitmapHash")
             SharedBitmap(bitmap, pool)
@@ -272,14 +291,38 @@ class SharedBitmap(
     }
 
     /**
-     * 🎯 참조 해제
+     * 🛡️ 안전한 참조 해제 - 중복 해제 방지
      */
     fun release() {
-        pool.releaseReference(bitmap)
-        Log.d(TAG, "📉 참조 해제: @$bitmapHash")
+        if (isReleased.compareAndSet(false, true)) {
+            pool.releaseReference(bitmap)
+            Log.d(TAG, "📉 참조 해제: @$bitmapHash")
+        } else {
+            Log.w(TAG, "⚠️ 중복 해제 시도 방지: @$bitmapHash")
+        }
     }
 
-    fun isValid(): Boolean = !bitmap.isRecycled
+    /**
+     * 🛡️ 강화된 유효성 검증
+     */
+    fun isValid(): Boolean {
+        return !isReleased.get() &&
+                !bitmap.isRecycled &&
+                bitmap.width > 0 &&
+                bitmap.height > 0
+    }
+
+    /**
+     * 🎯 UI 안전 비트맵 획득 - Canvas 크래시 방지
+     */
+    fun getSafeBitmapForUI(): Bitmap? {
+        return if (isValid()) {
+            bitmap
+        } else {
+            Log.w(TAG, "⚠️ UI 요청된 비트맵이 유효하지 않음: @$bitmapHash")
+            null
+        }
+    }
 }
 
 /**

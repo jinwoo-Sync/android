@@ -211,18 +211,30 @@ class HomeFragment : Fragment() {
         }
 
         try {
-            // 1. UI Pool에서 사용 가능한 비트맵 획득
+            // 🛡️ 1단계: Raw 비트맵 유효성 사전 검증
+            if (!isValidBitmap(rawBitmap)) {
+                Log.w("HomeFragment", "⚠️ Raw 비트맵이 유효하지 않음: frameId=$frameId")
+                return
+            }
+
+            // 2. UI Pool에서 사용 가능한 비트맵 획득
             val uiPoolBitmap = pool.acquireBitmap()
             if (uiPoolBitmap == null) {
                 frameSkipCount++
                 if (frameSkipCount % 10 == 0) {
                     Log.w("HomeFragment", "⚠️ UI Pool 포화 - 프레임 스킵: $frameSkipCount")
-                    Log.w("HomeFragment", pool.getPoolStatus())
                 }
                 return
             }
 
-            // 2. Raw 비트맵을 UI Pool 비트맵에 복사
+            // 🛡️ 3단계: UI Pool 비트맵 유효성 검증
+            if (!isValidBitmap(uiPoolBitmap)) {
+                Log.e("HomeFragment", "❌ UI Pool에서 무효한 비트맵 획득")
+                pool.releaseBitmap(uiPoolBitmap)
+                return
+            }
+
+            // 4. 안전한 Canvas 작업
             val canvas = Canvas(uiPoolBitmap)
             canvas.drawColor(android.graphics.Color.BLACK) // 배경 클리어
 
@@ -233,43 +245,69 @@ class HomeFragment : Fragment() {
                 isFilterBitmap = true
                 isAntiAlias = false
             }
+
+            // 🛡️ 5단계: drawBitmap 전 재검증
+            if (!isValidBitmap(rawBitmap) || !isValidBitmap(uiPoolBitmap)) {
+                Log.e("HomeFragment", "❌ drawBitmap 직전 비트맵 무효화 감지")
+                pool.releaseBitmap(uiPoolBitmap)
+                return
+            }
+
             canvas.drawBitmap(rawBitmap, srcRect, dstRect, paint)
 
-            // 3. UI Pool 비트맵으로 화면 업데이트
+            // 🛡️ 6단계: UI 업데이트 전 최종 검증
+            if (!isValidBitmap(uiPoolBitmap)) {
+                Log.e("HomeFragment", "❌ UI 업데이트 직전 비트맵 무효화 감지")
+                pool.releaseBitmap(uiPoolBitmap)
+                return
+            }
+
+            // 7. 안전한 UI 업데이트
             val previousBitmap = currentDisplayBitmap
             binding.imageView.post {
                 try {
-                    binding.imageView.setImageBitmap(uiPoolBitmap)
-                    currentDisplayBitmap = uiPoolBitmap
+                    // 🛡️ UI 스레드에서 한번 더 검증
+                    if (isValidBitmap(uiPoolBitmap)) {
+                        binding.imageView.setImageBitmap(uiPoolBitmap)
+                        currentDisplayBitmap = uiPoolBitmap
 
-                    // 이전 UI Pool 비트맵 반환
-                    previousBitmap?.let {
-                        pool.releaseBitmap(it)
-                        Log.d("HomeFragment", "🔄 이전 UI Pool 비트맵 반환 완료")
+                        // 이전 UI Pool 비트맵 반환
+                        previousBitmap?.let {
+                            pool.releaseBitmap(it)
+                        }
+
+                        successfulFrameCount++
+                        Log.d("HomeFragment", "✅ 안전한 UI 업데이트 완료: frameId=$frameId")
+                    } else {
+                        Log.e("HomeFragment", "❌ UI 스레드에서 비트맵 무효화 감지")
+                        pool.releaseBitmap(uiPoolBitmap)
+                        binding.imageView.setImageBitmap(null)
                     }
-
-                    successfulFrameCount++
-                    Log.d("HomeFragment", "✅ UI Pool 업데이트 성공: frameId=$frameId (성공: $successfulFrameCount)")
-
-                    // 성능 상태 로그 (100프레임마다)
-                    if (successfulFrameCount % 100 == 0) {
-                        val total = frameSkipCount + successfulFrameCount
-                        val successRate = if (total > 0) (successfulFrameCount.toFloat() / total * 100) else 0f
-                        Log.i("HomeFragment", "📊 프레임 성공률: %.1f%% (성공: %d, 스킵: %d)".format(
-                            successRate, successfulFrameCount, frameSkipCount))
-                        Log.i("HomeFragment", pool.getPoolStatus())
-                    }
-
                 } catch (e: Exception) {
-                    Log.e("HomeFragment", "UI 업데이트 중 오류: ${e.message}", e)
+                    Log.e("HomeFragment", "❌ UI 업데이트 중 예외: ${e.message}", e)
                     pool.releaseBitmap(uiPoolBitmap)
+                    binding.imageView.setImageBitmap(null)
                 }
             }
 
-            Log.d("HomeFragment", "✅ Raw → UI Pool 복사 완료: frameId=$frameId")
-
         } catch (e: Exception) {
-            Log.e("HomeFragment", "Raw → UI Pool 복사 실패: ${e.message}", e)
+            Log.e("HomeFragment", "❌ Raw → UI Pool 복사 실패: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 🛡️ 비트맵 유효성 검증 헬퍼
+     */
+    private fun isValidBitmap(bitmap: Bitmap?): Boolean {
+        return try {
+            bitmap != null &&
+                    !bitmap.isRecycled &&
+                    bitmap.width > 0 &&
+                    bitmap.height > 0 &&
+                    bitmap.config != null
+        } catch (e: Exception) {
+            Log.w("HomeFragment", "⚠️ 비트맵 검증 중 예외: ${e.message}")
+            false
         }
     }
 

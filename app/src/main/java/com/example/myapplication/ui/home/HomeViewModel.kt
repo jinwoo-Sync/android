@@ -89,16 +89,32 @@ class HomeViewModel(
      */
     private fun updateCameraFrame(sensorData: SensorData?) {
         try {
-            if (sensorData?.bitmap != null && !sensorData.bitmap.isRecycled) {
-                _cameraFrame.postValue(sensorData)
-                Log.d(TAG, "✅ UI Frame updated: ${sensorData.bitmap.width}x${sensorData.bitmap.height}")
-                Log.d(TAG, "✅ Camera frame received: frameId=${sensorData.frameId}, bitmap=true")
+            if (sensorData?.bitmap != null &&
+                !sensorData.bitmap.isRecycled &&
+                sensorData.bitmap.width > 0 &&
+                sensorData.bitmap.height > 0) {
+
+                // 🛡️ UI 스레드에서 안전한 비트맵 검증
+                viewModelScope.launch(Dispatchers.Main.immediate) {
+                    try {
+                        if (!sensorData.bitmap.isRecycled) {
+                            _cameraFrame.value = sensorData
+                            Log.d(TAG, "✅ Safe UI frame update: frameId=${sensorData.frameId}")
+                        } else {
+                            Log.w(TAG, "⚠️ Recycled bitmap filtered out: frameId=${sensorData.frameId}")
+                            _cameraFrame.value = null
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ UI frame update error: ${e.message}", e)
+                        _cameraFrame.value = null
+                    }
+                }
             } else {
                 _cameraFrame.postValue(null)
                 Log.d(TAG, "🧹 UI frame cleared")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Camera frame 업데이트 오류: ${e.message}", e)
+            Log.e(TAG, "❌ Camera frame 업데이트 오류: ${e.message}", e)
             _cameraFrame.postValue(null)
         }
     }

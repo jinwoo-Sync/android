@@ -320,37 +320,54 @@ class LoggerManager private constructor(
                 val commonDirectory = getCurrentDataDirectory()
                 val currentMinuteId = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
 
-                // 비디오 인코더 세션 관리
-                if (videoEncoder?.getSessionId() != currentMinuteId) {
-                    if (videoEncoder?.isRecording() == true) {
-                        Log.d(TAG, "🎬 기존 비디오 세션 종료: ${videoEncoder?.getSessionId()}")
-                        videoEncoder?.stopRecording()
+                // ✅ 세션 변경 감지 및 처리 개선
+                val currentEncoderSession = videoEncoder?.getSessionId()
 
-                        // ✅ 이전 세션 메타데이터 저장
-                        saveVideoMetadata()
-                    }
+                if (currentEncoderSession != null && currentEncoderSession != currentMinuteId) {
+                    Log.d(TAG, "🔄 세션 변경 감지: $currentEncoderSession → $currentMinuteId")
+
+                    // ✅ 현재 세션의 메타데이터 즉시 저장
+                    saveVideoMetadata()
+
+                    // ✅ 인코더 재시작
+                    videoEncoder!!.stopRecording()
+                    Log.d(TAG, "🎬 세션 종료: $currentEncoderSession")
+
                     videoEncoder = null
                     System.gc()
                     delay(100)
-                }
 
-                if (videoEncoder == null) {
+                    // ✅ 새 세션 시작
                     videoEncoder = SimpleVideoEncoder(context)
                     videoEncoder!!.setOutputDirectory(commonDirectory)
                     val started = videoEncoder!!.startRecording()
-                    if (!started) {
-                        Log.e(TAG, "❌ 비디오 인코더 시작 실패")
+
+                    if (started) {
+                        currentSessionTimestamp = videoEncoder!!.getSessionId()
+                        Log.d(TAG, "🎬 새 세션 시작: $currentSessionTimestamp")
+                    } else {
+                        Log.e(TAG, "❌ 새 세션 시작 실패")
                         return@withLock
                     }
-                    currentSessionTimestamp = videoEncoder!!.getSessionId()
-                    Log.d(TAG, "🎬 새 비디오 세션 시작: $currentSessionTimestamp")
+                } else if (videoEncoder == null) {
+                    // ✅ 인코더가 없을 때 새로 생성
+                    videoEncoder = SimpleVideoEncoder(context)
+                    videoEncoder!!.setOutputDirectory(commonDirectory)
+                    val started = videoEncoder!!.startRecording()
+
+                    if (started) {
+                        currentSessionTimestamp = videoEncoder!!.getSessionId()
+                        Log.d(TAG, "🎬 비디오 인코더 재생성: $currentSessionTimestamp")
+                    } else {
+                        Log.e(TAG, "❌ 비디오 인코더 생성 실패")
+                        return@withLock
+                    }
                 }
 
-                // ✅ 비디오 큐에서 프레임 배치 처리
+                // ✅ 프레임 처리 (기존 로직 유지)
                 val framesToProcess = mutableListOf<VideoFrameEntry>()
                 var batchSize = VIDEO_BATCH_SIZE
 
-                // 메모리 압박 상태면 배치 크기 줄이기
                 val memoryPressure = memoryMonitor.getMemoryPressure()
                 if (memoryPressure > 0.8f) {
                     batchSize = (VIDEO_BATCH_SIZE * 0.5).toInt()
@@ -376,21 +393,19 @@ class LoggerManager private constructor(
                             if (videoEncoder?.addFrame(frameEntry.bitmap) == true) {
                                 encodedCount++
                                 encodingSuccess = true
-                                Log.d(TAG, "🎬 프레임 인코딩 성공: seq=${frameEntry.sequenceNumber}, frameId=${frameEntry.frameId}")
                             } else {
                                 skippedCount++
-                                Log.w(TAG, "⚠️ 프레임 인코딩 실패: seq=${frameEntry.sequenceNumber}, frameId=${frameEntry.frameId}")
                             }
                         } else {
                             skippedCount++
-                            Log.w(TAG, "⚠️ 유효하지 않은 프레임: seq=${frameEntry.sequenceNumber}, frameId=${frameEntry.frameId}")
                         }
                     } catch (e: Exception) {
                         skippedCount++
-                        Log.e(TAG, "❌ 프레임 처리 오류: seq=${frameEntry.sequenceNumber}, frameId=${frameEntry.frameId}, ${e.message}")
+                        Log.e(TAG, "❌ 프레임 처리 오류: seq=${frameEntry.sequenceNumber}, ${e.message}")
                     }
 
-                    // ✅ 비디오 프레임 메타데이터 기록
+                    // ✅ 현재 세션의 실제 ID로 메타데이터 생성
+                    val actualSessionId = currentSessionTimestamp ?: "unknown"
                     val bitmapSizeMB = if (!frameEntry.bitmap.isRecycled) {
                         resourceMonitor.getBitmapMemoryUsage(frameEntry.bitmap).sizeMB
                     } else 0.0
@@ -402,7 +417,7 @@ class LoggerManager private constructor(
                         monoTimestamp = frameEntry.monoTimestamp,
                         captureTime = frameEntry.captureTime,
                         encodingTime = encodingStartTime,
-                        sessionId = currentSessionTimestamp ?: "unknown",
+                        sessionId = actualSessionId,  // ✅ 실제 세션 ID 사용
                         width = if (!frameEntry.bitmap.isRecycled) frameEntry.bitmap.width else 0,
                         height = if (!frameEntry.bitmap.isRecycled) frameEntry.bitmap.height else 0,
                         bitmapSizeMB = bitmapSizeMB,
@@ -413,7 +428,6 @@ class LoggerManager private constructor(
                         videoMetadataList.add(metadata)
                     }
 
-                    // 비트맵 즉시 해제
                     if (!frameEntry.bitmap.isRecycled) {
                         try {
                             frameEntry.bitmap.recycle()
@@ -427,11 +441,11 @@ class LoggerManager private constructor(
                 lastVideoProcessTime.set(System.currentTimeMillis())
 
                 val processingTime = System.currentTimeMillis() - startTime
-                Log.d(TAG, "🎬 비디오 배치 완료: 인코딩=$encodedCount, 스킵=$skippedCount, " +
+                Log.d(TAG, "🎬 비디오 배치 완료: 세션=$currentSessionTimestamp, 인코딩=$encodedCount, 스킵=$skippedCount, " +
                         "처리시간=${processingTime}ms, 남은큐=${videoFrameQueue.size()}, 메타데이터=${videoMetadataList.size}")
 
-                // ✅ 메타데이터가 500개 이상 쌓이면 중간 저장
-                if (videoMetadataList.size >= 500) {
+                // ✅ 메타데이터 중간 저장 조건 개선 300 이상이면 저장.
+                if (videoMetadataList.size >= 300) {
                     saveVideoMetadata()
                 }
 
@@ -516,6 +530,7 @@ class LoggerManager private constructor(
             appendLine("예상 저장 시간: ${queueSize / 15}초분") // 15fps 기준
             appendLine("마지막 처리: ${lastProcessTime}ms 전")
             appendLine("메타데이터 대기: ${metadataCount}개")
+            appendLine("현재 세션: ${currentSessionTimestamp ?: "없음"}")  // ✅ 추가
             appendLine("인코더 상태: ${getVideoEncoderStatus()}")
 
             // 경고 표시
@@ -1159,7 +1174,9 @@ class LoggerManager private constructor(
         isLogSavingEnabled = true
         currentLogDirectory = createLogDirectory()
 
-        // ✅ 비디오 메타데이터 헤더 파일 미리 생성
+        // ✅ 현재 시간으로 세션 ID 설정
+        val currentMinuteId = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
+
         ioScope.launch {
             try {
                 val metadataFile = File(currentLogDirectory, "video_frame_metadata.txt")
@@ -1167,22 +1184,27 @@ class LoggerManager private constructor(
                     metadataFile.writeText(VIDEO_METADATA_HEADER + "\n")
                     Log.d(TAG, "✅ 비디오 메타데이터 헤더 파일 생성")
                 }
-        } catch (e: Exception) {
-                Log.e(TAG, "❌ 비디오 메타데이터 헤더 생성 실패: ${e.message}", e)
-        }
-    }
 
-        if (videoEncoder == null) {
-            videoEncoder = SimpleVideoEncoder(context)
-            videoEncoder!!.setOutputDirectory(currentLogDirectory!!)
-            val started = videoEncoder!!.startRecording()
-            if (started) {
-                Log.d(TAG, "📁 로그 저장 및 비디오 녹화 활성화: ${currentLogDirectory!!.absolutePath}")
-                resourceMonitor.logResourceStatus(TAG, "로그 저장 활성화 완료")
-            } else {
-                Log.e(TAG, "❌ 비디오 인코더 시작 실패")
-                resourceMonitor.logResourceStatus(TAG, "비디오 인코더 시작 실패")
-                videoEncoder = null
+                // ✅ 비디오 인코더 초기화 및 세션 동기화
+                if (videoEncoder == null) {
+                    videoEncoder = SimpleVideoEncoder(context)
+                    videoEncoder!!.setOutputDirectory(currentLogDirectory!!)
+                    val started = videoEncoder!!.startRecording()
+
+                    if (started) {
+                        // ✅ 실제 비디오 파일의 세션 ID와 동기화
+                        currentSessionTimestamp = videoEncoder!!.getSessionId()
+                        Log.d(TAG, "📁 로그 저장 및 비디오 녹화 활성화: ${currentLogDirectory!!.absolutePath}")
+                        Log.d(TAG, "🎬 초기 비디오 세션: $currentSessionTimestamp")
+                        resourceMonitor.logResourceStatus(TAG, "로그 저장 활성화 완료")
+                    } else {
+                        Log.e(TAG, "❌ 비디오 인코더 시작 실패")
+                        resourceMonitor.logResourceStatus(TAG, "비디오 인코더 시작 실패")
+                        videoEncoder = null
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ 비디오 메타데이터 헤더 생성 실패: ${e.message}", e)
             }
         }
     }
@@ -1194,9 +1216,17 @@ class LoggerManager private constructor(
 
         // ✅ 비디오 인코더 중지 및 남은 메타데이터 저장
         runBlocking {
-        videoEncoder?.stopRecording()
-        videoEncoder = null
-            saveVideoMetadata() // 남은 메타데이터 저장
+            videoSessionMutex.withLock {
+                // ✅ 현재 세션의 메타데이터 강제 저장 - 마지막 메타데이터 확실히 저장
+                saveVideoMetadata()
+
+                // ✅ 비디오 인코더 정리
+                videoEncoder?.stopRecording()
+                val finalSession = videoEncoder?.getSessionId()
+                videoEncoder = null
+
+                Log.d(TAG, "🎬 최종 세션 종료: $finalSession, 저장된 메타데이터: ${videoMetadataList.size}개")
+            }
         }
 
         currentLogDirectory = null
