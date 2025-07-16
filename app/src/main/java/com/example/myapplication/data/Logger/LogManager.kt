@@ -902,21 +902,40 @@ class LoggerManager private constructor(
      */
     private suspend fun saveGpsSynchronizedData(dir: File) = withContext(Dispatchers.IO) {
         val file = File(dir, "gps_sync.txt")
-        val syncData = dataSynchronizer.extractGpsSynchronizedData()
+        val allSyncData = dataSynchronizer.extractGpsSynchronizedData()
 
-        if (syncData.isNotEmpty()) {
+        // 🎯 GPS 데이터가 실제로 있는 경우만 필터링
+        val validGpsSyncData = allSyncData.filter { syncResult ->
+            val gpsEntry = syncResult.gpsEntry
+            val hasValidGps = gpsEntry?.location?.let { location ->
+                location.latitude != 0.0 &&
+                        location.longitude != 0.0 &&
+                        location.hasAccuracy() &&
+                        location.accuracy < 100.0f
+            } ?: false
+
+            if (!hasValidGps) {
+                Log.d(TAG, "🎯 GPS 데이터 없는 동기화 결과 필터링: ${syncResult.hybridTime}")
+            }
+
+            hasValidGps
+        }
+
+        if (validGpsSyncData.isNotEmpty()) {
             // 🎯 GPS 복구 데이터 우선 처리
-            val reprocessedCount = syncData.count { it.gpsEntry == null }
+            val reprocessedCount = validGpsSyncData.count { it.gpsEntry == null }
 
-            saveToFile(file, GPS_SYNC_HEADER, syncData, ::buildGpsSyncContent)
+            saveToFile(file, GPS_SYNC_HEADER, validGpsSyncData, ::buildGpsSyncContent)
 
+            Log.d(TAG, "✅ GPS 동기화 데이터 저장: 총 ${validGpsSyncData.size}개 (전체: ${allSyncData.size}개)")
             if (reprocessedCount > 0) {
-                Log.d(TAG, "✅ GPS 복구 동기화 데이터 저장: 총 ${syncData.size}개 (재처리: ${reprocessedCount}개)")
-            } else {
-                Log.d(TAG, "✅ GPS 동기화 데이터 저장: ${syncData.size}개")
+                Log.d(TAG, "✅ 재처리 데이터: ${reprocessedCount}개")
+            }
+            else{
+                Log.d(TAG, "gps 복구 데이터 예외 처리 ")
             }
         } else {
-            Log.d(TAG, "⚠️ GPS 동기화 데이터 없음 - 저장 스킵")
+            Log.d(TAG, "⚠️ 유효한 GPS 동기화 데이터 없음 - 저장 스킵 (전체: ${allSyncData.size}개)")
         }
     }
 
@@ -945,43 +964,45 @@ class LoggerManager private constructor(
                 val camera = syncResult.cameraEntry?.cameraData
                 val bbox = syncResult.bboxEntry?.bboxData
 
-                append("${syncResult.hybridTime}\t")
-                append("${if (syncResult.gpsAvailable) "AVAILABLE" else "LOST"}\t")
+                // GPS 데이터가 있는 경우에만 저장
+                if (gps != null && gps.latitude != 0.0 && gps.longitude != 0.0) {
+                    append("${syncResult.hybridTime}\t")
+                    append("${if (syncResult.gpsAvailable) "AVAILABLE" else "LOST"}\t")
 
-                // GPS 데이터
-                if (gps != null) {
+                    // GPS 데이터 (반드시 존재)
                     append("${gps.latitude}\t${gps.longitude}\t")
                     append("${if (gps.hasAltitude()) gps.altitude else "NULL"}\t")
+
+                    // IMU 데이터 (9축)
+                    if (imu != null && imu.size >= 9) {
+                        append("${imu[0]}\t${imu[1]}\t${imu[2]}\t")      // 가속도
+                        append("${imu[3]}\t${imu[4]}\t${imu[5]}\t")      // 자이로
+                        append("${imu[6]}\t${imu[7]}\t${imu[8]}\t")      // 자기장
+                    } else {
+                        append("NULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\t")
+                    }
+
+                    // GNSS 데이터
+                    if (gnss != null) {
+                        append("${gnss.gnssType}\t${gnss.satelliteId}\t${gnss.signalStrength}\t")
+                    } else {
+                        append("NULL\tNULL\tNULL\t")
+                    }
+
+                    // Camera 및 BBox 데이터
+                    append("${camera?.frameId ?: "NULL"}\t")
+                    append("${bbox?.size ?: "NULL"}")
+
+                    // 누락된 데이터 타입 표시
+                    if (syncResult.missingDataTypes.isNotEmpty()) {
+                        append("\t# Missing: ${syncResult.missingDataTypes.joinToString(", ")}")
+                    }
+
+                    append("\n")
                 } else {
-                    append("NULL\tNULL\tNULL\t")
+                    // GPS 데이터가 없으면 저장하지 않음
+                    Log.d(TAG, "🎯 GPS 데이터 없는 동기화 결과 스킵: ${syncResult.hybridTime}")
                 }
-
-                // IMU 데이터 (9축)
-                if (imu != null && imu.size >= 9) {
-                    append("${imu[0]}\t${imu[1]}\t${imu[2]}\t")      // 가속도
-                    append("${imu[3]}\t${imu[4]}\t${imu[5]}\t")      // 자이로
-                    append("${imu[6]}\t${imu[7]}\t${imu[8]}\t")      // 자기장
-                } else {
-                    append("NULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\tNULL\t")
-                }
-
-                // GNSS 데이터
-                if (gnss != null) {
-                    append("${gnss.gnssType}\t${gnss.satelliteId}\t${gnss.signalStrength}\t")
-                } else {
-                    append("NULL\tNULL\tNULL\t")
-                }
-
-                // Camera 및 BBox 데이터
-                append("${camera?.frameId ?: "NULL"}\t")
-                append("${bbox?.size ?: "NULL"}")
-
-                // 누락된 데이터 타입 표시
-                if (syncResult.missingDataTypes.isNotEmpty()) {
-                    append("\t# Missing: ${syncResult.missingDataTypes.joinToString(", ")}")
-                }
-
-                append("\n")
             }
         }
     }

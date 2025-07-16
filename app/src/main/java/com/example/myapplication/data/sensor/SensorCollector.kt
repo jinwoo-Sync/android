@@ -323,6 +323,13 @@ class SensorCollector(private val context: Context) {
                 val isGpsTimeValid =
                     gpsTimestamp > 0 && abs(gpsTimestamp - localTimestamp) < 86400000L
 
+
+                //
+                if (::dataSynchronizer.isInitialized && isGpsTimeValid) {
+                    dataSynchronizer.updateTimeSync(gpsTimestamp, localTimestamp)
+                    Log.d(TAG, "🎯 GPS 시간 동기화 업데이트: gpsTime=$gpsTimestamp, localTime=$localTimestamp")
+                }
+
                 val sensorData = SensorData_String(
                     value = "Lat: ${location.latitude}, Lon: ${location.longitude}, Alt: ${if (location.hasAltitude()) location.altitude else "N/A"}, Acc: ${if (location.hasAccuracy()) location.accuracy else "N/A"}m",
                     timestamp = localTimestamp,

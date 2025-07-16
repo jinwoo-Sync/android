@@ -118,9 +118,13 @@ class DataSynchronizer {
      */
     fun updateTimeSync(gpsTimestamp: Long, localTimestamp: Long) {
         val wasGpsAvailable = isGpsAvailable()
+        val oldSyncMode = currentSyncMode
 
         timeSyncOffset = gpsTimestamp - localTimestamp
         lastGpsUpdateTime = localTimestamp
+
+        Log.d(TAG, "🎯 updateTimeSync 호출: gpsTime=$gpsTimestamp, localTime=$localTimestamp, " +
+                "offset=$timeSyncOffset, wasGpsAvailable=$wasGpsAvailable, oldMode=$oldSyncMode")
 
         // 🎯 GPS가 새로 복구된 경우
         if (!wasGpsAvailable && currentSyncMode == TimeSyncMode.LOCAL_BASED) {
@@ -129,15 +133,19 @@ class DataSynchronizer {
             isGpsRecoveryActive.set(true) // 🎯 GPS 복구 활성화
             hasReprocessedData.set(false) // 재처리 플래그 초기화
 
-            Log.d(TAG, "📡 GPS 신호 복구: LOCAL_BASED → GPS_BASED")
+            Log.d(TAG, "📡 GPS 신호 복구 감지!: LOCAL_BASED → GPS_BASED")
             Log.d(TAG, "🔄 GPS 복구 - 시간 오프셋: ${timeSyncOffset}ms")
 
             // 🎯 기존 LOCAL 데이터를 GPS 시간으로 재동기화
             reprocessRecentLocalDataToGps()
         } else if (currentSyncMode == TimeSyncMode.LOCAL_BASED) {
             currentSyncMode = TimeSyncMode.GPS_BASED
-            Log.d(TAG, "📡 GPS 시간 동기화 활성화")
+            Log.d(TAG, "📡 GPS 시간 동기화 활성화 (첫 GPS 신호)")
         }
+
+        Log.d(TAG, "🎯 updateTimeSync 완료: currentMode=$currentSyncMode, " +
+                "recoveryActive=${isGpsRecoveryActive.get()}, " +
+                "hasReprocessed=${hasReprocessedData.get()}")
     }
 
     /**
@@ -314,6 +322,11 @@ class DataSynchronizer {
     ) {
         // GPS 시간을 기준으로 동기화
         for (gpsEntry in gpsQueue) {
+            if (!isValidGpsEntry(gpsEntry)) {
+                Log.d(TAG, "⚠️ 유효하지 않은 GPS 데이터 스킵: ${gpsEntry.location}")
+                continue
+            }
+
             val gpsHybridTime = predictTime(gpsEntry.systemTime)
 
             if (isTimeProcessed(gpsHybridTime)) continue
@@ -332,6 +345,19 @@ class DataSynchronizer {
                 markTimeAsProcessed(gpsHybridTime)
             }
         }
+    }
+
+    /**
+     * 🎯 GPS 데이터 유효성 검증
+     */
+    private fun isValidGpsEntry(gpsEntry: GpsEntry): Boolean {
+        val location = gpsEntry.location
+        return location.latitude != 0.0 &&
+                location.longitude != 0.0 &&
+                location.hasAccuracy() &&
+                location.accuracy < 100.0f && // 100m 이내 정확도
+                abs(location.latitude) <= 90.0 &&
+                abs(location.longitude) <= 180.0
     }
 
     /**
