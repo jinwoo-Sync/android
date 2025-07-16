@@ -232,8 +232,9 @@ class LoggerManager private constructor(
 
     init {
         startBatchProcessor()        // 기존 동기화 배치 프로세서
-        startVideoProcessor()        // ✅ 비디오 전용 프로세서
+        startVideoProcessor()        // 비디오 전용 프로세서
         startQueueMonitoring()
+        startGpsRecoveryMonitoring() // GPS 복구 전용 모니터링 추가
     }
 
     // ✅ 비디오 전용 프로세서 시작
@@ -674,6 +675,13 @@ class LoggerManager private constructor(
                 try {
                     val currentTime = System.currentTimeMillis()
                     val timeSinceLastBatch = currentTime - lastBatchTime.get()
+
+                    // 🎯 GPS 복구 감지 시 즉시 처리
+                    if (dataSynchronizer.hasGpsRecoveryData()) {
+                        Log.d(TAG, "🎯 GPS 복구 감지 - 즉시 처리 시작")
+                        processGpsRecovery()
+                    }
+
                     if (frameBuffer.size() >= BATCH_SIZE || (frameBuffer.isNotEmpty() && timeSinceLastBatch >= BATCH_TIMEOUT_MS)) {
                         processBatch("자동 배치")
                     }
@@ -690,6 +698,13 @@ class LoggerManager private constructor(
 
         encoderMutex.withLock {
             try {
+                // 🎯 GPS 복구 감지 시 즉시 gps_sync.txt 저장
+                if (dataSynchronizer.hasGpsRecoveryData()) {
+                    Log.d(TAG, "🎯 GPS 복구 데이터 감지 - 즉시 gps_sync.txt 저장 수행")
+                    val commonDir = getCurrentDataDirectory()
+                    saveGpsSynchronizedData(commonDir) // 즉시 저장
+                }
+
                 saveCompleteGnssDataOptimized()
                 lastBatchTime.set(System.currentTimeMillis())
 
@@ -698,13 +713,63 @@ class LoggerManager private constructor(
 
             } catch (e: OutOfMemoryError) {
                 Log.e(TAG, "❌ 메모리 부족으로 배치 처리 실패", e)
-                    frameBuffer.clear()
-                    independentCameraQueue.clear()
+                frameBuffer.clear()
+                independentCameraQueue.clear()
                 System.gc()
                 delay(500)
             } catch (e: Exception) {
                 Log.e(TAG, "배치 처리 실패: ${e.message}", e)
                 System.gc()
+            }
+        }
+    }
+
+    /**
+     * GPS 복구 시 즉시 GPS 동기화 데이터 저장
+     */
+    private suspend fun processGpsRecovery() = withContext(Dispatchers.IO) {
+        try {
+            if (dataSynchronizer.hasGpsRecoveryData()) {
+                val commonDir = getCurrentDataDirectory()
+
+                // 🎯 GPS 복구 데이터 즉시 저장
+                saveGpsSynchronizedData(commonDir)
+
+                Log.d(TAG, "🎯 GPS 복구 - gps_sync.txt 즉시 저장 완료")
+            }
+            else{
+
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ GPS 복구 처리 실패: ${e.message}", e)
+        }
+    }
+
+    /**
+     * GPS 복구 전용 모니터링 - 더 빠른 반응
+     */
+    private fun startGpsRecoveryMonitoring() {
+        ioScope.launch {
+            Log.d(TAG, "🎯 GPS 복구 모니터링 시작")
+            while (isActive) {
+                try {
+                    if (dataSynchronizer.isGpsRecoveryInProgress()) {
+                        Log.d(TAG, "🎯 GPS 복구 진행 중 - 즉시 저장 확인")
+
+                        val commonDir = getCurrentDataDirectory()
+                        val syncData = dataSynchronizer.extractGpsSynchronizedData()
+
+                        if (syncData.isNotEmpty()) {
+                            saveGpsSynchronizedData(commonDir)
+                            Log.d(TAG, "🎯 GPS 복구 - gps_sync.txt 즉시 저장: ${syncData.size}개")
+                        }
+                    }
+
+                    delay(1000) // 1초마다 GPS 복구 상태 확인
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ GPS 복구 모니터링 오류: ${e.message}", e)
+                    delay(2000) // 오류 시 2초 대기
+                }
             }
         }
     }
@@ -840,8 +905,18 @@ class LoggerManager private constructor(
         val syncData = dataSynchronizer.extractGpsSynchronizedData()
 
         if (syncData.isNotEmpty()) {
+            // 🎯 GPS 복구 데이터 우선 처리
+            val reprocessedCount = syncData.count { it.gpsEntry == null }
+
             saveToFile(file, GPS_SYNC_HEADER, syncData, ::buildGpsSyncContent)
-            Log.d(TAG, "✅ GPS 동기화 데이터 저장: ${syncData.size}개")
+
+            if (reprocessedCount > 0) {
+                Log.d(TAG, "✅ GPS 복구 동기화 데이터 저장: 총 ${syncData.size}개 (재처리: ${reprocessedCount}개)")
+            } else {
+                Log.d(TAG, "✅ GPS 동기화 데이터 저장: ${syncData.size}개")
+            }
+        } else {
+            Log.d(TAG, "⚠️ GPS 동기화 데이터 없음 - 저장 스킵")
         }
     }
 

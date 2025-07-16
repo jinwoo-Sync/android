@@ -4,6 +4,7 @@ import android.util.Log
 import com.example.myapplication.model.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import com.example.myapplication.DataStructure.CircularQueue
 
@@ -92,13 +93,18 @@ class DataSynchronizer {
         private const val SYNC_WINDOW_MS = 50L // ±50ms 동기화 윈도우
         private const val MAX_SYNC_RESULTS = 100
         private const val GPS_RECOVERY_REPROCESS_WINDOW_MS = 10000L // 10초 이내 데이터 재처리
+        private const val FORCE_GPS_SYNC_INTERVAL_MS = 2000L // 🎯 GPS 복구 후 강제 동기화 간격
+        private const val GPS_RECOVERY_MONITORING_DURATION_MS = 5000L // 🎯 GPS 복구 후 5초간 모니터링
     }
 
     private val processedTimeStamps = ConcurrentHashMap.newKeySet<Long>()
     private var timeSyncOffset: Long = 0L
     private var lastGpsUpdateTime: Long = 0L
     private var currentSyncMode: TimeSyncMode = TimeSyncMode.LOCAL_BASED
-    private var lastGpsRecoveryTime: Long = 0L // 🎯 GPS 복구 시점 추가
+    private var lastGpsRecoveryTime: Long = 0L
+    private var lastForcedGpsSyncTime: Long = 0L // 🎯 강제 GPS 동기화 시간 추적
+    private val hasReprocessedData = AtomicBoolean(false) // 🎯 재처리 데이터 존재 여부
+    private val isGpsRecoveryActive = AtomicBoolean(false) // 🎯 GPS 복구 활성 상태
 
     // 동기화 결과 캐시 - CircularQueue 사용
     private val syncResultCache = CircularQueue<SyncMatchResult>(MAX_SYNC_RESULTS)
@@ -120,6 +126,8 @@ class DataSynchronizer {
         if (!wasGpsAvailable && currentSyncMode == TimeSyncMode.LOCAL_BASED) {
             lastGpsRecoveryTime = localTimestamp
             currentSyncMode = TimeSyncMode.GPS_BASED
+            isGpsRecoveryActive.set(true) // 🎯 GPS 복구 활성화
+            hasReprocessedData.set(false) // 재처리 플래그 초기화
 
             Log.d(TAG, "📡 GPS 신호 복구: LOCAL_BASED → GPS_BASED")
             Log.d(TAG, "🔄 GPS 복구 - 시간 오프셋: ${timeSyncOffset}ms")
@@ -163,7 +171,11 @@ class DataSynchronizer {
         val converted = reprocessedCount.get()
         Log.d(TAG, "🔄 GPS 복구 재처리 완료: ${converted}개 LOCAL → GPS 변환")
 
-        // 재처리 완료 후 LOCAL 캐시는 유지 (기록 목적)
+        // 🎯 재처리 데이터가 있으면 강제 저장 플래그 설정
+        if (converted > 0) {
+            hasReprocessedData.set(true)
+            Log.d(TAG, "🎯 재처리 데이터 존재 - 강제 저장 플래그 설정")
+        }
     }
 
     /**
@@ -227,6 +239,7 @@ class DataSynchronizer {
         when {
             wasGpsBased && !isGpsNowAvailable -> {
                 currentSyncMode = TimeSyncMode.LOCAL_BASED
+                isGpsRecoveryActive.set(false) // 🎯 GPS 복구 비활성화
                 Log.w(TAG, "🔴 GPS 신호 손실: GPS_BASED → LOCAL_BASED")
             }
             !wasGpsBased && isGpsNowAvailable -> {
@@ -234,10 +247,17 @@ class DataSynchronizer {
                 Log.d(TAG, "📡 GPS 신호 복구 감지 (updateTimeSync에서 처리됨)")
             }
         }
+
+        // 🎯 GPS 복구 모니터링 시간 종료 체크
+        if (isGpsRecoveryActive.get() &&
+            (System.currentTimeMillis() - lastGpsRecoveryTime) > GPS_RECOVERY_MONITORING_DURATION_MS) {
+            isGpsRecoveryActive.set(false)
+            Log.d(TAG, "🎯 GPS 복구 모니터링 종료")
+        }
     }
 
     /**
-     * 🎯 개선된 동기화 수행 - GPS 복구 시 자동 재처리
+     * 🎯 개선된 동기화 수행 - GPS 복구 후 강제 저장 지원
      */
     fun performSynchronization(
         gpsQueue: CircularQueue<GpsEntry>,
@@ -251,10 +271,34 @@ class DataSynchronizer {
         when (currentSyncMode) {
             TimeSyncMode.GPS_BASED -> {
                 performGpsSynchronization(gpsQueue, imuQueue, gnssQueue, cameraQueue, bboxQueue)
+
+                // 🎯 GPS 복구 후 재처리 데이터 강제 저장 로직
+                checkAndForceGpsSyncSave()
             }
             TimeSyncMode.LOCAL_BASED -> {
                 performLocalSynchronization(imuQueue, cameraQueue, bboxQueue)
             }
+        }
+    }
+
+    /**
+     * 🎯 GPS 복구 후 재처리 데이터 강제 저장 확인
+     */
+    private fun checkAndForceGpsSyncSave() {
+        if (!isGpsRecoveryActive.get()) return
+
+        val currentTime = System.currentTimeMillis()
+
+        // GPS 복구 직후이고 재처리 데이터가 있으면 강제 저장 신호 보내기
+        if (hasReprocessedData.get() &&
+            (currentTime - lastGpsRecoveryTime) < GPS_RECOVERY_MONITORING_DURATION_MS &&
+            (currentTime - lastForcedGpsSyncTime) > FORCE_GPS_SYNC_INTERVAL_MS) {
+
+            lastForcedGpsSyncTime = currentTime
+            Log.d(TAG, "🎯 GPS 복구 후 재처리 데이터 강제 저장 신호 - 재처리 데이터: ${syncResultCache.size()}개")
+
+            // 플래그 해제하여 반복 방지
+            hasReprocessedData.set(false)
         }
     }
 
@@ -284,7 +328,7 @@ class DataSynchronizer {
             )
 
             if (syncResult != null) {
-                syncResultCache.push(syncResult) // CircularQueue 자동 크기 관리
+                syncResultCache.push(syncResult)
                 markTimeAsProcessed(gpsHybridTime)
             }
         }
@@ -413,17 +457,41 @@ class DataSynchronizer {
     }
 
     /**
-     * GPS 동기화된 데이터 추출 (gps_sync.txt용)
+     * 🎯 GPS 동기화된 데이터 추출 - 강제 저장 지원
      */
     fun extractGpsSynchronizedData(): List<SyncMatchResult> {
-        return syncResultCache.snapshot() // 전체 스냅샷 반환
+        val results = syncResultCache.snapshot()
+
+        // 🎯 재처리 데이터가 있었다면 로그로 확인
+        if (results.isNotEmpty()) {
+            val reprocessedCount = results.count { it.gpsEntry == null }
+            if (reprocessedCount > 0) {
+                Log.d(TAG, "📊 GPS 동기화 데이터 추출: 총 ${results.size}개 (재처리: ${reprocessedCount}개)")
+            }
+        }
+
+        return results
     }
 
     /**
      * Local 동기화된 데이터 추출 (local_sync.txt용)
      */
     fun extractLocalSynchronizedData(): List<LocalSyncResult> {
-        return localSyncCache.snapshot() // 전체 스냅샷 반환
+        return localSyncCache.snapshot()
+    }
+
+    /**
+     * 🎯 GPS 복구 상태 확인 (LoggerManager용)
+     */
+    fun hasGpsRecoveryData(): Boolean {
+        return hasReprocessedData.get() || isGpsRecoveryActive.get()
+    }
+
+    /**
+     * 🎯 GPS 복구 진행 상태 확인
+     */
+    fun isGpsRecoveryInProgress(): Boolean {
+        return isGpsRecoveryActive.get()
     }
 
     /**
@@ -473,8 +541,13 @@ class DataSynchronizer {
             appendLine("GPS 동기화 결과: ${syncResultCache.size()}개")
             appendLine("LOCAL 동기화 결과: ${localSyncCache.size()}개")
             appendLine("최근 LOCAL 데이터: ${recentLocalData.size()}개")
+            appendLine("재처리 데이터 존재: ${hasReprocessedData.get()}")
+            appendLine("GPS 복구 진행 중: ${isGpsRecoveryActive.get()}")
             if (lastGpsRecoveryTime > 0) {
                 appendLine("마지막 GPS 복구: ${System.currentTimeMillis() - lastGpsRecoveryTime}ms 전")
+            }
+            if (lastForcedGpsSyncTime > 0) {
+                appendLine("마지막 강제 저장: ${System.currentTimeMillis() - lastForcedGpsSyncTime}ms 전")
             }
         }
     }
