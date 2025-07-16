@@ -44,35 +44,32 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import com.example.myapplication.utils.TrueZeroCopyBitmapPool
 import com.example.myapplication.utils.HighSpeedZeroCopyProcessor
 import com.example.myapplication.utils.SharedBitmap
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * 🎯 메모리 압박 모니터
- */
 class DeepLearningAdaptiveManager {
     private val TAG = "DeepLearningAdaptiveManager"
 
     enum class InferenceComplexity { LOW, MEDIUM, HIGH, CRITICAL }
 
     data class DetectionStrategy(
-        val skipInterval: Int,        // 프레임 스킵 간격 (이전 추론시간 기반)
-        val enableDetection: Boolean, // 딥러닝 활성화 여부
-        val qualityReduction: Float,  // 이미지 품질 (필요시)
-        val concurrentLimit: Int,     // 동시 추론 제한
+        val skipInterval: Int,
+        val enableDetection: Boolean,
+        val qualityReduction: Float,
+        val concurrentLimit: Int,
         val complexity: InferenceComplexity
     )
 
     private val inferenceThresholds = mapOf(
-        InferenceComplexity.LOW to 60L,      // 60ms 미만
-        InferenceComplexity.MEDIUM to 80L,   // 60-80ms
-        InferenceComplexity.HIGH to 100L,    // 80-100ms
-        InferenceComplexity.CRITICAL to 120L // 100ms 이상
+        InferenceComplexity.LOW to 60L,
+        InferenceComplexity.MEDIUM to 80L,
+        InferenceComplexity.HIGH to 100L,
+        InferenceComplexity.CRITICAL to 120L
     )
 
     fun getCurrentInferenceComplexity(lastInferenceMs: Long): InferenceComplexity {
@@ -87,31 +84,28 @@ class DeepLearningAdaptiveManager {
     fun getCurrentDetectionStrategy(lastInferenceMs: Long): DetectionStrategy {
         return when (getCurrentInferenceComplexity(lastInferenceMs)) {
             InferenceComplexity.CRITICAL -> DetectionStrategy(
-                skipInterval = 8,      // 8프레임 스킵 (약 2fps)
+                skipInterval = 8,
                 enableDetection = true,
                 qualityReduction = 0.7f,
                 concurrentLimit = 1,
                 complexity = InferenceComplexity.CRITICAL
             )
-
             InferenceComplexity.HIGH -> DetectionStrategy(
-                skipInterval = 6,      // 6프레임 스킵 (약 2.5fps)
+                skipInterval = 6,
                 enableDetection = true,
                 qualityReduction = 0.8f,
                 concurrentLimit = 1,
                 complexity = InferenceComplexity.HIGH
             )
-
             InferenceComplexity.MEDIUM -> DetectionStrategy(
-                skipInterval = 5,      // 5프레임 스킵 (3fps)
+                skipInterval = 5,
                 enableDetection = true,
                 qualityReduction = 0.9f,
                 concurrentLimit = 1,
                 complexity = InferenceComplexity.MEDIUM
             )
-
             InferenceComplexity.LOW -> DetectionStrategy(
-                skipInterval = 3,      // 3프레임 스킵 (5fps)
+                skipInterval = 3,
                 enableDetection = true,
                 qualityReduction = 1.0f,
                 concurrentLimit = 1,
@@ -171,29 +165,24 @@ class SensorCollector(private val context: Context) {
     private val cameraOpenCloseLock = Semaphore(1)
     private val isStreaming = AtomicBoolean(false)
 
-    // 🎯 고급 메모리 관리 시스템
     private val isSessionActive = AtomicBoolean(false)
     private val frameProcessingLock = Object()
 
-    // 🎯 True Zero-Copy 시스템
     private lateinit var zeroCopyPool: TrueZeroCopyBitmapPool
     private lateinit var highSpeedProcessor: HighSpeedZeroCopyProcessor
 
-
-    // 성능 모니터링
     private val frameProcessingStats = AtomicInteger(0)
 
     private val deepLearningAdaptiveManager = DeepLearningAdaptiveManager()
     private var currentDetectionStrategy =
         deepLearningAdaptiveManager.getCurrentDetectionStrategy(60L)
 
-    // 딥러닝 전용 추론 관리
-    private var lastInferenceTimeMs = 60L  // 초기값
+    private var lastInferenceTimeMs = 60L
     private var inferenceFrameSkipCount = 0
     private val lastStrategyUpdate = AtomicLong(0)
 
     private val TAG = "SensorCollector"
-    private var frameSkipInterval = 10
+    private var frameSkipInterval = 2 // UI에서 설정한 기본값 반영
     private var frameCount = 0
     private var detectorInitialized = false
     private var latestImuData: FloatArray? = null
@@ -279,12 +268,8 @@ class SensorCollector(private val context: Context) {
         Log.d(TAG, "🎯 True Zero-Copy 시스템 초기화 완료")
     }
 
-    /**
-     * 🎯 최적화된 메모리 시스템 초기화
-     */
     private fun initializeOptimizedMemorySystem(): Boolean {
         return try {
-            // 이미 초기화되어 있으므로 true 반환
             Log.d(TAG, "🎯 최적화된 메모리 시스템 초기화 완료")
             true
         } catch (e: Exception) {
@@ -329,7 +314,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    // GPS, IMU, GNSS 콜백들 - 기존 코드 유지
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(locationResult: LocationResult) {
             locationResult.lastLocation?.let { location ->
@@ -383,7 +367,7 @@ class SensorCollector(private val context: Context) {
                 biasNanos = if (clock.hasBiasNanos()) clock.biasNanos else null,
                 biasUncertaintyNanos = if (clock.hasBiasUncertaintyNanos()) clock.biasUncertaintyNanos else null,
                 driftNanosPerSecond = if (clock.hasDriftNanosPerSecond()) clock.driftNanosPerSecond else null,
-                driftUncertaintyNanosPerSecond = if (clock.hasDriftUncertaintyNanosPerSecond()) clock.driftUncertaintyNanosPerSecond else null,
+                driftUncertaintyNanosPerSecond = if (clock.hasDriftNanosPerSecond()) clock.driftUncertaintyNanosPerSecond else null,
                 hardwareClockDiscontinuityCount = clock.hardwareClockDiscontinuityCount,
                 fullBiasNanos = if (clock.hasFullBiasNanos()) clock.fullBiasNanos else null,
                 additionalInfo = "TimeNanos=${clock.timeNanos}"
@@ -741,9 +725,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * 🚀 고속 카메라 스트리밍 - Zero-Copy 최적화 적용
-     */
     fun startCameraStreaming(
         callback: (SensorData?) -> Unit,
         detectionCallback: (List<BoundingBox>, Long, Long) -> Unit
@@ -763,7 +744,6 @@ class SensorCollector(private val context: Context) {
                 return
             }
 
-            // 기존 리소스 정리
             cleanupCameraResources()
 
             val cameraId = selectCameraId(cameraManager) ?: run {
@@ -778,7 +758,7 @@ class SensorCollector(private val context: Context) {
                 validatedSize.width,
                 validatedSize.height,
                 cameraConfig.imageFormat,
-                4 // 버퍼 크기 최적화
+                4
             ).apply {
                 setOnImageAvailableListener(createOptimizedImageListener(cameraId, callback), null)
             }
@@ -804,7 +784,6 @@ class SensorCollector(private val context: Context) {
                                 override fun onConfigured(session: CameraCaptureSession) {
                                     captureSession = session
 
-                                    // 🎯 시스템 초기화 및 스트리밍 시작
                                     if (initializeOptimizedMemorySystem()) {
                                         session.setRepeatingRequest(
                                             builder.build(),
@@ -852,12 +831,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * 🚀 최적화된 이미지 리스너 - 30Hz 고속 처리
-     */
-    /**
-     * 🚀 최적화된 이미지 리스너 - Zero-Copy 구조 유지 + 딥러닝 선별 처리
-     */
     private fun createOptimizedImageListener(
         cameraId: String,
         callback: (SensorData?) -> Unit
@@ -868,9 +841,9 @@ class SensorCollector(private val context: Context) {
                 return@OnImageAvailableListener
             }
 
-            // 🎯 딥러닝 적응적 전략 업데이트 (1초마다)
+            // 전략 업데이트 주기를 200ms로 단축
             val now = System.currentTimeMillis()
-            if (now - lastStrategyUpdate.get() > 1000) {
+            if (now - lastStrategyUpdate.get() > 200) {
                 updateDetectionProcessingStrategy()
                 lastStrategyUpdate.set(now)
             }
@@ -880,18 +853,15 @@ class SensorCollector(private val context: Context) {
             val image = reader.acquireLatestImage()
             if (image != null) {
                 try {
-                    // 🎯 Image 생존 중 바이트 추출
                     val imageBytes = extractImageBytes(image)
                     val rotationDegrees = getRotationDegrees(cameraId)
 
                     if (imageBytes != null) {
-                        // 🚀 Zero-Copy 처리 (모든 프레임 처리 - 15fps 보장)
                         val sharedBitmap = highSpeedProcessor.processZeroCopy(
                             imageBytes, rotationDegrees
                         )
 
                         if (sharedBitmap != null) {
-                            // ✅ 모든 프레임을 Zero-Copy로 처리
                             handleZeroCopyFrame(sharedBitmap, callback)
                         } else {
                             coroutineScope.launch(Dispatchers.Main) { callback(null) }
@@ -907,9 +877,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * 🎯 딥러닝 전용 처리 전략 업데이트
-     */
     private fun updateDetectionProcessingStrategy() {
         val newStrategy =
             deepLearningAdaptiveManager.getCurrentDetectionStrategy(lastInferenceTimeMs)
@@ -919,12 +886,14 @@ class SensorCollector(private val context: Context) {
                 TAG,
                 "🔄 딥러닝 처리 전략 업데이트: 추론시간=${lastInferenceTimeMs}ms → 스킵간격=${newStrategy.skipInterval}, 복잡도=${newStrategy.complexity}"
             )
+        } else {
+            Log.d(
+                TAG,
+                "🔄 딥러닝 처리 전략 유지: 추론시간=${lastInferenceTimeMs}ms, 스킵간격=${currentDetectionStrategy.skipInterval}"
+            )
         }
     }
 
-    /**
-     * 🎯 이미지 바이트 추출
-     */
     private fun extractImageBytes(image: Image): ByteArray? {
         return try {
             when (image.format) {
@@ -936,7 +905,6 @@ class SensorCollector(private val context: Context) {
                 }
 
                 ImageFormat.YUV_420_888 -> {
-                    // YUV를 즉시 JPEG로 변환
                     convertYuvToJpegBytes(image)
                 }
 
@@ -948,9 +916,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * 🎯 YUV를 JPEG 바이트로 변환
-     */
     private fun convertYuvToJpegBytes(image: Image): ByteArray {
         val yBuffer = image.planes[0].buffer
         val uBuffer = image.planes[1].buffer
@@ -976,9 +941,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * 🎯 Zero-Copy 프레임 처리
-     */
     private fun handleZeroCopyFrame(
         sharedBitmap: SharedBitmap,
         callback: (SensorData?) -> Unit
@@ -988,7 +950,6 @@ class SensorCollector(private val context: Context) {
 
         frameProcessingStats.incrementAndGet()
 
-        // ✅ 모든 프레임을 LoggerManager에 푸시 (.mp4 + .txt 저장용)
         if (::dataSynchronizer.isInitialized) {
             val sensorData = SensorData(
                 value = "AllFrame: $frameId",
@@ -1000,7 +961,6 @@ class SensorCollector(private val context: Context) {
             LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
         }
 
-        // ✅ 모든 프레임을 UI 업데이트 (즉시 참조 추가)
         val uiRef = sharedBitmap.addRef()
         if (uiRef != null) {
             coroutineScope.launch(Dispatchers.Main) {
@@ -1021,13 +981,10 @@ class SensorCollector(private val context: Context) {
             }
         }
 
-        // 🎯 딥러닝만 선별적 처리 (이전 추론시간 기반)
         handleSelectiveDetection(sharedBitmap, frameId)
 
-        // 🎯 원본 해제
         sharedBitmap.release()
 
-        // 주기적 상태 출력
         if (frameCount % 90 == 0) {
             Log.i(TAG, "📊 ${zeroCopyPool.getStatus()}")
             Log.i(TAG, "📊 ${highSpeedProcessor.getStatus()}")
@@ -1035,31 +992,28 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * 🎯 딥러닝 선별적 처리 - 이전 추론시간 기반 스킵
-     */
     private fun handleSelectiveDetection(sharedBitmap: SharedBitmap, frameId: Long) {
         inferenceFrameSkipCount++
+        Log.d(TAG, "🎯 프레임 스킵 카운트: $inferenceFrameSkipCount / ${currentDetectionStrategy.skipInterval}")
 
-        // 현재 전략에 따른 스킵 여부 결정
         if (inferenceFrameSkipCount >= currentDetectionStrategy.skipInterval) {
             inferenceFrameSkipCount = 0
+            Log.d(TAG, "🎯 딥러닝 처리 시작: frameId=$frameId")
 
-            if (currentDetectionStrategy.enableDetection && frameProcessingStats.get() % 2 == 0) {
+            if (currentDetectionStrategy.enableDetection) {
                 val detectionRef = sharedBitmap.addRef()
                 if (detectionRef != null) {
                     ensureDetectorExecutor()
                     if (detectorInitialized && !isDetecting) {
                         isDetecting = true
+                        Log.d(TAG, "🎯 딥러닝 추론 시작: frameId=$frameId")
 
-                        // 추론 시작 시간 기록
                         val inferenceStartTime = System.currentTimeMillis()
 
                         detectorExecutor.submit {
                             try {
                                 detector?.detect(detectionRef.bitmap, frameId)
 
-                                // 추론 완료 시간 기록 및 전략 업데이트
                                 val inferenceEndTime = System.currentTimeMillis()
                                 val actualInferenceTime = inferenceEndTime - inferenceStartTime
                                 updateLastInferenceTime(actualInferenceTime)
@@ -1073,14 +1027,15 @@ class SensorCollector(private val context: Context) {
                             } finally {
                                 detectionRef.release()
                                 isDetecting = false
+                                Log.d(TAG, "🎯 딥러닝 추론 종료: frameId=$frameId, isDetecting=$isDetecting")
                             }
                         }
                     } else {
+                        Log.w(TAG, "⚠️ 딥러닝 추론 스킵: initialized=$detectorInitialized, detecting=$isDetecting")
                         detectionRef.release()
                     }
                 }
             }
-
         }
     }
 
@@ -1089,9 +1044,6 @@ class SensorCollector(private val context: Context) {
         Log.d(TAG, "🎯 추론시간 업데이트: ${inferenceTimeMs}ms → 다음 전략에 반영")
     }
 
-    /**
-     * 🎯 카메라 리소스만 정리 (풀 유지)
-     */
     private fun cleanupCameraResources() {
         try {
             isSessionActive.set(false)
@@ -1107,9 +1059,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * 🎯 카메라 스트리밍 중지 - 리소스 정리 최적화
-     */
     fun stopCameraStreaming() {
         if (!isStreaming.get()) return
 
@@ -1124,7 +1073,6 @@ class SensorCollector(private val context: Context) {
             detector?.close()
             detectorExecutor.shutdownNow()
 
-            // 🎯 프로세서와 풀 정리
             highSpeedProcessor.cleanup()
             zeroCopyPool.cleanup()
 
@@ -1142,7 +1090,6 @@ class SensorCollector(private val context: Context) {
             cleanupCameraResources()
             isStreaming.set(false)
 
-            // 🎯 완전 종료 시에만 풀 정리
             if (::zeroCopyPool.isInitialized) {
                 zeroCopyPool.cleanup()
             }
@@ -1288,7 +1235,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    // 유틸리티 함수들
     private fun validateImageSize(cameraId: String, size: Size, format: Int): Size {
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         try {
@@ -1529,9 +1475,6 @@ class SensorCollector(private val context: Context) {
         return availableMemory > requiredMemory * 2
     }
 
-    /**
-     * 🎯 UI에서 요청하는 풀 정리 (Repository를 통해 호출됨)
-     */
     fun requestPoolCleanup() {
         try {
             if (::zeroCopyPool.isInitialized) {
@@ -1546,9 +1489,6 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    /**
-     * 🎯 UI에서 요청하는 풀 상세 상태 조회 (Repository를 통해 호출됨)
-     */
     fun getPoolDetailedStatus(): String {
         return try {
             if (::zeroCopyPool.isInitialized) {
@@ -1566,7 +1506,8 @@ class SensorCollector(private val context: Context) {
     }
 
     fun setFrameSkipInterval(interval: Int) {
-        frameSkipInterval = if (interval > 0) interval else 10
-        Log.d(TAG, "Frame skip interval set to $frameSkipInterval")
+        frameSkipInterval = if (interval > 0) interval else 2
+        currentDetectionStrategy = currentDetectionStrategy.copy(skipInterval = frameSkipInterval)
+        Log.d(TAG, "프레임 스킵 간격 설정: $frameSkipInterval")
     }
 }
