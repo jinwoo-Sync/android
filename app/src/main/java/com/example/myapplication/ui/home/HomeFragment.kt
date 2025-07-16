@@ -32,7 +32,7 @@ import kotlinx.coroutines.launch
  * 개선된 순환 비트맵 풀 - 실시간 카메라 스트리밍 최적화
  */
 class CircularBitmapPool(
-    private val poolSize: Int = 3,
+    private val poolSize: Int = 8, // 8개로 추가 후 확인 필요
     private val width: Int = 840,
     private val height: Int = 840,
     private val config: Bitmap.Config = Bitmap.Config.ARGB_8888
