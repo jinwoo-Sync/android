@@ -266,7 +266,7 @@ class SimpleVideoEncoder(private val context: Context) {
         var yIndex = 0
         var uvIndex = ySize
 
-        Log.d(TAG, "🎨 컬러 YUV 변환 시작: ${width}x${height}, Y_size=$ySize, UV_size=$uvSize")
+        //Log.d(TAG, "🎨 컬러 YUV 변환 시작: ${width}x${height}, Y_size=$ySize, UV_size=$uvSize")
 
         for (j in 0 until height) {
             for (i in 0 until width) {
@@ -295,7 +295,7 @@ class SimpleVideoEncoder(private val context: Context) {
             }
         }
 
-        Log.d(TAG, "✅ 컬러 YUV 변환 완료: Y 평면=${ySize}bytes, UV 평면=${uvSize}bytes")
+        //Log.d(TAG, "✅ 컬러 YUV 변환 완료: Y 평면=${ySize}bytes, UV 평면=${uvSize}bytes")
         return yuv
     }
 

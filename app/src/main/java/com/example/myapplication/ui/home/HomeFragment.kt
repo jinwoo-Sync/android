@@ -223,6 +223,7 @@ class HomeFragment : Fragment() {
                 frameSkipCount++
                 if (frameSkipCount % 10 == 0) {
                     Log.w("HomeFragment", "⚠️ UI Pool 포화 - 프레임 스킵: $frameSkipCount")
+                    performUIPoolEmergencyRecovery()
                 }
                 return
             }
@@ -293,6 +294,30 @@ class HomeFragment : Fragment() {
         } catch (e: Exception) {
             Log.e("HomeFragment", "❌ Raw → UI Pool 복사 실패: ${e.message}", e)
         }
+    }
+
+    // ✅ UI Pool 응급 복구
+    private fun performUIPoolEmergencyRecovery() {
+        Log.w("HomeFragment", "🚨 UI Pool 응급 복구 시작")
+
+        // 현재 표시 중인 비트맵을 즉시 반환
+        currentDisplayBitmap?.let { bitmap ->
+            bitmapPool?.releaseBitmap(bitmap)
+            Log.d("HomeFragment", "🔄 현재 표시 비트맵 강제 반환")
+        }
+        currentDisplayBitmap = null
+
+        // UI 클리어
+        binding.imageView.setImageBitmap(null)
+
+        // Pool 상태 로깅
+        val poolStatus = bitmapPool?.getPoolStatus() ?: "Pool not available"
+        Log.w("HomeFragment", "📊 복구 후 풀 상태: $poolStatus")
+
+        // 카운터 리셋
+        frameSkipCount = 0
+
+        Log.w("HomeFragment", "✅ UI Pool 응급 복구 완료")
     }
 
     /**

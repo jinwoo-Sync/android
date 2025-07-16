@@ -111,21 +111,23 @@ class TrueZeroCopyBitmapPool(
             Log.d(TAG, "📉 Reference decreased: @${bitmap.hashCode().toString(16)} -> $newCount")
 
             if (newCount <= 0) {
-                // 🛡️ 참조 제거 전 UI 안전성 확보
+                // ✅ 안전한 제거
                 synchronized(activeBitmaps) {
                     activeBitmaps.remove(bitmap)
                 }
-
-                // 🛡️ 비트맵 반환 전 유효성 재확인
-                if (!bitmap.isRecycled && bitmap.width > 0 && bitmap.height > 0) {
-                    returnToPool(bitmap)
-                    Log.d(TAG, "🔄 Bitmap safely returned: available=${availableBitmaps.size}")
-                } else {
-                    Log.w(TAG, "⚠️ 무효한 비트맵 반환 차단: @${bitmap.hashCode().toString(16)}")
-                }
+                // ✅ 무조건 반환 시도 (조건 실패 시에도 안전 처리)
+                returnToPool(bitmap)
             }
         } else {
             Log.w(TAG, "⚠️ Unknown bitmap release attempt: @${bitmap.hashCode().toString(16)}")
+            // ✅ 알 수 없는 비트맵도 안전하게 처리
+            if (!bitmap.isRecycled) {
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    if (!bitmap.isRecycled) {
+                        bitmap.recycle()
+                    }
+                }, 100)
+            }
         }
     }
 
@@ -133,18 +135,51 @@ class TrueZeroCopyBitmapPool(
      * 🎯 비트맵 풀 반환 - 클리어하지 않고 다음 프레임에서 덮어씌우기
      */
     private fun returnToPool(bitmap: Bitmap) {
-        // 🛡️ UI가 접근할 수 있는 최소 시간 확보
-        if (!bitmap.isRecycled && availableBitmaps.size < poolSize) {
+        try {
+            // ✅ 1차 검증: 기본적인 비트맵 상태
+            if (bitmap.isRecycled) {
+                Log.w(TAG, "⚠️ 이미 재활용된 비트맵 반환 시도")
+                return
+            }
+
+            // ✅ 2차 검증: 크기 및 설정
+            if (bitmap.width <= 0 || bitmap.height <= 0 || bitmap.config == null) {
+                Log.w(TAG, "⚠️ 무효한 비트맵 감지 - 안전하게 재활용: ${bitmap.width}x${bitmap.height}")
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    if (!bitmap.isRecycled) {
+                        bitmap.recycle()
+                    }
+                }, 50)
+                return
+            }
+
+            // ✅ 3차 검증: 풀 용량 및 상태
+            if (availableBitmaps.size >= poolSize) {
+                Log.d(TAG, "📦 풀이 가득참 - 비트맵 재활용: ${availableBitmaps.size}/${poolSize}")
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    if (!bitmap.isRecycled) {
+                        bitmap.recycle()
+                    }
+                }, 100)
+                return
+            }
+
+            // ✅ 안전한 풀 반환
             availableBitmaps.offer(bitmap)
-            Log.d(TAG, "✅ Bitmap returned to pool: @${bitmap.hashCode().toString(16)}")
-        } else {
-            // 🛡️ 지연된 recycle로 UI 크래시 방지
+            Log.d(TAG, "✅ 비트맵 풀 반환 성공: available=${availableBitmaps.size}/${poolSize}")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 비트맵 반환 중 예외: ${e.message}", e)
+            // 예외 발생 시에도 안전하게 재활용
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                if (!bitmap.isRecycled) {
-                    bitmap.recycle()
-                    Log.d(TAG, "♻️ Delayed bitmap recycle: @${bitmap.hashCode().toString(16)}")
+                try {
+                    if (!bitmap.isRecycled) {
+                        bitmap.recycle()
+                    }
+                } catch (recycleException: Exception) {
+                    Log.e(TAG, "❌ 비트맵 재활용 실패: ${recycleException.message}")
                 }
-            }, 100) // 100ms 후 안전한 해제
+            }, 200)
         }
     }
 

@@ -246,14 +246,21 @@ class LoggerManager private constructor(
                     val currentTime = System.currentTimeMillis()
                     val timeSinceLastProcess = currentTime - lastVideoProcessTime.get()
 
+                    // ✅ 로깅 상태와 관계없이 큐 상태 확인
                     if (videoFrameQueue.size() >= VIDEO_BATCH_SIZE ||
                         (videoFrameQueue.isNotEmpty() && timeSinceLastProcess >= VIDEO_BATCH_TIMEOUT_MS)) {
-                        processVideoFrames("비디오 전용 배치")
+
+                        if (isLogSavingEnabled) {
+                            processVideoFrames("비디오 전용 배치")
+                        } else {
+                            // ✅ 로깅 비활성화 시에는 큐만 정리
+                            processVideoFrames("비디오 큐 정리")
+                        }
                     }
                     delay(VIDEO_PROCESSING_INTERVAL)
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ 비디오 프로세서 오류: ${e.message}", e)
-                    delay(1000) // 오류 시 1초 대기
+                    delay(1000)
                 }
             }
         }
@@ -311,7 +318,31 @@ class LoggerManager private constructor(
 
     // ✅ 비디오 전용 프레임 처리
     private suspend fun processVideoFrames(reason: String) = withContext(Dispatchers.IO) {
-        if (videoFrameQueue.isEmpty()) return@withContext
+    // ✅ 로깅이 비활성화되어 있으면 비디오 큐만 정리하고 종료
+    if (!isLogSavingEnabled) {
+        Log.w(TAG, "⚠️ 로깅 비활성화 상태 - 비디오 큐 정리만 수행: ${videoFrameQueue.size()}개")
+        
+        // 비디오 큐의 비트맵들 안전하게 해제
+        var clearedCount = 0
+        while (videoFrameQueue.isNotEmpty() && clearedCount < 50) {
+            videoFrameQueue.poll()?.let { frameEntry ->
+                if (!frameEntry.bitmap.isRecycled) {
+                    try {
+                        frameEntry.bitmap.recycle()
+                        clearedCount++
+                    } catch (e: Exception) {
+                        Log.w(TAG, "⚠️ 비트맵 해제 실패: ${e.message}")
+                    }
+                }
+            }
+        }
+        
+        Log.w(TAG, "✅ 로깅 비활성화 상태 - 비디오 큐 정리 완료: ${clearedCount}개")
+        return@withContext
+    }
+
+    // ✅ 기존 비디오 처리 로직 (로깅 활성화 시에만 실행)
+    if (videoFrameQueue.isEmpty()) return@withContext
 
         videoSessionMutex.withLock {
             try {
@@ -698,14 +729,26 @@ class LoggerManager private constructor(
 
         encoderMutex.withLock {
             try {
-                // 🎯 GPS 복구 감지 시 즉시 gps_sync.txt 저장
+                // ✅ GPS 복구는 로깅 상태와 관계없이 처리
                 if (dataSynchronizer.hasGpsRecoveryData()) {
-                    Log.d(TAG, "🎯 GPS 복구 데이터 감지 - 즉시 gps_sync.txt 저장 수행")
-                    val commonDir = getCurrentDataDirectory()
-                    saveGpsSynchronizedData(commonDir) // 즉시 저장
+                    Log.d(TAG, "🎯 GPS 복구 데이터 감지 - 처리 시작")
+
+                    if (isLogSavingEnabled) {
+                        val commonDir = getCurrentDataDirectory()
+                        saveGpsSynchronizedData(commonDir)
+                        Log.d(TAG, "🎯 GPS 복구 - gps_sync.txt 저장 완료")
+                    } else {
+                        Log.w(TAG, "⚠️ GPS 복구 감지되었으나 로깅 비활성화로 저장 스킵")
+                    }
                 }
 
-                saveCompleteGnssDataOptimized()
+                // ✅ 로깅이 활성화된 경우에만 파일 저장 수행
+                if (isLogSavingEnabled) {
+                    saveCompleteGnssDataOptimized()
+                } else {
+                    Log.w(TAG, "⚠️ 로깅 비활성화 - 데이터 저장 스킵")
+                }
+
                 lastBatchTime.set(System.currentTimeMillis())
 
                 val queueStatus = getIndependentQueueStatus()
@@ -729,16 +772,22 @@ class LoggerManager private constructor(
      */
     private suspend fun processGpsRecovery() = withContext(Dispatchers.IO) {
         try {
+            // ✅ 로깅이 비활성화되어 있으면 GPS 복구만 수행하고 저장은 스킵
+            if (!isLogSavingEnabled) {
+                Log.w(TAG, "⚠️ 로깅 비활성화 상태 - GPS 복구 데이터 저장 스킵")
+            
+                // GPS 복구는 수행하되 파일 저장은 하지 않음
+                if (dataSynchronizer.hasGpsRecoveryData()) {
+                    Log.d(TAG, "🎯 GPS 복구 감지 (저장 스킵)")
+                }
+                return@withContext
+            }
+
+            // ✅ 로깅 활성화 시에만 파일 저장 수행
             if (dataSynchronizer.hasGpsRecoveryData()) {
                 val commonDir = getCurrentDataDirectory()
-
-                // 🎯 GPS 복구 데이터 즉시 저장
                 saveGpsSynchronizedData(commonDir)
-
                 Log.d(TAG, "🎯 GPS 복구 - gps_sync.txt 즉시 저장 완료")
-            }
-            else{
-
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ GPS 복구 처리 실패: ${e.message}", e)
@@ -754,21 +803,25 @@ class LoggerManager private constructor(
             while (isActive) {
                 try {
                     if (dataSynchronizer.isGpsRecoveryInProgress()) {
-                        Log.d(TAG, "🎯 GPS 복구 진행 중 - 즉시 저장 확인")
+                        Log.d(TAG, "🎯 GPS 복구 진행 중 - 상태 확인")
 
-                        val commonDir = getCurrentDataDirectory()
                         val syncData = dataSynchronizer.extractGpsSynchronizedData()
 
-                        if (syncData.isNotEmpty()) {
+                        if (syncData.isNotEmpty() && isLogSavingEnabled) {
+                            // ✅ 로깅이 활성화된 경우에만 저장
+                            val commonDir = getCurrentDataDirectory()
                             saveGpsSynchronizedData(commonDir)
                             Log.d(TAG, "🎯 GPS 복구 - gps_sync.txt 즉시 저장: ${syncData.size}개")
+                        } else if (syncData.isNotEmpty()) {
+                            // ✅ 로깅 비활성화 시에는 데이터만 확인
+                            Log.w(TAG, "⚠️ GPS 복구 데이터 ${syncData.size}개 감지되었으나 로깅 비활성화로 저장 스킵")
                         }
                     }
 
-                    delay(1000) // 1초마다 GPS 복구 상태 확인
+                    delay(1000)
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ GPS 복구 모니터링 오류: ${e.message}", e)
-                    delay(2000) // 오류 시 2초 대기
+                    delay(2000)
                 }
             }
         }
@@ -915,7 +968,7 @@ class LoggerManager private constructor(
             } ?: false
 
             if (!hasValidGps) {
-                Log.d(TAG, "🎯 GPS 데이터 없는 동기화 결과 필터링: ${syncResult.hybridTime}")
+                //Log.d(TAG, "🎯 GPS 데이터 없는 동기화 결과 필터링: ${syncResult.hybridTime}")
             }
 
             hasValidGps

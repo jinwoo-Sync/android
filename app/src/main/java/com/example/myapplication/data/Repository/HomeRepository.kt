@@ -58,6 +58,9 @@ class HomeRepository(
      */
     fun requestPoolCleanup() {
         try {
+            // 1. Detection 상태 복구 -> 5분 내에 쓰레드 풀이 차는거랑 관련 없을 것으로 파악되서 우선 주석처리
+            //sensorCollector.forceResetDetectionState()
+
             sensorCollector.requestPoolCleanup()
             Log.d(TAG, "🧹 Repository: 비트맵 풀 정리 요청 완료")
         } catch (e: Exception) {

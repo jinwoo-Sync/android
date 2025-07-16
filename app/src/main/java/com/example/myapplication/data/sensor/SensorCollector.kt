@@ -207,8 +207,7 @@ class SensorCollector(private val context: Context) {
 
     private lateinit var dataSynchronizer: DataSynchronizer
 
-    @Volatile
-    private var isDetecting = false
+    private val isDetecting = AtomicBoolean(false)
 
     var cameraConfig = CameraConfig(
         imageSize = Size(840, 840),
@@ -1141,30 +1140,37 @@ class SensorCollector(private val context: Context) {
                 val detectionRef = sharedBitmap.addRef()
                 if (detectionRef != null) {
                     ensureDetectorExecutor()
-                    if (detectorInitialized && !isDetecting) {
-                        isDetecting = true
+                    if (detectorInitialized && isDetecting.compareAndSet(false, true)) {
                         Log.d(TAG, "🎯 딥러닝 추론 시작: frameId=$frameId")
 
                         val inferenceStartTime = System.currentTimeMillis()
 
                         detectorExecutor.submit {
+                            var inferenceSuccess = false
                             try {
                                 detector?.detect(detectionRef.bitmap, frameId)
+                                inferenceSuccess = true
 
                                 val inferenceEndTime = System.currentTimeMillis()
                                 val actualInferenceTime = inferenceEndTime - inferenceStartTime
                                 updateLastInferenceTime(actualInferenceTime)
 
-                                Log.d(
-                                    TAG,
-                                    "🔍 Zero-Copy Detection 완료: frameId=$frameId, 추론시간=${actualInferenceTime}ms"
-                                )
+                                Log.d(TAG, "🔍 Detection 완료: frameId=$frameId, 추론시간=${actualInferenceTime}ms")
+
                             } catch (e: Exception) {
-                                Log.e(TAG, "Detection 오류: ${e.message}", e)
+                                Log.e(TAG, "❌ Detection 오류: ${e.message}", e)
                             } finally {
-                                detectionRef.release()
-                                isDetecting = false
-                                Log.d(TAG, "🎯 딥러닝 추론 종료: frameId=$frameId, isDetecting=$isDetecting")
+                                // ✅ 강화: 무조건 정리 및 플래그 해제
+                                try {
+                                    detectionRef.release()
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "❌ Detection ref 해제 실패: ${e.message}", e)
+                                }
+
+                                // ✅ AtomicBoolean 사용으로 안전한 플래그 해제
+                                isDetecting.set(false)
+
+                                Log.d(TAG, "🎯 딥러닝 추론 종료: frameId=$frameId, success=$inferenceSuccess")
                             }
                         }
                     } else {
@@ -1173,6 +1179,29 @@ class SensorCollector(private val context: Context) {
                     }
                 }
             }
+        }
+    }
+
+    fun forceResetDetectionState() {
+        try {
+            Log.w(TAG, "🔧 Detection 상태 강제 복구 시작")
+
+            // 1. Detection 플래그 강제 해제
+            isDetecting.set(false)
+
+            // 2. Detector executor 재시작
+            if (detectorExecutor.isShutdown || detectorExecutor.isTerminated) {
+                detectorExecutor = Executors.newSingleThreadExecutor()
+                initializeDetector()
+            }
+
+            // 3. 카운터 리셋
+            inferenceFrameSkipCount = 0
+
+            Log.w(TAG, "✅ Detection 상태 강제 복구 완료")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Detection 상태 복구 실패: ${e.message}", e)
         }
     }
 

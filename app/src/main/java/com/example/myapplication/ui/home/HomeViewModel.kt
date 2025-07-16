@@ -124,11 +124,17 @@ class HomeViewModel(
      */
     fun forceCleanupBitmapPool() {
         try {
-            // HomeRepository를 통해 풀 정리 요청
+            Log.d(TAG, "🧹 전체 비트맵 풀 강제 정리 시작")
+
+            // 1. HomeRepository를 통한 SensorCollector 풀 정리
             homeRepository.requestPoolCleanup()
-            _text.postValue("비트맵 풀 정리 완료")
+
+            // 3. 풀 상태 업데이트
             updatePoolStatus()
-            Log.d(TAG, "🧹 사용자 요청 비트맵 풀 정리 완료")
+
+            _text.postValue("전체 비트맵 풀 강제 정리 완료")
+            Log.d(TAG, "✅ 전체 비트맵 풀 강제 정리 완료")
+
         } catch (e: Exception) {
             _text.postValue("풀 정리 실패: ${e.message}")
             Log.e(TAG, "❌ 풀 정리 실패: ${e.message}", e)
