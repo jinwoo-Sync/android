@@ -32,8 +32,8 @@ class LoggerManager private constructor(
         private const val VIDEO_WIDTH = 840
         private const val VIDEO_HEIGHT = 840
         private const val VIDEO_FPS = 15
-        private const val VIDEO_BITRATE = 1_200_000
-        private const val I_FRAME_INTERVAL = 2
+        private const val VIDEO_BITRATE = 2_000_000 // 1.2M → 2M으로 증가
+        private const val I_FRAME_INTERVAL = 2   // 2 → 1로 더 자주 I-프레임 <- 이건 추후 비교
 
         // ✅ 기존 동기화용 설정 (유지)
         private const val BATCH_SIZE = 15

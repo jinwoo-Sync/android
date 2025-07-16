@@ -854,11 +854,12 @@ class SensorCollector(private val context: Context) {
             val image = reader.acquireLatestImage()
             if (image != null) {
                 try {
-                    val imageBytes = extractImageBytes(image)
+                    //val imageBytes = extractImageBytes(image)
+                    val imageBytes = extractHighQualityImageBytes(image)
                     val rotationDegrees = getRotationDegrees(cameraId)
 
                     if (imageBytes != null) {
-                        val sharedBitmap = highSpeedProcessor.processZeroCopy(
+                        val sharedBitmap = highSpeedProcessor.processHighQualityZeroCopy(
                             imageBytes, rotationDegrees
                         )
 
@@ -895,7 +896,7 @@ class SensorCollector(private val context: Context) {
         }
     }
 
-    private fun extractImageBytes(image: Image): ByteArray? {
+    /*private fun extractImageBytes(image: Image): ByteArray? {
         return try {
             when (image.format) {
                 ImageFormat.JPEG -> {
@@ -915,8 +916,136 @@ class SensorCollector(private val context: Context) {
             Log.e(TAG, "이미지 바이트 추출 실패: ${e.message}")
             null
         }
+    }*/
+    /**
+     * 🎯 고품질 YUV → RGB 직접 변환 (JPEG 압축 단계 제거)
+     */
+    private fun convertYuvToRgbBitmap(image: Image): Bitmap? {
+        if (image.format != ImageFormat.YUV_420_888) {
+            Log.e(TAG, "지원하지 않는 이미지 형식: ${image.format}")
+            return null
+        }
+
+        try {
+            val planes = image.planes
+            val yPlane = planes[0]
+            val uPlane = planes[1]
+            val vPlane = planes[2]
+
+            val yBuffer = yPlane.buffer
+            val uBuffer = uPlane.buffer
+            val vBuffer = vPlane.buffer
+
+            val ySize = yBuffer.remaining()
+            val uSize = uBuffer.remaining()
+            val vSize = vBuffer.remaining()
+
+            // YUV 데이터 추출
+            val yBytes = ByteArray(ySize)
+            val uBytes = ByteArray(uSize)
+            val vBytes = ByteArray(vSize)
+
+            yBuffer.get(yBytes)
+            uBuffer.get(uBytes)
+            vBuffer.get(vBytes)
+
+            return convertYuvToRgbHighQuality(
+                yBytes, uBytes, vBytes,
+                image.width, image.height,
+                yPlane.pixelStride, yPlane.rowStride,
+                uPlane.pixelStride, uPlane.rowStride
+            )
+
+        } catch (e: Exception) {
+            Log.e(TAG, "YUV → RGB 변환 실패: ${e.message}", e)
+            return null
+        }
     }
 
+    /**
+     * 🎯 고품질 YUV420 → RGB 변환 구현
+     */
+    private fun convertYuvToRgbHighQuality(
+        yBytes: ByteArray, uBytes: ByteArray, vBytes: ByteArray,
+        width: Int, height: Int,
+        yPixelStride: Int, yRowStride: Int,
+        uvPixelStride: Int, uvRowStride: Int
+    ): Bitmap? {
+        try {
+            val argbBytes = IntArray(width * height)
+
+            // YUV → RGB 변환 (ITU-R BT.601 표준 사용)
+            for (y in 0 until height) {
+                for (x in 0 until width) {
+                    val yIndex = y * yRowStride + x * yPixelStride
+                    val uvIndex = (y / 2) * uvRowStride + (x / 2) * uvPixelStride
+
+                    if (yIndex >= yBytes.size || uvIndex >= uBytes.size || uvIndex >= vBytes.size) {
+                        continue
+                    }
+
+                    val yValue = yBytes[yIndex].toInt() and 0xFF
+                    val uValue = uBytes[uvIndex].toInt() and 0xFF
+                    val vValue = vBytes[uvIndex].toInt() and 0xFF
+
+                    // ITU-R BT.601 변환 공식 (고품질)
+                    val c = yValue - 16
+                    val d = uValue - 128
+                    val e = vValue - 128
+
+                    val r = (298 * c + 409 * e + 128) shr 8
+                    val g = (298 * c - 100 * d - 208 * e + 128) shr 8
+                    val b = (298 * c + 516 * d + 128) shr 8
+
+                    // 색상 범위 클램핑
+                    val red = r.coerceIn(0, 255)
+                    val green = g.coerceIn(0, 255)
+                    val blue = b.coerceIn(0, 255)
+
+                    argbBytes[y * width + x] = (0xFF shl 24) or (red shl 16) or (green shl 8) or blue
+                }
+            }
+
+            return Bitmap.createBitmap(argbBytes, width, height, Bitmap.Config.ARGB_8888)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "RGB 변환 계산 실패: ${e.message}", e)
+            return null
+        }
+    }
+
+    /**
+     * 🎯 고품질 이미지 바이트 추출 (JPEG 압축 제거)
+     */
+    private fun extractHighQualityImageBytes(image: Image): ByteArray? {
+        return try {
+            when (image.format) {
+                ImageFormat.JPEG -> {
+                    // JPEG는 그대로 사용
+                    val buffer = image.planes[0].buffer
+                    val bytes = ByteArray(buffer.remaining())
+                    buffer.get(bytes)
+                    bytes
+                }
+                ImageFormat.YUV_420_888 -> {
+                    // YUV를 고품질 RGB 비트맵으로 변환 후 PNG로 인코딩
+                    val bitmap = convertYuvToRgbBitmap(image)
+                    if (bitmap != null) {
+                        val outputStream = ByteArrayOutputStream()
+                        // PNG 무손실 압축 사용 (품질 유지)
+                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
+                        val result = outputStream.toByteArray()
+                        bitmap.recycle()
+                        result
+                    } else null
+                }
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "고품질 이미지 바이트 추출 실패: ${e.message}")
+            null
+        }
+    }
     private fun convertYuvToJpegBytes(image: Image): ByteArray {
         val yBuffer = image.planes[0].buffer
         val uBuffer = image.planes[1].buffer
@@ -1255,7 +1384,13 @@ class SensorCollector(private val context: Context) {
         }
     }
 
+
     private fun yuvToBitmap(image: Image): Bitmap {
+        return convertYuvToRgbBitmap(image)
+            ?: throw IllegalStateException("고품질 YUV → RGB 변환 실패")
+    }
+
+    /*private fun yuvToBitmap(image: Image): Bitmap {
         if (image.format != ImageFormat.YUV_420_888) {
             throw IllegalArgumentException("이미지 형식이 YUV_420_888이어야 합니다, 현재: ${image.format}")
         }
@@ -1283,7 +1418,7 @@ class SensorCollector(private val context: Context) {
             return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 ?: throw IllegalStateException("비트맵 디코딩 실패")
         }
-    }
+    }*/
 
     private fun selectCameraId(cameraManager: CameraManager): String? {
         try {

@@ -339,7 +339,7 @@ class HighSpeedZeroCopyProcessor(
     /**
      * 🛡️ 안전한 Zero-Copy 프레임 처리 - 크래시 방지
      */
-    fun processZeroCopy(
+    /*fun processZeroCopy(
         imageBytes: ByteArray,
         rotationDegrees: Int
     ): SharedBitmap? {
@@ -432,6 +432,106 @@ class HighSpeedZeroCopyProcessor(
             return null
         } finally {
             // 재사용 객체들 안전하게 반환
+            try {
+                bitmapPool.returnReusableCanvas(canvas)
+                bitmapPool.returnReusablePaint(paint)
+                bitmapPool.returnReusableMatrix(matrix)
+            } catch (e: Exception) {
+                Log.w(TAG, "⚠️ Error returning reusable objects: ${e.message}")
+            }
+        }
+    }*/
+
+    fun processHighQualityZeroCopy(
+        imageBytes: ByteArray,
+        rotationDegrees: Int
+    ): SharedBitmap? {
+        val sharedBitmap = bitmapPool.acquireSharedBitmap() ?: return null
+        val bitmapHash = sharedBitmap.bitmap.hashCode().toString(16)
+
+        if (!isValidBitmap(sharedBitmap.bitmap)) {
+            Log.e(TAG, "❌ Invalid bitmap detected before processing: @$bitmapHash")
+            sharedBitmap.release()
+            return null
+        }
+
+        val canvas = bitmapPool.getReusableCanvas()
+        val paint = bitmapPool.getReusablePaint()
+        val matrix = bitmapPool.getReusableMatrix()
+
+        try {
+            if (!safeSetCanvasBitmap(canvas, sharedBitmap.bitmap)) {
+                Log.e(TAG, "❌ Canvas.setBitmap() failed for @$bitmapHash")
+                sharedBitmap.release()
+                return null
+            }
+
+            // 🎯 고품질 비트맵 디코딩 (PNG 또는 JPEG)
+            val sourceBitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+            if (sourceBitmap == null || sourceBitmap.isRecycled) {
+                Log.w(TAG, "⚠️ High quality bitmap decode failed for @$bitmapHash")
+                sharedBitmap.release()
+                return null
+            }
+
+            if (!isValidBitmap(sharedBitmap.bitmap)) {
+                Log.e(TAG, "❌ Target bitmap became invalid during processing: @$bitmapHash")
+                sourceBitmap.recycle()
+                sharedBitmap.release()
+                return null
+            }
+
+            // 🎯 고품질 변환 매트릭스 설정
+            matrix.reset()
+            val scaleX = targetWidth.toFloat() / sourceBitmap.width
+            val scaleY = targetHeight.toFloat() / sourceBitmap.height
+            matrix.setScale(scaleX, scaleY)
+
+            if (rotationDegrees != 0) {
+                matrix.postRotate(
+                    rotationDegrees.toFloat(),
+                    targetWidth / 2f,
+                    targetHeight / 2f
+                )
+            }
+
+            // 🎯 고품질 페인트 설정
+            paint.isFilterBitmap = true
+            paint.isAntiAlias = true
+            paint.isDither = true
+
+            try {
+                canvas.drawBitmap(sourceBitmap, matrix, paint)
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Canvas.drawBitmap failed for @$bitmapHash: ${e.message}", e)
+                sourceBitmap.recycle()
+                sharedBitmap.release()
+                return null
+            }
+
+            sourceBitmap.recycle()
+
+            if (!isValidBitmap(sharedBitmap.bitmap)) {
+                Log.e(TAG, "❌ Final bitmap validation failed: @$bitmapHash")
+                sharedBitmap.release()
+                return null
+            }
+
+            val frameNum = processedFrames.incrementAndGet()
+            Log.d(TAG, "✅ High Quality Zero-Copy 처리 완료: @$bitmapHash, frame=$frameNum")
+
+            return sharedBitmap
+
+        } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "💥 OOM during High Quality Zero-Copy processing @$bitmapHash", e)
+            sharedBitmap.release()
+            System.gc()
+            return null
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 Unexpected error during High Quality Zero-Copy processing @$bitmapHash: ${e.message}", e)
+            sharedBitmap.release()
+            return null
+        } finally {
             try {
                 bitmapPool.returnReusableCanvas(canvas)
                 bitmapPool.returnReusablePaint(paint)

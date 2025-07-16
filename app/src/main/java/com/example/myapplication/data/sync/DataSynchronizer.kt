@@ -3,6 +3,7 @@ package com.example.myapplication.data.sync
 import android.util.Log
 import com.example.myapplication.model.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import com.example.myapplication.DataStructure.CircularQueue
 
@@ -90,28 +91,102 @@ class DataSynchronizer {
         private const val GPS_TIMEOUT_MS = 5000L
         private const val SYNC_WINDOW_MS = 50L // ±50ms 동기화 윈도우
         private const val MAX_SYNC_RESULTS = 100
+        private const val GPS_RECOVERY_REPROCESS_WINDOW_MS = 10000L // 10초 이내 데이터 재처리
     }
 
     private val processedTimeStamps = ConcurrentHashMap.newKeySet<Long>()
     private var timeSyncOffset: Long = 0L
     private var lastGpsUpdateTime: Long = 0L
     private var currentSyncMode: TimeSyncMode = TimeSyncMode.LOCAL_BASED
+    private var lastGpsRecoveryTime: Long = 0L // 🎯 GPS 복구 시점 추가
 
     // 동기화 결과 캐시 - CircularQueue 사용
     private val syncResultCache = CircularQueue<SyncMatchResult>(MAX_SYNC_RESULTS)
     private val localSyncCache = CircularQueue<LocalSyncResult>(MAX_SYNC_RESULTS)
 
+    // 🎯 GPS 복구 시 재처리를 위한 임시 데이터 저장
+    private val recentLocalData = CircularQueue<LocalSyncResult>(50)
+
     /**
-     * GPS 시간 동기화 업데이트
+     * 🎯 GPS 시간 동기화 업데이트 - GPS 복구 시 기존 데이터 재처리
      */
     fun updateTimeSync(gpsTimestamp: Long, localTimestamp: Long) {
+        val wasGpsAvailable = isGpsAvailable()
+
         timeSyncOffset = gpsTimestamp - localTimestamp
         lastGpsUpdateTime = localTimestamp
 
-        // GPS가 다시 사용 가능해지면 GPS_BASED 모드로 전환
-        if (currentSyncMode == TimeSyncMode.LOCAL_BASED) {
+        // 🎯 GPS가 새로 복구된 경우
+        if (!wasGpsAvailable && currentSyncMode == TimeSyncMode.LOCAL_BASED) {
+            lastGpsRecoveryTime = localTimestamp
             currentSyncMode = TimeSyncMode.GPS_BASED
+
             Log.d(TAG, "📡 GPS 신호 복구: LOCAL_BASED → GPS_BASED")
+            Log.d(TAG, "🔄 GPS 복구 - 시간 오프셋: ${timeSyncOffset}ms")
+
+            // 🎯 기존 LOCAL 데이터를 GPS 시간으로 재동기화
+            reprocessRecentLocalDataToGps()
+        } else if (currentSyncMode == TimeSyncMode.LOCAL_BASED) {
+            currentSyncMode = TimeSyncMode.GPS_BASED
+            Log.d(TAG, "📡 GPS 시간 동기화 활성화")
+        }
+    }
+
+    /**
+     * 🎯 GPS 복구 시 최근 LOCAL 데이터를 GPS 시간으로 재처리
+     */
+    private fun reprocessRecentLocalDataToGps() {
+        if (recentLocalData.isEmpty()) {
+            Log.d(TAG, "재처리할 LOCAL 데이터가 없음")
+            return
+        }
+
+        val currentTime = System.currentTimeMillis()
+        val reprocessedCount = AtomicInteger(0)
+
+        Log.d(TAG, "🔄 GPS 복구 재처리 시작: ${recentLocalData.size()}개 LOCAL 데이터")
+
+        for (localResult in recentLocalData.snapshot()) {
+            // 🎯 GPS 복구 시점 이전 일정 시간 내의 데이터만 재처리
+            if ((currentTime - localResult.localTime) <= GPS_RECOVERY_REPROCESS_WINDOW_MS) {
+                val convertedGpsSyncResult = convertLocalToGpsSync(localResult)
+
+                if (convertedGpsSyncResult != null) {
+                    syncResultCache.push(convertedGpsSyncResult)
+                    reprocessedCount.incrementAndGet()
+
+                    Log.d(TAG, "✅ LOCAL → GPS 변환: localTime=${localResult.localTime} → hybridTime=${convertedGpsSyncResult.hybridTime}")
+                }
+            }
+        }
+
+        val converted = reprocessedCount.get()
+        Log.d(TAG, "🔄 GPS 복구 재처리 완료: ${converted}개 LOCAL → GPS 변환")
+
+        // 재처리 완료 후 LOCAL 캐시는 유지 (기록 목적)
+    }
+
+    /**
+     * 🎯 LOCAL 동기화 결과를 GPS 동기화 결과로 변환
+     */
+    private fun convertLocalToGpsSync(localResult: LocalSyncResult): SyncMatchResult? {
+        return try {
+            // LOCAL 시간을 GPS 하이브리드 시간으로 예측 변환
+            val predictedGpsTime = predictTime(localResult.localTime)
+
+            SyncMatchResult(
+                hybridTime = predictedGpsTime,
+                gpsAvailable = true, // GPS 복구 후이므로 true
+                gpsEntry = null, // 실제 GPS 데이터는 없음 (변환된 것)
+                imuEntry = localResult.imuEntry,
+                gnssEntry = null, // LOCAL 기반이므로 GNSS 없음
+                cameraEntry = localResult.cameraEntry,
+                bboxEntry = localResult.bboxEntry,
+                missingDataTypes = listOf("GPS", "GNSS") + localResult.missingDataTypes
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "LOCAL → GPS 변환 실패: ${e.message}", e)
+            null
         }
     }
 
@@ -143,7 +218,7 @@ class DataSynchronizer {
     }
 
     /**
-     * 동기화 모드 업데이트
+     * 🎯 동기화 모드 업데이트 (GPS 신호 손실 감지)
      */
     private fun updateSyncMode() {
         val wasGpsBased = (currentSyncMode == TimeSyncMode.GPS_BASED)
@@ -155,14 +230,14 @@ class DataSynchronizer {
                 Log.w(TAG, "🔴 GPS 신호 손실: GPS_BASED → LOCAL_BASED")
             }
             !wasGpsBased && isGpsNowAvailable -> {
-                currentSyncMode = TimeSyncMode.GPS_BASED
-                Log.d(TAG, "📡 GPS 신호 복구: LOCAL_BASED → GPS_BASED")
+                // GPS 복구는 updateTimeSync에서 처리됨
+                Log.d(TAG, "📡 GPS 신호 복구 감지 (updateTimeSync에서 처리됨)")
             }
         }
     }
 
     /**
-     * CircularQueue들을 참조로 받아서 동기화 수행 (데이터 복사 없음)
+     * 🎯 개선된 동기화 수행 - GPS 복구 시 자동 재처리
      */
     fun performSynchronization(
         gpsQueue: CircularQueue<GpsEntry>,
@@ -216,7 +291,7 @@ class DataSynchronizer {
     }
 
     /**
-     * Local 기반 동기화 (Camera, IMU, BBox만)
+     * 🎯 Local 기반 동기화 (최근 데이터 저장 추가)
      */
     private fun performLocalSynchronization(
         imuQueue: CircularQueue<ImuEntry>,
@@ -237,7 +312,11 @@ class DataSynchronizer {
             )
 
             if (localResult != null) {
-                localSyncCache.push(localResult) // CircularQueue 자동 크기 관리
+                localSyncCache.push(localResult)
+
+                // 🎯 GPS 복구 시 재처리를 위해 최근 데이터 저장
+                recentLocalData.push(localResult)
+
                 markTimeAsProcessed(localTime)
             }
         }
@@ -380,6 +459,25 @@ class DataSynchronizer {
      * GPS 모노 오프셋 반환
      */
     fun getGpsMonoOffset(): Long = timeSyncOffset
+
+    /**
+     * 🎯 동기화 상태 리포트 (디버깅용)
+     */
+    fun getSyncStatusReport(): String {
+        return buildString {
+            appendLine("=== DataSynchronizer 상태 ===")
+            appendLine("현재 모드: $currentSyncMode")
+            appendLine("GPS 사용 가능: ${isGpsAvailable()}")
+            appendLine("마지막 GPS 업데이트: ${System.currentTimeMillis() - lastGpsUpdateTime}ms 전")
+            appendLine("시간 오프셋: ${timeSyncOffset}ms")
+            appendLine("GPS 동기화 결과: ${syncResultCache.size()}개")
+            appendLine("LOCAL 동기화 결과: ${localSyncCache.size()}개")
+            appendLine("최근 LOCAL 데이터: ${recentLocalData.size()}개")
+            if (lastGpsRecoveryTime > 0) {
+                appendLine("마지막 GPS 복구: ${System.currentTimeMillis() - lastGpsRecoveryTime}ms 전")
+            }
+        }
+    }
 
     // 시간 처리 관련 메서드들
     fun isTimeProcessed(time: Long): Boolean {
