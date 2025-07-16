@@ -13,7 +13,7 @@ import com.example.myapplication.learning.yolo.BoundingBox
 import com.example.myapplication.data.logging.LoggerManager
 
 class HomeRepository(
-    private val context: Context, // Context 추가
+    private val context: Context,
     private val sensorCollector: SensorCollector,
     private val dataSynchronizer: DataSynchronizer,
 ) {
@@ -54,7 +54,34 @@ class HomeRepository(
     }
 
     /**
-     * ✅ 카메라 스트리밍 시작 - UI 버튼용
+     * 🎯 비트맵 풀 강제 정리 (UI 요청)
+     */
+    fun requestPoolCleanup() {
+        try {
+            sensorCollector.requestPoolCleanup()
+            Log.d(TAG, "🧹 Repository: 비트맵 풀 정리 요청 완료")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Repository: 비트맵 풀 정리 실패: ${e.message}", e)
+            throw e
+        }
+    }
+
+    /**
+     * 🎯 풀 상세 상태 조회 (UI 요청)
+     */
+    fun getPoolDetailedStatus(): String {
+        return try {
+            val status = sensorCollector.getPoolDetailedStatus()
+            Log.d(TAG, "📊 Repository: 풀 상태 조회 완료")
+            status
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Repository: 풀 상태 조회 실패: ${e.message}", e)
+            "풀 상태 조회 실패: ${e.message}"
+        }
+    }
+
+    /**
+     * ✅ 카메라 스트리밍 시작 - 개선된 비트맵 관리
      */
     fun startCameraStreaming() {
         if (isStreamingActive) {
@@ -63,15 +90,18 @@ class HomeRepository(
         }
 
         isStreamingActive = true
-        Log.d(TAG, "Starting camera streaming")
+        Log.d(TAG, "Starting camera streaming with enhanced bitmap management")
 
         sensorCollector.startCameraStreaming(
             callback = { sensorData ->
-                if (sensorData != null) {
+                if (sensorData?.bitmap != null && !sensorData.bitmap.isRecycled) {
+                    // 🎯 유효한 비트맵만 플로우에 전달
                     _cameraStreamFlow.value = sensorData
-                    Log.d(TAG, "✅ New camera frame pushed to flow: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
+                    Log.d(TAG, "✅ Valid frame pushed: frameId=${sensorData.frameId}, size=${sensorData.bitmap.width}x${sensorData.bitmap.height}")
                 } else {
-                    Log.w(TAG, "⚠️ Received null camera frame, but keeping flow active")
+                    // 🚫 무효한 비트맵 필터링
+                    Log.w(TAG, "⚠️ Invalid frame filtered out: bitmap=${sensorData?.bitmap}, recycled=${sensorData?.bitmap?.isRecycled}")
+                    // null을 보내지 않고 그냥 무시
                 }
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
@@ -99,7 +129,7 @@ class HomeRepository(
         sensorCollector.stopCameraStreaming()
         isStreamingActive = false
         _cameraStreamFlow.value = null
-        Log.d(TAG, "Camera streaming stopped")
+        Log.d(TAG, "Camera streaming stopped with cleanup")
     }
 
     /**

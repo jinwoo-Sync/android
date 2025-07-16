@@ -10,9 +10,9 @@ import androidx.lifecycle.viewModelScope
 import com.example.myapplication.data.repository.HomeRepository
 import com.example.myapplication.data.sensor.SensorCollector
 import com.example.myapplication.learning.yolo.BoundingBox
+import com.example.myapplication.utils.SharedBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.lang.ref.WeakReference
 
 class HomeViewModel(
     private val sensorCollector: SensorCollector,
@@ -20,9 +20,9 @@ class HomeViewModel(
 ) : ViewModel() {
     private val TAG = "HomeViewModel"
 
-    // ✅ UI용 프레임 버퍼링
-    private var lastUIFrameTime = 0L
-    private val UI_FRAME_INTERVAL_MS = 66L  // 15fps (1000/15 = 66ms)
+    // 🎯 UI 전용 비트맵 생명주기 관리
+    private var currentUIBitmap: SharedBitmap? = null
+    private val uiBitmapLock = Object()
 
     private val _cameraFrame = MutableLiveData<Bitmap?>()
     val cameraFrame: LiveData<Bitmap?> = _cameraFrame
@@ -76,30 +76,91 @@ class HomeViewModel(
     private val _syncStatus = MutableLiveData<String>()
     val syncStatus: LiveData<String> = _syncStatus
 
+    // 🎯 풀 상태 정보를 UI에 노출
+    private val _poolStatus = MutableLiveData<String>()
+    val poolStatus: LiveData<String> = _poolStatus
+
     private var isSensorStreamingStarted = false
     private var isCameraStreamingJob: kotlinx.coroutines.Job? = null
-
-    private var currentBitmapRef: WeakReference<Bitmap>? = null
-    private val bitmapLock = Object()
 
     fun setServerTransmissionEnabled(enabled: Boolean) {
         _isServerTransmissionEnabled.postValue(enabled)
     }
 
     /**
-     * ✅ 안전한 비트맵 업데이트 - UI 프레임 레이트 제한
+     * 🎯 UI 비트맵 안전 교체 - 이전 참조 완전 해제 후 새 참조 설정
+     */
+    private fun updateCameraFrame(newSharedBitmap: SharedBitmap?) {
+        synchronized(uiBitmapLock) {
+            // 이전 UI 비트맵 해제
+            currentUIBitmap?.release()
+            currentUIBitmap = null
+
+            if (newSharedBitmap != null && newSharedBitmap.isValid()) {
+                // 새 UI 전용 참조 생성 (생명주기 연장)
+                currentUIBitmap = newSharedBitmap.addRef()
+
+                if (currentUIBitmap != null) {
+                    _cameraFrame.postValue(currentUIBitmap!!.bitmap)
+                    Log.d(TAG, "✅ UI Frame updated with protected reference: @${currentUIBitmap!!.bitmap.hashCode().toString(16)}")
+                } else {
+                    _cameraFrame.postValue(null)
+                    Log.w(TAG, "⚠️ Failed to create UI reference")
+                }
+            } else {
+                _cameraFrame.postValue(null)
+                Log.d(TAG, "🧹 UI frame cleared")
+            }
+        }
+    }
+
+    /**
+     * 🎯 일반 비트맵 업데이트 (기존 호환성 유지)
      */
     private fun updateCameraFrame(bitmap: Bitmap?) {
-        // 프레임 레이트 제한 로직 제거하고 자연스럽게 처리
-        synchronized(bitmapLock) {
+        synchronized(uiBitmapLock) {
+            // 이전 UI 비트맵 해제
+            currentUIBitmap?.release()
+            currentUIBitmap = null
+
             if (bitmap != null && !bitmap.isRecycled) {
                 _cameraFrame.postValue(bitmap)
-                currentBitmapRef = WeakReference(bitmap)
                 Log.d(TAG, "✅ UI Frame updated: ${bitmap.width}x${bitmap.height}")
             } else {
                 _cameraFrame.postValue(null)
-                currentBitmapRef = null
+                Log.d(TAG, "🧹 UI frame cleared")
             }
+        }
+    }
+
+    /**
+     * 🎯 비트맵 풀 강제 정리 (UI 제어)
+     */
+    fun forceCleanupBitmapPool() {
+        try {
+            // HomeRepository를 통해 풀 정리 요청
+            homeRepository.requestPoolCleanup()
+            _text.postValue("비트맵 풀 정리 완료")
+            updatePoolStatus()
+            Log.d(TAG, "🧹 사용자 요청 비트맵 풀 정리 완료")
+        } catch (e: Exception) {
+            _text.postValue("풀 정리 실패: ${e.message}")
+            Log.e(TAG, "❌ 풀 정리 실패: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 🎯 풀 상태 업데이트
+     */
+    fun updatePoolStatus() {
+        try {
+            // HomeRepository를 통해 풀 상태 조회
+            val status = homeRepository.getPoolDetailedStatus()
+            _poolStatus.postValue(status)
+            Log.d(TAG, "📊 풀 상태 업데이트 완료")
+        } catch (e: Exception) {
+            _poolStatus.postValue("풀 상태 조회 실패: ${e.message}")
+            Log.e(TAG, "❌ 풀 상태 업데이트 실패: ${e.message}", e)
         }
     }
 
@@ -137,7 +198,6 @@ class HomeViewModel(
                     }
                     _imuData.postValue(imuInfo)
                     lastImuUpdateTime = currentTime
-                    Log.d("HomeViewModel", "✅ IMU 데이터 UI 업데이트")
                     updateSyncStatus()
                 }
             },
@@ -244,13 +304,13 @@ class HomeViewModel(
                         Log.d(TAG, "✅ Camera frame received: frameId=${sensorData.frameId}, bitmap=${sensorData.bitmap != null}")
                     } else {
                         Log.w(TAG, "⚠️ Received null sensor data from camera flow")
-                        updateCameraFrame(null)
+                        updateCameraFrame(null as Bitmap?)
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Camera Flow 구독 오류: ${e.message}", e)
                 _text.postValue("카메라 스트리밍 오류: ${e.message}")
-                updateCameraFrame(null)
+                updateCameraFrame(null as Bitmap?)
             }
         }
     }
@@ -272,7 +332,7 @@ class HomeViewModel(
         homeRepository.stopCameraStreaming()
         _text.value = "카메라 스트리밍 중지됨"
 
-        updateCameraFrame(null)
+        updateCameraFrame(null as Bitmap?)
         _boundingBoxes.postValue(emptyList())
         _inferenceTime.postValue("0ms")
 
@@ -361,9 +421,10 @@ class HomeViewModel(
         super.onCleared()
         Log.d("HomeViewModel", "🧹 ViewModel 정리 시작")
 
-        synchronized(bitmapLock) {
-            currentBitmapRef = null
-            Log.d(TAG, "✅ Bitmap references cleared")
+        synchronized(uiBitmapLock) {
+            currentUIBitmap?.release()
+            currentUIBitmap = null
+            Log.d(TAG, "✅ UI Bitmap references cleared")
         }
 
         isCameraStreamingJob?.cancel()

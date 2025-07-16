@@ -6,10 +6,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 🎯 진짜 Zero-Copy 비트맵 풀 - GC Pressure 최소화
+ * 🎯 진짜 Zero-Copy 비트맵 풀 - GC Pressure 최소화 + 개선된 디버깅
  */
 class TrueZeroCopyBitmapPool(
     private val poolSize: Int = 6,
@@ -60,6 +59,7 @@ class TrueZeroCopyBitmapPool(
         if (bitmap != null && !bitmap.isRecycled) {
             activeBitmaps[bitmap] = AtomicInteger(1)
             totalReused.incrementAndGet()
+            Log.d(TAG, "📥 Bitmap acquired: @${bitmap.hashCode().toString(16)}, available=${availableBitmaps.size}")
             return SharedBitmap(bitmap, this)
         }
         return null
@@ -69,7 +69,7 @@ class TrueZeroCopyBitmapPool(
         return try {
             val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             totalCreated.incrementAndGet()
-            Log.d(TAG, "🆕 새 비트맵 생성: total=${totalCreated.get()}")
+            Log.d(TAG, "🆕 새 비트맵 생성: @${bitmap.hashCode().toString(16)}, total=${totalCreated.get()}")
             bitmap
         } catch (e: OutOfMemoryError) {
             Log.e(TAG, "❌ OOM: 비트맵 생성 실패", e)
@@ -84,45 +84,93 @@ class TrueZeroCopyBitmapPool(
     internal fun addReference(bitmap: Bitmap): Boolean {
         val refCount = activeBitmaps[bitmap]
         return if (refCount != null) {
-            refCount.incrementAndGet()
+            val newCount = refCount.incrementAndGet()
+            Log.d(TAG, "📈 Reference increased: @${bitmap.hashCode().toString(16)} -> $newCount")
             true
         } else {
+            Log.w(TAG, "⚠️ Cannot add reference to inactive bitmap: @${bitmap.hashCode().toString(16)}")
             false
         }
     }
 
     /**
-     * 🎯 내부 참조 감소 및 풀 반환
+     * 🎯 개선된 참조 해제 - 더 안전한 정리
      */
     internal fun releaseReference(bitmap: Bitmap) {
         val refCount = activeBitmaps[bitmap]
         if (refCount != null) {
             val newCount = refCount.decrementAndGet()
+            Log.d(TAG, "📉 Reference decreased: @${bitmap.hashCode().toString(16)} -> $newCount")
+
             if (newCount <= 0) {
                 activeBitmaps.remove(bitmap)
                 returnToPool(bitmap)
+                Log.d(TAG, "🔄 Bitmap returned to pool: available=${availableBitmaps.size}")
             }
+        } else {
+            Log.w(TAG, "⚠️ Attempted to release unknown bitmap: @${bitmap.hashCode().toString(16)}")
         }
     }
 
+    /**
+     * 🎯 비트맵 풀 반환 - 클리어하지 않고 다음 프레임에서 덮어씌우기
+     */
     private fun returnToPool(bitmap: Bitmap) {
         if (!bitmap.isRecycled && availableBitmaps.size < poolSize) {
-            // 비트맵 클리어 (재사용 준비)
-            val canvas = canvasPool.poll() ?: Canvas()
-            try {
-                canvas.setBitmap(bitmap)
-                canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-                availableBitmaps.offer(bitmap)
-                Log.d(TAG, "✅ 비트맵 풀 반환: available=${availableBitmaps.size}")
-            } finally {
-                canvas.setBitmap(null)
-                if (canvasPool.size < 4) canvasPool.offer(canvas)
-            }
+            // 🚀 클리어 제거: 다음 프레임에서 새 데이터로 덮어씌우므로 불필요
+            availableBitmaps.offer(bitmap)
+            Log.d(TAG, "✅ 비트맵 풀 반환: @${bitmap.hashCode().toString(16)}, available=${availableBitmaps.size}")
         } else {
             // 풀이 가득 찼거나 비트맵 손상 시 해제
             if (!bitmap.isRecycled) {
                 bitmap.recycle()
+                Log.d(TAG, "♻️ 비트맵 해제: @${bitmap.hashCode().toString(16)} (풀 가득참 또는 손상)")
             }
+        }
+    }
+
+    /**
+     * 🎯 강제 비트맵 상태 정리 (메모리 누수 방지)
+     */
+    fun forceCleanupStaleReferences() {
+        val staleBitmaps = mutableListOf<Bitmap>()
+
+        activeBitmaps.forEach { (bitmap, refCount) ->
+            if (bitmap.isRecycled || refCount.get() <= 0) {
+                staleBitmaps.add(bitmap)
+                Log.w(TAG, "🧹 발견된 stale bitmap: @${bitmap.hashCode().toString(16)}, recycled=${bitmap.isRecycled}, refCount=${refCount.get()}")
+            }
+        }
+
+        staleBitmaps.forEach { bitmap ->
+            activeBitmaps.remove(bitmap)
+            if (!bitmap.isRecycled) {
+                returnToPool(bitmap)
+            }
+        }
+
+        Log.d(TAG, "🧹 Stale cleanup: removed=${staleBitmaps.size}, current available=${availableBitmaps.size}")
+    }
+
+    /**
+     * 🎯 상세 풀 상태 진단
+     */
+    fun getDetailedStatus(): String {
+        val activeDetails = activeBitmaps.entries.joinToString(", ") { (bitmap, refCount) ->
+            "Bitmap@${bitmap.hashCode().toString(16)}:ref=${refCount.get()}"
+        }
+
+        return buildString {
+            appendLine("=== 비트맵 풀 상세 상태 ===")
+            appendLine("Available: ${availableBitmaps.size}/${poolSize}")
+            appendLine("Active: ${activeBitmaps.size}")
+            appendLine("Created: ${totalCreated.get()}")
+            appendLine("Reused: ${totalReused.get()}")
+            appendLine("Active Details: [$activeDetails]")
+
+            // 추가 진단 정보
+            val availableHashes = availableBitmaps.map { "@${it.hashCode().toString(16)}" }
+            appendLine("Available Bitmaps: [${availableHashes.joinToString(", ")}]")
         }
     }
 
@@ -160,19 +208,24 @@ class TrueZeroCopyBitmapPool(
     }
 
     fun cleanup() {
+        Log.d(TAG, "🗑️ Starting pool cleanup...")
+
         // 모든 활성 비트맵 강제 해제
         activeBitmaps.keys.forEach { bitmap ->
             if (!bitmap.isRecycled) {
                 bitmap.recycle()
+                Log.d(TAG, "♻️ Force recycled active bitmap: @${bitmap.hashCode().toString(16)}")
             }
         }
         activeBitmaps.clear()
 
         // 사용 가능한 비트맵들 해제
+        var recycledCount = 0
         while (availableBitmaps.isNotEmpty()) {
             val bitmap = availableBitmaps.poll()
             if (bitmap != null && !bitmap.isRecycled) {
                 bitmap.recycle()
+                recycledCount++
             }
         }
 
@@ -180,28 +233,29 @@ class TrueZeroCopyBitmapPool(
         paintPool.clear()
         matrixPool.clear()
 
-        Log.d(TAG, "🗑️ Zero-Copy 풀 정리 완료")
+        Log.d(TAG, "🗑️ Zero-Copy 풀 정리 완료: recycled=$recycledCount bitmaps")
     }
 }
 
 /**
- * 🎯 공유 비트맵 래퍼 - 단순한 참조 카운팅
+ * 🎯 공유 비트맵 래퍼 - 단순한 참조 카운팅 + 개선된 로깅
  */
 class SharedBitmap(
     val bitmap: Bitmap,
     private val pool: TrueZeroCopyBitmapPool
 ) {
     private val TAG = "SharedBitmap"
+    private val bitmapHash = bitmap.hashCode().toString(16)
 
     /**
      * 🚀 빠른 참조 추가 (UI/Detection 동시 사용)
      */
     fun addRef(): SharedBitmap? {
         return if (pool.addReference(bitmap)) {
-            Log.d(TAG, "📈 참조 추가 성공")
+            Log.d(TAG, "📈 참조 추가 성공: @$bitmapHash")
             SharedBitmap(bitmap, pool)
         } else {
-            Log.w(TAG, "⚠️ 참조 추가 실패")
+            Log.w(TAG, "⚠️ 참조 추가 실패: @$bitmapHash")
             null
         }
     }
@@ -211,14 +265,14 @@ class SharedBitmap(
      */
     fun release() {
         pool.releaseReference(bitmap)
-        Log.d(TAG, "📉 참조 해제")
+        Log.d(TAG, "📉 참조 해제: @$bitmapHash")
     }
 
     fun isValid(): Boolean = !bitmap.isRecycled
 }
 
 /**
- * 🚀 고속 Zero-Copy 프레임 프로세서
+ * 🚀 고속 Zero-Copy 프레임 프로세서 - 개선된 로깅
  */
 class HighSpeedZeroCopyProcessor(
     private val bitmapPool: TrueZeroCopyBitmapPool,
@@ -236,6 +290,7 @@ class HighSpeedZeroCopyProcessor(
         rotationDegrees: Int
     ): SharedBitmap? {
         val sharedBitmap = bitmapPool.acquireSharedBitmap() ?: return null
+        val bitmapHash = sharedBitmap.bitmap.hashCode().toString(16)
 
         // 재사용 객체들 획득
         val canvas = bitmapPool.getReusableCanvas()
@@ -245,11 +300,14 @@ class HighSpeedZeroCopyProcessor(
         try {
             // Canvas를 공유 비트맵에 바인딩
             canvas.setBitmap(sharedBitmap.bitmap)
-            canvas.drawColor(Color.BLACK, PorterDuff.Mode.CLEAR)
+
+            // 🚀 클리어 제거: 새 프레임으로 완전히 덮어씌우므로 불필요
+            // canvas.drawColor(Color.BLACK, PorterDuff.Mode.CLEAR)
 
             // 원본 비트맵 디코딩 (이것만 새로 생성)
             val sourceBitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
             if (sourceBitmap == null) {
+                Log.w(TAG, "⚠️ Source bitmap decode failed for @$bitmapHash")
                 sharedBitmap.release()
                 return null
             }
@@ -268,19 +326,19 @@ class HighSpeedZeroCopyProcessor(
                 )
             }
 
-            // 🎯 핵심: 한 번의 drawBitmap으로 모든 변환 완료
+            // 🎯 핵심: 한 번의 drawBitmap으로 모든 변환 완료 (이전 내용 완전 덮어씌움)
             canvas.drawBitmap(sourceBitmap, matrix, paint)
 
             // 원본 즉시 해제 (GC 압박 최소화)
             sourceBitmap.recycle()
 
-            processedFrames.incrementAndGet()
-            Log.d(TAG, "✅ Zero-Copy 처리 완료: ${processedFrames.get()}")
+            val frameNum = processedFrames.incrementAndGet()
+            Log.d(TAG, "✅ Zero-Copy 처리 완료: @$bitmapHash, frame=$frameNum")
 
             return sharedBitmap
 
         } catch (e: Exception) {
-            Log.e(TAG, "Zero-Copy 처리 실패: ${e.message}", e)
+            Log.e(TAG, "Zero-Copy 처리 실패 @$bitmapHash: ${e.message}", e)
             sharedBitmap.release()
             return null
         } finally {

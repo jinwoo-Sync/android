@@ -114,6 +114,7 @@ class HomeFragment : Fragment() {
     private fun performEmergencyCleanup() {
         Log.w("HomeFragment", "🚨 메모리 부족 경고! 응급 정리 작업 수행")
         binding.imageView.setImageBitmap(null)
+        viewModel.forceCleanupBitmapPool() // 🎯 ViewModel을 통한 풀 정리
         System.gc()
         Log.w("HomeFragment", "🧹 응급 정리 완료")
     }
@@ -164,6 +165,12 @@ class HomeFragment : Fragment() {
             Log.d("HomeFragment", "✅ Observer received frame: ${bitmap != null}")
         }
 
+        // 🎯 풀 상태 관찰자 추가
+        viewModel.poolStatus.observe(viewLifecycleOwner) { status ->
+            binding.poolStatusText.text = status
+            Log.d("HomeFragment", "📊 Pool status updated: $status")
+        }
+
         viewModel.boundingBoxes.observe(viewLifecycleOwner) { boundingBoxes ->
             try {
                 binding.overlayView.setResults(boundingBoxes)
@@ -206,7 +213,6 @@ class HomeFragment : Fragment() {
 
         viewModel.imuData.observe(viewLifecycleOwner) { data ->
             binding.imuLogText.text = data
-            Log.d("HomeFragment", "📊 IMU 데이터 UI 업데이트: $data")
         }
 
         viewModel.isStreaming.observe(viewLifecycleOwner) { isStreaming ->
@@ -266,6 +272,20 @@ class HomeFragment : Fragment() {
                 Toast.makeText(requireContext(), "카메라 권한이 필요합니다", Toast.LENGTH_SHORT).show()
                 Log.w("HomeFragment", "⚠️ Missing camera permission for frame capture")
             }
+        }
+
+        // 🎯 풀 정리 버튼
+        binding.buttonCleanupPool.setOnClickListener {
+            viewModel.forceCleanupBitmapPool()
+            Toast.makeText(requireContext(), "비트맵 풀 정리 요청", Toast.LENGTH_SHORT).show()
+            Log.d("HomeFragment", "🧹 Pool cleanup requested")
+        }
+
+        // 🎯 풀 상태 업데이트 버튼
+        binding.buttonPoolStatus.setOnClickListener {
+            viewModel.updatePoolStatus()
+            Toast.makeText(requireContext(), "풀 상태 업데이트", Toast.LENGTH_SHORT).show()
+            Log.d("HomeFragment", "📊 Pool status update requested")
         }
 
         binding.loggingCheckbox.setOnCheckedChangeListener { _, isChecked ->
@@ -333,6 +353,9 @@ class HomeFragment : Fragment() {
         Log.d("HomeFragment", "📱 Fragment resumed - starting sensor streaming only")
         resourceMonitor?.logAppResourceStatus("HomeFragment", "Fragment resumed")
         viewModel.startSensorStreaming()
+
+        // 🎯 풀 상태 자동 업데이트
+        viewModel.updatePoolStatus()
     }
 
     override fun onPause() {

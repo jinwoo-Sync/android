@@ -37,7 +37,7 @@
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toBottomOf="@id/text_home"
-            app:layout_constraintHeight_percent="0.4">
+            app:layout_constraintHeight_percent="0.35">
 
             <!-- 카메라 프리뷰를 표시하는 ImageView -->
             <ImageView
@@ -70,6 +70,22 @@
             app:layout_constraintTop_toBottomOf="@id/camera_preview_container"
             tools:text="Inference: 0ms" />
 
+        <!-- 🎯 비트맵 풀 상태 표시 -->
+        <TextView
+            android:id="@+id/pool_status_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginEnd="16dp"
+            android:textSize="8sp"
+            android:maxLines="3"
+            android:ellipsize="end"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/inference_time"
+            tools:text="Pool: Available=2, Active=4" />
+
         <!-- GPS 로그 -->
         <TextView
             android:id="@+id/gps_log_text"
@@ -84,21 +100,21 @@
             android:scrollbars="vertical"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/inference_time"
+            app:layout_constraintTop_toBottomOf="@id/pool_status_text"
             tools:text="GPS: 대기 중" />
 
-       <TextView
-                android:id="@+id/gnss_log_text"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="16dp"
-                android:layout_marginTop="8dp"
-                android:layout_marginEnd="16dp"
-                android:textSize="10sp"
-                app:layout_constraintEnd_toEndOf="parent"
-                app:layout_constraintStart_toStartOf="parent"
-                app:layout_constraintTop_toBottomOf="@id/gps_log_text"
-                tools:text="GNSS: 대기 중" />
+        <TextView
+            android:id="@+id/gnss_log_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginEnd="16dp"
+            android:textSize="10sp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/gps_log_text"
+            tools:text="GNSS: 대기 중" />
 
         <!-- IMU 로그 -->
         <TextView
@@ -114,15 +130,15 @@
             app:layout_constraintTop_toBottomOf="@id/gnss_log_text"
             tools:text="IMU: 대기 중" />
 
-        <!-- 버튼 레이아웃 - 아래쪽에 배치 -->
+        <!-- 메인 버튼 레이아웃 -->
         <LinearLayout
             android:id="@+id/buttonLayout"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center"
-            android:layout_marginTop="24dp"
-            android:layout_marginBottom="16dp"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp"
             app:layout_constraintTop_toBottomOf="@id/imu_log_text"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent">
@@ -143,16 +159,47 @@
                 android:layout_marginEnd="8dp" />
 
         </LinearLayout>
+
+        <!-- 🎯 풀 관리 버튼 레이아웃 -->
+        <LinearLayout
+            android:id="@+id/poolControlLayout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="8dp"
+            app:layout_constraintTop_toBottomOf="@id/buttonLayout"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent">
+
+            <Button
+                android:id="@+id/button_cleanup_pool"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="풀 정리"
+                android:layout_marginEnd="8dp" />
+
+            <Button
+                android:id="@+id/button_pool_status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="풀 상태"
+                android:layout_marginStart="8dp" />
+
+        </LinearLayout>
+
+        <!-- 설정 및 컨트롤 레이아웃 -->
         <LinearLayout
             android:id="@+id/controlLayout"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:gravity="center"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="8dp"
             android:layout_marginStart="16dp"
             android:layout_marginEnd="16dp"
-            app:layout_constraintTop_toBottomOf="@id/buttonLayout"
+            app:layout_constraintTop_toBottomOf="@id/poolControlLayout"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent">
 

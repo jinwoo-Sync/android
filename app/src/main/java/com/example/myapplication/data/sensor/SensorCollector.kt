@@ -1529,6 +1529,42 @@ class SensorCollector(private val context: Context) {
         return availableMemory > requiredMemory * 2
     }
 
+    /**
+     * 🎯 UI에서 요청하는 풀 정리 (Repository를 통해 호출됨)
+     */
+    fun requestPoolCleanup() {
+        try {
+            if (::zeroCopyPool.isInitialized) {
+                zeroCopyPool.forceCleanupStaleReferences()
+                Log.d(TAG, "🧹 SensorCollector: 풀 정리 요청 처리 완료")
+            } else {
+                Log.w(TAG, "⚠️ SensorCollector: 풀이 초기화되지 않음")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ SensorCollector: 풀 정리 실패: ${e.message}", e)
+            throw e
+        }
+    }
+
+    /**
+     * 🎯 UI에서 요청하는 풀 상세 상태 조회 (Repository를 통해 호출됨)
+     */
+    fun getPoolDetailedStatus(): String {
+        return try {
+            if (::zeroCopyPool.isInitialized) {
+                val status = zeroCopyPool.getDetailedStatus()
+                Log.d(TAG, "📊 SensorCollector: 풀 상태 조회 완료")
+                status
+            } else {
+                Log.w(TAG, "⚠️ SensorCollector: 풀이 초기화되지 않음")
+                "비트맵 풀이 초기화되지 않았습니다."
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ SensorCollector: 풀 상태 조회 실패: ${e.message}", e)
+            "풀 상태 조회 실패: ${e.message}"
+        }
+    }
+
     fun setFrameSkipInterval(interval: Int) {
         frameSkipInterval = if (interval > 0) interval else 10
         Log.d(TAG, "Frame skip interval set to $frameSkipInterval")
