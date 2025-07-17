@@ -13,6 +13,8 @@ import com.example.myapplication.learning.yolo.BoundingBox
 import com.example.myapplication.model.SensorData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import android.view.Choreographer
+
 
 class HomeViewModel(
     private val sensorCollector: SensorCollector,
@@ -73,12 +75,18 @@ class HomeViewModel(
     private val _syncStatus = MutableLiveData<String>()
     val syncStatus: LiveData<String> = _syncStatus
 
-    // 🎯 풀 상태 정보를 UI에 노출
+    // 풀 상태 정보를 UI에 노출
     private val _poolStatus = MutableLiveData<String>()
     val poolStatus: LiveData<String> = _poolStatus
 
     private var isSensorStreamingStarted = false
     private var isCameraStreamingJob: kotlinx.coroutines.Job? = null
+
+    // 간단한 Surface FPS 모니터링
+    private var surfaceFpsMonitor: Choreographer.FrameCallback? = null
+    private var lastFpsCheckTime = 0L
+    private var frameCount = 0
+    private val FPS_THRESHOLD = 15.0  // 15fps 이하면 풀 정리
 
     fun setServerTransmissionEnabled(enabled: Boolean) {
         _isServerTransmissionEnabled.postValue(enabled)
@@ -263,6 +271,9 @@ class HomeViewModel(
         Log.d(TAG, "📹 카메라 스트리밍 시작")
         _text.value = "카메라 스트리밍 중..."
 
+        // Surface FPS 모니터링 시작
+        startSurfaceFpsMonitoring()
+
         homeRepository.detectionCallback = { boundingBoxes, inferenceTime, frameId ->
             Log.d(TAG, "🎯 ViewModel Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
 
@@ -320,6 +331,8 @@ class HomeViewModel(
 
         isCameraStreamingJob?.cancel()
         isCameraStreamingJob = null
+
+        stopSurfaceFpsMonitoring()
 
         homeRepository.stopCameraStreaming()
         _text.value = "카메라 스트리밍 중지됨"
@@ -472,5 +485,54 @@ class HomeViewModel(
                 Log.e("HomeViewModel", "Failed to update sync status: ${e.message}", e)
             }
         }
+    }
+
+    /**
+     * Surface FPS 모니터링 시작 (매우 간단)
+     */
+    private fun startSurfaceFpsMonitoring() {
+        lastFpsCheckTime = System.currentTimeMillis()
+        frameCount = 0
+
+        surfaceFpsMonitor = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                frameCount++
+                val currentTime = System.currentTimeMillis()
+
+                // 1초마다 FPS 체크
+                if (currentTime - lastFpsCheckTime >= 1000) {
+                    val fps = frameCount * 1000.0 / (currentTime - lastFpsCheckTime)
+
+                    // FPS가 임계값 이하면 기존 풀 정리 함수 호출
+                    if (fps < FPS_THRESHOLD) {
+                        Log.w(TAG, "⚠️ Surface FPS 낮음: ${String.format("%.1f", fps)}fps")
+                        forceCleanupBitmapPool()  // 기존 함수 그대로 호출
+                    }
+
+                    // 리셋
+                    lastFpsCheckTime = currentTime
+                    frameCount = 0
+                }
+
+                // 다음 프레임 등록
+                if (surfaceFpsMonitor != null) {
+                    Choreographer.getInstance().postFrameCallback(this)
+                }
+            }
+        }
+
+        Choreographer.getInstance().postFrameCallback(surfaceFpsMonitor!!)
+        Log.d(TAG, "🎯 Surface FPS 모니터링 시작")
+    }
+
+    /**
+     * Surface FPS 모니터링 중지
+     */
+    private fun stopSurfaceFpsMonitoring() {
+        surfaceFpsMonitor?.let {
+            Choreographer.getInstance().removeFrameCallback(it)
+        }
+        surfaceFpsMonitor = null
+        Log.d(TAG, "🛑 Surface FPS 모니터링 중지")
     }
 }
