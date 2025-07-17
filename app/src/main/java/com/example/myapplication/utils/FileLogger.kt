@@ -69,7 +69,9 @@ class FileLogger private constructor(private val context: Context) {
 
     fun stopFileLogging() {
         isLoggingActive = false
-        processLogQueue() // 남은 로그 처리
+        runBlocking {
+            processLogQueue() // 남은 로그 처리
+        }
         Log.d(TAG, "📝 파일 로깅 중지")
     }
 
