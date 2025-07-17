@@ -52,6 +52,10 @@ class HomeViewModel(
     }
     val imuData: LiveData<String> = _imuData
 
+    // UI 풀 복구 신호 추가
+    private val _shouldRecoverUIPool = MutableLiveData<Boolean>()
+    val shouldRecoverUIPool: LiveData<Boolean> = _shouldRecoverUIPool
+
     private val _isStreaming = MutableLiveData<Boolean>(false)
     val isStreaming: LiveData<Boolean> = _isStreaming
 
@@ -93,7 +97,7 @@ class HomeViewModel(
     }
 
     /**
-     * 🎯 단순화된 카메라 프레임 업데이트 (SensorData 전체 전달)
+     * 단순화된 카메라 프레임 업데이트 (SensorData 전체 전달)
      */
     private fun updateCameraFrame(sensorData: SensorData?) {
         try {
@@ -102,7 +106,7 @@ class HomeViewModel(
                 sensorData.bitmap.width > 0 &&
                 sensorData.bitmap.height > 0) {
 
-                // 🛡️ UI 스레드에서 안전한 비트맵 검증
+                // UI 스레드에서 안전한 비트맵 검증
                 viewModelScope.launch(Dispatchers.Main.immediate) {
                     try {
                         if (!sensorData.bitmap.isRecycled) {
@@ -128,7 +132,7 @@ class HomeViewModel(
     }
 
     /**
-     * 🎯 비트맵 풀 강제 정리 (UI 제어)
+     * 비트맵 풀 강제 정리 (UI 제어)
      */
     fun forceCleanupBitmapPool() {
         try {
@@ -150,7 +154,7 @@ class HomeViewModel(
     }
 
     /**
-     * 🎯 풀 상태 업데이트
+     * 풀 상태 업데이트
      */
     fun updatePoolStatus() {
         try {
@@ -215,16 +219,16 @@ class HomeViewModel(
                 Log.d(TAG, "🎯 ViewModel Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
 
                 if (boundingBoxes.isNotEmpty()) {
-                    Log.d(TAG, "🎯 ViewModel에서 처리할 객체들: ${boundingBoxes.map { "${it.clsName}(conf=${it.cnf})" }}")
+                    Log.d(TAG, " ViewModel에서 처리할 객체들: ${boundingBoxes.map { "${it.clsName}(conf=${it.cnf})" }}")
                 }
 
                 viewModelScope.launch(Dispatchers.Main.immediate) {
                     try {
                         _boundingBoxes.value = boundingBoxes
                         _inferenceTime.value = "${inferenceTime}ms"
-                        Log.d(TAG, "🎯 UI 업데이트 완료: ${boundingBoxes.size}개 바운딩박스, ${inferenceTime}ms")
+                        Log.d(TAG, "UI 업데이트 완료: ${boundingBoxes.size}개 바운딩박스, ${inferenceTime}ms")
                     } catch (e: Exception) {
-                        Log.e(TAG, "🎯 UI 업데이트 실패: ${e.message}", e)
+                        Log.e(TAG, "UI 업데이트 실패: ${e.message}", e)
                     }
                 }
 
@@ -260,7 +264,7 @@ class HomeViewModel(
     }
 
     /**
-     * ✅ 카메라 스트리밍 시작
+     *  카메라 스트리밍 시작
      */
     private fun startCameraStreaming() {
         if (_isStreaming.value == true) {
@@ -268,7 +272,7 @@ class HomeViewModel(
             return
         }
 
-        Log.d(TAG, "📹 카메라 스트리밍 시작")
+        Log.d(TAG, " 카메라 스트리밍 시작")
         _text.value = "카메라 스트리밍 중..."
 
         // Surface FPS 모니터링 시작
@@ -488,7 +492,7 @@ class HomeViewModel(
     }
 
     /**
-     * Surface FPS 모니터링 시작 (매우 간단)
+     * Surface FPS 모니터링 시작
      */
     private fun startSurfaceFpsMonitoring() {
         lastFpsCheckTime = System.currentTimeMillis()
@@ -507,6 +511,8 @@ class HomeViewModel(
                     if (fps < FPS_THRESHOLD) {
                         Log.w(TAG, "⚠️ Surface FPS 낮음: ${String.format("%.1f", fps)}fps")
                         forceCleanupBitmapPool()  // 기존 함수 그대로 호출
+
+                        _shouldRecoverUIPool.postValue(true) // ui bitmap pool도 정리
                     }
 
                     // 리셋

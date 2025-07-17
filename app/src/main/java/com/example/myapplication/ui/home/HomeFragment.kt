@@ -270,7 +270,7 @@ class HomeFragment : Fragment() {
         resourceMonitor = ResourceMonitor.getInstance(requireContext())
 
         // UI 풀 초기화
-        bitmapPool = CircularBitmapPool(poolSize = 3, width = 840, height = 840)
+        bitmapPool = CircularBitmapPool(poolSize = 6, width = 840, height = 840)
         if (bitmapPool?.initialize() != true) {
             throw RuntimeException("UI 비트맵 풀 초기화 실패")
         }
@@ -304,7 +304,7 @@ class HomeFragment : Fragment() {
 
             // 풀 재구축
             bitmapPool?.cleanup()
-            bitmapPool = CircularBitmapPool(poolSize = 3, width = 840, height = 840)
+            bitmapPool = CircularBitmapPool(poolSize = 6, width = 840, height = 840)
 
             if (bitmapPool?.initialize() == true) {
                 frameSkipCount = 0
@@ -588,6 +588,15 @@ class HomeFragment : Fragment() {
 
         viewModel.isServerTransmissionEnabled.observe(viewLifecycleOwner) { enabled ->
             binding.streamingCheckbox.isChecked = enabled
+        }
+
+        // 🎯 UI 풀 복구 신호 Observer 추가
+        viewModel.shouldRecoverUIPool.observe(viewLifecycleOwner) { shouldRecover ->
+            if (shouldRecover) {
+                Log.w("HomeFragment", "🚨 Surface FPS 드롭으로 인한 UI 풀 자동 복구 실행")
+                recoverPool() // 기존 함수 그대로 호출
+                showToast("Surface FPS 드롭 감지 - UI 풀 자동 복구 완료")
+            }
         }
     }
 
