@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Paint
 import android.location.LocationManager
 import android.net.Uri
 import android.os.Bundle
@@ -29,66 +30,134 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * 개선된 순환 비트맵 풀 - 실시간 카메라 스트리밍 최적화
+ * 공통 유틸리티 모음
+ */
+private object FragmentUtils {
+    fun logEvent(tag: String, level: String, message: String, exception: Exception? = null) {
+        when (level.uppercase()) {
+            "ERROR" -> Log.e(tag, message, exception)
+            "WARN" -> Log.w(tag, message)
+            "DEBUG" -> Log.d(tag, message)
+            "INFO" -> Log.i(tag, message)
+        }
+    }
+
+    fun showToast(context: Context, message: String, duration: Int = Toast.LENGTH_SHORT) {
+        Toast.makeText(context, message, duration).show()
+    }
+
+    fun createOptimizedPaint(): Paint = Paint().apply {
+        isFilterBitmap = true
+        isAntiAlias = false
+    }
+}
+
+/**
+ * 간소화된 자가치유 비트맵 풀
  */
 class CircularBitmapPool(
-    private val poolSize: Int = 8, // 8개로 추가 후 확인 필요
+    private val poolSize: Int = 6,
     private val width: Int = 840,
     private val height: Int = 840,
     private val config: Bitmap.Config = Bitmap.Config.ARGB_8888
 ) {
     private val bitmapPool = Array<Bitmap?>(poolSize) { null }
-    private val usageState = Array(poolSize) { false }  // false: available, true: in-use
+    private val usageState = Array(poolSize) { false }
     private var currentIndex = 0
     private val poolLock = Object()
     private var isInitialized = false
 
+    // 상태 추적
+    private var consecutiveFailures = 0
+    private var lastSuccessTime = System.currentTimeMillis()
+
     fun initialize(): Boolean {
         return synchronized(poolLock) {
-            if (isInitialized) {
-                Log.d("BitmapPool", "✅ 비트맵 풀 이미 초기화됨")
-                return true
-            }
-
-            try {
-                repeat(poolSize) { index ->
-                    bitmapPool[index] = Bitmap.createBitmap(width, height, config)
-                    usageState[index] = false
-                    Log.d("BitmapPool", "✅ 비트맵 $index 초기화 완료: ${width}x${height}")
-                }
-                isInitialized = true
-                Log.d("BitmapPool", "🎯 비트맵 풀 전체 초기화 완료")
-                true
-            } catch (e: Exception) {
-                Log.e("BitmapPool", "❌ 비트맵 풀 초기화 실패: ${e.message}", e)
-                cleanup()
-                false
-            }
+            if (isInitialized) return true
+            executeWithErrorHandling("초기화") { performInitialization() }
         }
+    }
+
+    private fun performInitialization(): Boolean {
+        repeat(poolSize) { index ->
+            bitmapPool[index] = Bitmap.createBitmap(width, height, config)
+            usageState[index] = false
+        }
+        isInitialized = true
+        consecutiveFailures = 0
+        FragmentUtils.logEvent("BitmapPool", "DEBUG", "풀 초기화 완료 (크기: $poolSize)")
+        return true
     }
 
     fun acquireBitmap(): Bitmap? {
         synchronized(poolLock) {
-            if (!isInitialized) {
-                Log.w("BitmapPool", "⚠️ 풀이 초기화되지 않음")
-                return null
-            }
+            if (!isInitialized && !autoRecover()) return null
 
-            repeat(poolSize) { offset ->
-                val index = (currentIndex + offset) % poolSize
-                val bitmap = bitmapPool[index]
-
-                if (bitmap != null && !usageState[index] && !bitmap.isRecycled) {
-                    usageState[index] = true
-                    currentIndex = (index + 1) % poolSize
-                    Log.d("BitmapPool", "🎯 비트맵 $index 할당 성공")
-                    return bitmap
-                }
-            }
-
-            Log.w("BitmapPool", "⚠️ 사용 가능한 비트맵 없음 - 모든 풀이 사용 중")
-            return null
+            return findAvailableBitmap() ?: handleAcquisitionFailure()
         }
+    }
+
+    private fun findAvailableBitmap(): Bitmap? {
+        repeat(poolSize) { offset ->
+            val index = (currentIndex + offset) % poolSize
+            val bitmap = bitmapPool[index]
+
+            if (bitmap != null && !usageState[index] && !bitmap.isRecycled) {
+                usageState[index] = true
+                currentIndex = (index + 1) % poolSize
+                lastSuccessTime = System.currentTimeMillis()
+                consecutiveFailures = 0
+                return bitmap
+            }
+        }
+        return null
+    }
+
+    private fun handleAcquisitionFailure(): Bitmap? {
+        consecutiveFailures++
+        if (consecutiveFailures >= 3) {
+            FragmentUtils.logEvent("BitmapPool", "WARN", "연속 실패 $consecutiveFailures 회 - 자동 복구 시도")
+            return if (autoRecover()) acquireBitmap() else null
+        }
+        return null
+    }
+
+    private fun autoRecover(): Boolean {
+        return executeWithErrorHandling("자동 복구") { performRecovery() }
+    }
+
+    private fun performRecovery(): Boolean {
+        FragmentUtils.logEvent("BitmapPool", "WARN", "자동 복구 시작")
+
+        // 손상된 비트맵 제거
+        bitmapPool.forEachIndexed { index, bitmap ->
+            if (bitmap?.isRecycled == true) {
+                bitmapPool[index] = null
+                usageState[index] = false
+            }
+        }
+
+        // 응급상황시 모든 비트맵 해제
+        if (consecutiveFailures >= 5) {
+            usageState.fill(false)
+        }
+
+        // 누락된 비트맵 재생성
+        repeat(poolSize) { index ->
+            if (bitmapPool[index] == null) {
+                bitmapPool[index] = Bitmap.createBitmap(width, height, config)
+                usageState[index] = false
+            }
+        }
+
+        isInitialized = true
+        consecutiveFailures = 0
+        currentIndex = 0
+
+        val availableCount = usageState.count { !it }
+        FragmentUtils.logEvent("BitmapPool", "WARN", "자동 복구 완료 - 사용가능: $availableCount")
+
+        return availableCount > 0
     }
 
     fun releaseBitmap(bitmap: Bitmap?) {
@@ -98,46 +167,62 @@ class CircularBitmapPool(
             val index = bitmapPool.indexOf(bitmap)
             if (index != -1 && usageState[index]) {
                 usageState[index] = false
-                Log.d("BitmapPool", "🔄 비트맵 $index 반환 완료 - 재사용 준비")
-            } else {
-                Log.w("BitmapPool", "⚠️ 풀에 없는 비트맵 반환 시도")
             }
         }
     }
 
-    fun getPoolStatus(): String {
+    fun isHealthy(): Boolean {
         synchronized(poolLock) {
-            if (!isInitialized) return "Pool Status: NOT_INITIALIZED"
+            if (!isInitialized) return false
+            val available = usageState.count { !it }
+            val recycled = bitmapPool.count { it?.isRecycled == true }
+            return available > 0 && recycled == 0
+        }
+    }
+
+    fun getStatus(): String {
+        synchronized(poolLock) {
+            if (!isInitialized) return "미초기화"
 
             val available = usageState.count { !it }
             val inUse = usageState.count { it }
-            val recycled = bitmapPool.count { it?.isRecycled == true }
-            return "Pool Status: Available=$available, InUse=$inUse, Recycled=$recycled, Total=$poolSize"
+            val healthy = if (isHealthy()) "정상" else "문제"
+
+            return "$healthy | 가용:$available 사용:$inUse"
         }
     }
 
     fun cleanup() {
         synchronized(poolLock) {
-            if (!isInitialized) return
-
-            bitmapPool.forEachIndexed { index, bitmap ->
-                if (bitmap != null && !bitmap.isRecycled) {
-                    try {
-                        bitmap.recycle()
-                        Log.d("BitmapPool", "🗑️ 비트맵 $index 정리 완료")
-                    } catch (e: Exception) {
-                        Log.w("BitmapPool", "비트맵 $index 정리 실패: ${e.message}")
-                    }
-                }
-                bitmapPool[index] = null
-                usageState[index] = false
-            }
-            isInitialized = false
-            Log.d("BitmapPool", "🗑️ 비트맵 풀 전체 정리 완료")
+            executeWithErrorHandling("정리") { performCleanup() }
         }
     }
 
+    private fun performCleanup(): Boolean {
+        bitmapPool.forEachIndexed { index, bitmap ->
+            bitmap?.takeIf { !it.isRecycled }?.recycle()
+            bitmapPool[index] = null
+            usageState[index] = false
+        }
+        isInitialized = false
+        consecutiveFailures = 0
+        return true
+    }
+
     fun isReady(): Boolean = synchronized(poolLock) { isInitialized }
+
+    private fun executeWithErrorHandling(operationName: String, operation: () -> Boolean): Boolean {
+        return try {
+            operation()
+        } catch (e: Exception) {
+            FragmentUtils.logEvent("BitmapPool", "ERROR", "$operationName 실패: ${e.message}", e)
+            if (operationName == "정리") {
+                isInitialized = false
+                consecutiveFailures = 0
+            }
+            false
+        }
+    }
 }
 
 class HomeFragment : Fragment() {
@@ -150,12 +235,11 @@ class HomeFragment : Fragment() {
         )
     }
 
-    // 🎯 UI 전용 CircularBitmapPool
+    // 컴포넌트들
     private var bitmapPool: CircularBitmapPool? = null
     private var currentDisplayBitmap: Bitmap? = null
     private var frameSkipCount = 0
     private var successfulFrameCount = 0
-
     private var resourceMonitor: ResourceMonitor? = null
 
     override fun onCreateView(
@@ -167,41 +251,80 @@ class HomeFragment : Fragment() {
         val root: View = binding.root
 
         try {
-            // 1. 리소스 모니터 초기화
-            resourceMonitor = ResourceMonitor.getInstance(requireContext())
-
-            // 2. UI 전용 순환 비트맵 풀 초기화
-            bitmapPool = CircularBitmapPool(
-                poolSize = 3,
-                width = 840,
-                height = 840
-            )
-
-            val poolInitialized = bitmapPool?.initialize() ?: false
-            if (!poolInitialized) {
-                throw RuntimeException("UI 비트맵 풀 초기화 실패")
-            }
-
-            resourceMonitor?.logAppResourceStatus("HomeFragment", "Fragment 생성 - UI 순환 비트맵 풀 초기화 완료")
-
+            initializeComponents()
             checkGpsAndPermissions()
             setupObservers()
             setupClickListeners()
             viewModel.startSensorStreaming()
-
-            setupPeriodicMemoryCheck()
+            startHealthMonitoring()
 
         } catch (e: Exception) {
-            Log.e("HomeFragment", "Error initializing fragment: ${e.message}", e)
-            resourceMonitor?.logAppResourceStatus("HomeFragment", "초기화 오류: ${e.message}")
-            Toast.makeText(requireContext(), "초기화 오류: ${e.message}", Toast.LENGTH_LONG).show()
+            FragmentUtils.logEvent("HomeFragment", "ERROR", "초기화 오류: ${e.message}", e)
+            showToast("초기화 오류: ${e.message}", true)
         }
 
         return root
     }
 
+    private fun initializeComponents() {
+        resourceMonitor = ResourceMonitor.getInstance(requireContext())
+
+        // UI 풀 초기화
+        bitmapPool = CircularBitmapPool(poolSize = 3, width = 840, height = 840)
+        if (bitmapPool?.initialize() != true) {
+            throw RuntimeException("UI 비트맵 풀 초기화 실패")
+        }
+    }
+
+    private fun startHealthMonitoring() {
+        lifecycleScope.launch {
+            while (isActive) {
+                delay(5000) // 5초마다 체크
+
+                val pool = bitmapPool
+                if (pool != null && !pool.isHealthy()) {
+                    FragmentUtils.logEvent("HomeFragment", "WARN", "풀 건강성 문제 감지 - 복구 시도")
+                    recoverPool()
+                }
+
+                // UI 상태 업데이트
+                binding.poolStatusText.text = pool?.getStatus() ?: "풀 없음"
+            }
+        }
+    }
+
+    private fun recoverPool() {
+        try {
+            // 현재 비트맵 해제
+            currentDisplayBitmap?.let {
+                bitmapPool?.releaseBitmap(it)
+            }
+            currentDisplayBitmap = null
+            binding.imageView.setImageBitmap(null)
+
+            // 풀 재구축
+            bitmapPool?.cleanup()
+            bitmapPool = CircularBitmapPool(poolSize = 3, width = 840, height = 840)
+
+            if (bitmapPool?.initialize() == true) {
+                frameSkipCount = 0
+                showToast("풀 자동 복구 완료")
+                FragmentUtils.logEvent("HomeFragment", "WARN", "풀 복구 성공")
+            } else {
+                FragmentUtils.logEvent("HomeFragment", "ERROR", "풀 복구 실패")
+            }
+        } catch (e: Exception) {
+            FragmentUtils.logEvent("HomeFragment", "ERROR", "풀 복구 중 오류: ${e.message}", e)
+        }
+    }
+
+    private fun performUIPoolEmergencyRecovery() {
+        FragmentUtils.logEvent("HomeFragment", "WARN", "UI Pool 응급 복구 시작")
+        recoverPool()
+    }
+
     /**
-     * 🎯 새로 추가: Raw 비트맵을 UI Pool로 안전하게 복사
+     * 🎯 핵심 함수: Raw 비트맵을 UI Pool로 안전하게 복사
      */
     private fun copyRawBitmapToUIPool(rawBitmap: Bitmap, frameId: Long) {
         val pool = bitmapPool
@@ -296,160 +419,153 @@ class HomeFragment : Fragment() {
         }
     }
 
-    // ✅ UI Pool 응급 복구
-    private fun performUIPoolEmergencyRecovery() {
-        Log.w("HomeFragment", "🚨 UI Pool 응급 복구 시작")
-
-        // 현재 표시 중인 비트맵을 즉시 반환
-        currentDisplayBitmap?.let { bitmap ->
-            bitmapPool?.releaseBitmap(bitmap)
-            Log.d("HomeFragment", "🔄 현재 표시 비트맵 강제 반환")
-        }
-        currentDisplayBitmap = null
-
-        // UI 클리어
-        binding.imageView.setImageBitmap(null)
-
-        // Pool 상태 로깅
-        val poolStatus = bitmapPool?.getPoolStatus() ?: "Pool not available"
-        Log.w("HomeFragment", "📊 복구 후 풀 상태: $poolStatus")
-
-        // 카운터 리셋
-        frameSkipCount = 0
-
-        Log.w("HomeFragment", "✅ UI Pool 응급 복구 완료")
-    }
-
-    /**
-     * 🛡️ 비트맵 유효성 검증 헬퍼
-     */
     private fun isValidBitmap(bitmap: Bitmap?): Boolean {
-        return try {
-            bitmap != null &&
-                    !bitmap.isRecycled &&
-                    bitmap.width > 0 &&
-                    bitmap.height > 0 &&
-                    bitmap.config != null
-        } catch (e: Exception) {
-            Log.w("HomeFragment", "⚠️ 비트맵 검증 중 예외: ${e.message}")
-            false
-        }
+        return bitmap != null && !bitmap.isRecycled && bitmap.width > 0 && bitmap.height > 0
     }
 
-    private fun setupPeriodicMemoryCheck() {
-        lifecycleScope.launch {
-            while (isActive) {
-                delay(15000)
-                resourceMonitor?.let { monitor ->
-                    val warnings = monitor.checkAppMemoryWarnings()
-                    if (warnings.isNotEmpty()) {
-                        Log.w("HomeFragment", "메모리 경고: ${warnings.joinToString()}")
-                        performEmergencyCleanup()
-                    }
-                }
-            }
-        }
-    }
-
-    private fun performEmergencyCleanup() {
-        Log.w("HomeFragment", "🚨 메모리 부족 경고! 응급 정리 작업 수행")
-
-        // 현재 표시 비트맵을 풀로 반환
-        currentDisplayBitmap?.let {
-            bitmapPool?.releaseBitmap(it)
-        }
-        currentDisplayBitmap = null
-        binding.imageView.setImageBitmap(null)
-
-        // UI Pool 정리 후 재초기화
-        bitmapPool?.cleanup()
-        bitmapPool?.initialize()
-
-        viewModel.forceCleanupBitmapPool() // 🎯 ViewModel을 통한 풀 정리
-        System.gc()
-        Log.w("HomeFragment", "🧹 응급 정리 완료")
-    }
-
+    // 권한 관련 메서드들 (Fragment 내부로 이동)
     private fun checkGpsAndPermissions() {
+        checkGpsStatus()
+        checkLocationPermissions()
+    }
+
+    private fun checkGpsStatus() {
         val locationManager = requireContext().getSystemService(Context.LOCATION_SERVICE) as LocationManager
         if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-            AlertDialog.Builder(requireContext())
-                .setMessage("GNSS 데이터 수집을 위해 GPS를 활성화해주세요.")
-                .setPositiveButton("설정으로 이동") { _, _ ->
-                    startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
-                }
-                .setNegativeButton("취소") { dialog, _ -> dialog.dismiss() }
-                .show()
+            showGpsDialog()
         }
+    }
 
+    private fun showGpsDialog() {
+        AlertDialog.Builder(requireContext())
+            .setMessage("GNSS 데이터 수집을 위해 GPS를 활성화해주세요.")
+            .setPositiveButton("설정으로 이동") { _, _ ->
+                startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+            }
+            .setNegativeButton("취소") { dialog, _ -> dialog.dismiss() }
+            .show()
+    }
+
+    private fun checkLocationPermissions() {
         val mainActivity = requireActivity() as MainActivity
 
         if (!mainActivity.isBackgroundLocationPermissionGranted()) {
-            Toast.makeText(requireContext(), "백그라운드 위치 권한이 필요합니다. 설정에서 '항상 허용'을 선택해주세요.", Toast.LENGTH_LONG).show()
+            showToast("백그라운드 위치 권한이 필요합니다. 설정에서 '항상 허용'을 선택해주세요.", true)
         }
 
         if (mainActivity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             binding.gpsLogText.text = "GNSS 데이터 수집을 위해 위치 권한이 필요합니다."
-            AlertDialog.Builder(requireContext())
-                .setMessage("GNSS 데이터 수집을 위해 위치 권한이 필요합니다. 설정 화면으로 이동하시겠습니까?")
-                .setPositiveButton("설정으로 이동") { _, _ ->
-                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                    val uri = Uri.fromParts("package", requireActivity().packageName, null)
-                    intent.data = uri
-                    startActivity(intent)
-                }
-                .setNegativeButton("취소") { dialog, _ -> dialog.dismiss() }
-                .show()
+            showLocationPermissionDialog()
+        }
+    }
+
+    private fun showLocationPermissionDialog() {
+        AlertDialog.Builder(requireContext())
+            .setMessage("GNSS 데이터 수집을 위해 위치 권한이 필요합니다. 설정 화면으로 이동하시겠습니까?")
+            .setPositiveButton("설정으로 이동") { _, _ ->
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                val uri = Uri.fromParts("package", requireActivity().packageName, null)
+                intent.data = uri
+                startActivity(intent)
+            }
+            .setNegativeButton("취소") { dialog, _ -> dialog.dismiss() }
+            .show()
+    }
+
+    // UI 업데이트 헬퍼 메서드들
+    private fun showToast(message: String, isLong: Boolean = false) {
+        FragmentUtils.showToast(requireContext(), message, if (isLong) Toast.LENGTH_LONG else Toast.LENGTH_SHORT)
+    }
+
+    private fun updateStreamingUI(isStreaming: Boolean) {
+        binding.buttonOpenCamera.text = if (isStreaming) "스트리밍 중지" else "스트리밍 시작"
+        binding.buttonCaptureFrame.text = if (isStreaming) "현재 프레임 저장" else "프레임 캡처"
+
+        if (!isStreaming) {
+            clearStreamingState()
+        }
+    }
+
+    private fun clearStreamingState() {
+        binding.overlayView.clear()
+        binding.inferenceTime.text = "Inference: 0ms"
+        currentDisplayBitmap?.let { bitmapPool?.releaseBitmap(it) }
+        currentDisplayBitmap = null
+        binding.imageView.setImageBitmap(null)
+    }
+
+    private fun resetSensorDisplays() {
+        binding.gpsLogText.text = "GPS: 대기 중"
+        binding.gnssLogText.text = "GNSS: 대기 중"
+        binding.imuLogText.text = "IMU: 대기 중"
+    }
+
+    private fun updateFrameSkipIfNeeded(interval: Int) {
+        val currentText = binding.editTextFrameSkip.text.toString()
+        val parsed = currentText.toIntOrNull()
+        if (!binding.editTextFrameSkip.isFocused && parsed != interval) {
+            binding.editTextFrameSkip.setText(interval.toString())
         }
     }
 
     private fun setupObservers() {
+        setupBasicObservers()
+        setupCameraFrameObserver()
+        setupSensorObservers()
+        setupStatusObservers()
+    }
+
+    private fun setupBasicObservers() {
         val textView: TextView = binding.textHome
         viewModel.text.observe(viewLifecycleOwner) { message ->
             textView.text = message
-            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show()
+            showToast(message)
         }
+    }
 
-        // 🎯 Raw 비트맵을 UI Pool로 복사하는 카메라 프레임 처리
+    private fun setupCameraFrameObserver() {
         viewModel.cameraFrame.observe(viewLifecycleOwner) { sensorData ->
             try {
                 if (sensorData?.bitmap != null && !sensorData.bitmap.isRecycled) {
-                    // 🔥 핵심: Raw 비트맵을 UI Pool로 안전하게 복사
                     copyRawBitmapToUIPool(sensorData.bitmap, sensorData.frameId)
-                    Log.d("HomeFragment", "✅ Raw bitmap copied to UI pool: frameId=${sensorData.frameId}")
                 } else {
-                    // Raw 비트맵이 없으면 UI 클리어
-                    currentDisplayBitmap?.let {
-                        bitmapPool?.releaseBitmap(it)
-                    }
+                    currentDisplayBitmap?.let { bitmapPool?.releaseBitmap(it) }
                     currentDisplayBitmap = null
                     binding.imageView.setImageBitmap(null)
-                    Log.d("HomeFragment", "⚠️ Raw frame cleared (null or recycled bitmap)")
                 }
             } catch (e: Exception) {
-                Log.e("HomeFragment", "Raw → UI Pool 복사 오류: ${e.message}", e)
+                FragmentUtils.logEvent("HomeFragment", "ERROR", "프레임 처리 오류: ${e.message}", e)
                 binding.imageView.setImageBitmap(null)
             }
         }
+    }
 
-        // 🎯 풀 상태 관찰자
+    private fun setupSensorObservers() {
+        viewModel.gpsData.observe(viewLifecycleOwner) { data ->
+            binding.gpsLogText.text = data
+        }
+
+        viewModel.gnssData.observe(viewLifecycleOwner) { data ->
+            binding.gnssLogText.text = if (data == "GNSS: 대기 중") {
+                "GNSS 데이터가 수신되지 않습니다."
+            } else {
+                data
+            }
+        }
+
+        viewModel.imuData.observe(viewLifecycleOwner) { data ->
+            binding.imuLogText.text = data
+        }
+    }
+
+    private fun setupStatusObservers() {
         viewModel.poolStatus.observe(viewLifecycleOwner) { status ->
             binding.poolStatusText.text = status
-            Log.d("HomeFragment", "📊 Pool status updated: $status")
         }
 
         viewModel.boundingBoxes.observe(viewLifecycleOwner) { boundingBoxes ->
-            try {
-                binding.overlayView.setResults(boundingBoxes)
-                binding.overlayView.invalidate()
-
-                if (boundingBoxes.isNotEmpty()) {
-                    Log.d("HomeFragment", "🎯 UI에서 ${boundingBoxes.size}개 객체 표시")
-                }
-            } catch (e: Exception) {
-                Log.e("HomeFragment", "바운딩 박스 처리 오류: ${e.message}", e)
-                binding.overlayView.clear()
-            }
+            binding.overlayView.setResults(boundingBoxes)
+            binding.overlayView.invalidate()
         }
 
         viewModel.inferenceTime.observe(viewLifecycleOwner) { time ->
@@ -457,65 +573,21 @@ class HomeFragment : Fragment() {
         }
 
         viewModel.effectiveInterval.observe(viewLifecycleOwner) { interval ->
-            val currentText = binding.editTextFrameSkip.text.toString()
-            val parsed = currentText.toIntOrNull()
-            if (!binding.editTextFrameSkip.isFocused && parsed != interval) {
-                binding.editTextFrameSkip.setText(interval.toString())
-            }
-        }
-
-        viewModel.gpsData.observe(viewLifecycleOwner) { data ->
-            binding.gpsLogText.text = data
-            //Log.d("HomeFragment", "📍 GPS 데이터 UI 업데이트: $data")
-        }
-
-        viewModel.gnssData.observe(viewLifecycleOwner) { data ->
-            if (data == "GNSS: 대기 중") {
-                binding.gnssLogText.text = "GNSS 데이터가 수신되지 않습니다."
-            } else {
-                binding.gnssLogText.text = data
-            }
-            Log.d("HomeFragment", "🛰️ GNSS 데이터 UI 업데이트: $data")
-        }
-
-        viewModel.imuData.observe(viewLifecycleOwner) { data ->
-            binding.imuLogText.text = data
+            updateFrameSkipIfNeeded(interval)
         }
 
         viewModel.isStreaming.observe(viewLifecycleOwner) { isStreaming ->
-            binding.buttonOpenCamera.text = if (isStreaming) "스트리밍 중지" else "스트리밍 시작"
-            binding.buttonCaptureFrame.text = if (isStreaming) "현재 프레임 저장" else "프레임 캡처"
-
-            if (!isStreaming) {
-                binding.overlayView.clear()
-                binding.inferenceTime.text = "Inference: 0ms"
-
-                // UI Pool 비트맵 정리
-                currentDisplayBitmap?.let {
-                    bitmapPool?.releaseBitmap(it)
-                }
-                currentDisplayBitmap = null
-                binding.imageView.setImageBitmap(null)
-
-                Log.d("HomeFragment", "🔴 Camera streaming stopped - UI cleared")
-            } else {
-                Log.d("HomeFragment", "🟢 Camera streaming started - UI ready")
-            }
-            Log.d("HomeFragment", "✅ Camera streaming status changed: $isStreaming")
+            updateStreamingUI(isStreaming)
         }
 
         viewModel.isSensorStreaming.observe(viewLifecycleOwner) { isSensorStreaming ->
-            Log.d("HomeFragment", "🔧 Sensor streaming status: $isSensorStreaming")
             if (!isSensorStreaming) {
-                binding.gpsLogText.text = "GPS: 대기 중"
-                binding.gnssLogText.text = "GNSS: 대기 중"
-                binding.imuLogText.text = "IMU: 대기 중"
+                resetSensorDisplays()
             }
         }
 
         viewModel.isServerTransmissionEnabled.observe(viewLifecycleOwner) { enabled ->
             binding.streamingCheckbox.isChecked = enabled
-            Log.d("HomeFragment", "Server streaming checkbox updated: $enabled")
         }
     }
 
@@ -523,150 +595,108 @@ class HomeFragment : Fragment() {
         val mainActivity = requireActivity() as MainActivity
 
         binding.buttonOpenCamera.setOnClickListener {
-            if (mainActivity.isCameraPermissionGranted() &&
-                mainActivity.isLocationPermissionGranted() &&
-                mainActivity.isBackgroundLocationPermissionGranted()) {
-                lifecycleScope.launch {
-                    viewModel.toggleStreaming(requireContext())
-                    Log.d("HomeFragment", "✅ Camera streaming toggle requested")
-                }
-            } else {
-                Toast.makeText(requireContext(), "카메라와 위치 권한이 필요합니다", Toast.LENGTH_SHORT).show()
-                Log.w("HomeFragment", "⚠️ Missing permissions for camera streaming")
-            }
+            handleCameraButtonClick(mainActivity)
         }
 
         binding.buttonCaptureFrame.setOnClickListener {
-            if (mainActivity.isCameraPermissionGranted()) {
-                lifecycleScope.launch {
-                    viewModel.fetchCameraData()
-                    Log.d("HomeFragment", "✅ Frame capture requested")
-                }
-            } else {
-                Toast.makeText(requireContext(), "카메라 권한이 필요합니다", Toast.LENGTH_SHORT).show()
-                Log.w("HomeFragment", "⚠️ Missing camera permission for frame capture")
-            }
+            handleCaptureButtonClick(mainActivity)
         }
 
-        // 🎯 풀 정리 버튼
         binding.buttonCleanupPool.setOnClickListener {
             viewModel.forceCleanupBitmapPool()
-            // UI Pool도 정리
-            bitmapPool?.cleanup()
-            bitmapPool?.initialize()
-            Toast.makeText(requireContext(), "비트맵 풀 정리 요청", Toast.LENGTH_SHORT).show()
-            Log.d("HomeFragment", "🧹 Pool cleanup requested")
+            recoverPool() // UI Pool도 정리
+            showToast("비트맵 풀 정리 완료")
         }
 
-        // 🎯 풀 상태 업데이트 버튼
         binding.buttonPoolStatus.setOnClickListener {
             viewModel.updatePoolStatus()
-            Toast.makeText(requireContext(), "풀 상태 업데이트", Toast.LENGTH_SHORT).show()
-            Log.d("HomeFragment", "📊 Pool status update requested")
+            showToast("풀 상태 업데이트")
         }
 
         binding.loggingCheckbox.setOnCheckedChangeListener { _, isChecked ->
             viewModel.toggleLogSaving(requireContext(), isChecked)
-            Log.d("HomeFragment", "Logging checkbox changed: $isChecked")
         }
 
         binding.streamingCheckbox.setOnCheckedChangeListener { _, isChecked ->
-            Log.d("HomeFragment", "Streaming checkbox changed: $isChecked")
             lifecycleScope.launch {
                 viewModel.setServerStreamingEnabled(requireContext(), isChecked)
-                Log.d("HomeFragment", "Server streaming checkbox updated: $isChecked")
             }
         }
 
         binding.buttonSetFrameSkip.setOnClickListener {
-            val intervalText = binding.editTextFrameSkip.text.toString()
-            val interval = intervalText.toIntOrNull()
-            if (interval != null && interval in 2..15) {
-                viewModel.setUserFrameSkipInterval(interval)
-                Toast.makeText(requireContext(), "Frame skip interval set to $interval", Toast.LENGTH_SHORT).show()
-                Log.d("HomeFragment", "Frame skip interval set to: $interval")
-            } else {
-                Toast.makeText(requireContext(), "Please enter a valid integer between 2 and 15", Toast.LENGTH_SHORT).show()
-                Log.w("HomeFragment", "Invalid frame skip interval: $intervalText")
-            }
+            handleFrameSkipButtonClick()
         }
     }
 
-    private fun checkAndRequestPermissions() {
-        val permissions = arrayOf(
-            Manifest.permission.WRITE_EXTERNAL_STORAGE,
-            Manifest.permission.READ_EXTERNAL_STORAGE,
-            Manifest.permission.CAMERA,
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.ACCESS_BACKGROUND_LOCATION
-        )
-        val permissionsToRequest = permissions.filter {
-            ContextCompat.checkSelfPermission(requireContext(), it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (permissionsToRequest.isNotEmpty()) {
-            requestPermissions(permissionsToRequest.toTypedArray(), REQUEST_CODE_PERMISSIONS)
+    private fun handleCameraButtonClick(mainActivity: MainActivity) {
+        if (hasRequiredPermissions(mainActivity)) {
+            lifecycleScope.launch {
+                viewModel.toggleStreaming(requireContext())
+            }
+        } else {
+            showToast("카메라와 위치 권한이 필요합니다")
         }
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_CODE_PERMISSIONS) {
-            if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-                Log.d("HomeFragment", "✅ 모든 권한이 부여되었습니다")
-                viewModel.startSensorStreaming()
-            } else {
-                Toast.makeText(requireContext(), "필요한 권한이 부여되지 않았습니다", Toast.LENGTH_LONG).show()
-                Log.w("HomeFragment", "⚠️ 일부 권한이 거부되었습니다")
+    private fun handleCaptureButtonClick(mainActivity: MainActivity) {
+        if (mainActivity.isCameraPermissionGranted()) {
+            lifecycleScope.launch {
+                viewModel.fetchCameraData()
             }
+        } else {
+            showToast("카메라 권한이 필요합니다")
         }
+    }
+
+    private fun handleFrameSkipButtonClick() {
+        val intervalText = binding.editTextFrameSkip.text.toString()
+        val interval = intervalText.toIntOrNull()
+
+        if (interval != null && interval in 2..15) {
+            viewModel.setUserFrameSkipInterval(interval)
+            showToast("Frame skip interval set to $interval")
+        } else {
+            showToast("Please enter a valid integer between 2 and 15")
+        }
+    }
+
+    private fun hasRequiredPermissions(mainActivity: MainActivity): Boolean {
+        return mainActivity.isCameraPermissionGranted() &&
+                mainActivity.isLocationPermissionGranted() &&
+                mainActivity.isBackgroundLocationPermissionGranted()
     }
 
     override fun onResume() {
         super.onResume()
-        Log.d("HomeFragment", "📱 Fragment resumed - starting sensor streaming only")
-        resourceMonitor?.logAppResourceStatus("HomeFragment", "Fragment resumed")
         viewModel.startSensorStreaming()
         viewModel.updatePoolStatus()
     }
 
     override fun onPause() {
         super.onPause()
-        Log.d("HomeFragment", "📱 Fragment paused - sensor streaming continues")
-        resourceMonitor?.logAppResourceStatus("HomeFragment", "Fragment paused")
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
-        Log.d("HomeFragment", "📱 Fragment destroying")
-        resourceMonitor?.logAppResourceStatus("HomeFragment", "Fragment 종료 시작")
 
-        // 현재 표시 비트맵을 풀로 반환
+        // 정리 작업
         currentDisplayBitmap?.let {
             bitmapPool?.releaseBitmap(it)
-            Log.d("HomeFragment", "🔄 현재 표시 비트맵 풀 반환 완료")
         }
         currentDisplayBitmap = null
 
-        // 성능 통계 로그
+        // 성능 통계
         val total = frameSkipCount + successfulFrameCount
         if (total > 0) {
             val successRate = (successfulFrameCount.toFloat() / total * 100)
-            Log.i("HomeFragment", "📊 최종 성능 통계 - 성공률: %.1f%% (성공: %d, 스킵: %d, 총: %d)".format(
-                successRate, successfulFrameCount, frameSkipCount, total))
+            FragmentUtils.logEvent("HomeFragment", "INFO",
+                "성공률: %.1f%% (성공: %d, 스킵: %d)".format(successRate, successfulFrameCount, frameSkipCount))
         }
 
-        // UI 비트맵 풀 정리
         bitmapPool?.cleanup()
         bitmapPool = null
-        Log.d("HomeFragment", "🗑️ UI 순환 비트맵 풀 정리 완료")
-
         viewModel.stopSensorStreaming()
         _binding = null
-        resourceMonitor?.logAppResourceStatus("HomeFragment", "Fragment 종료 완료 - UI 순환 비트맵 풀 정리됨")
         resourceMonitor = null
     }
 

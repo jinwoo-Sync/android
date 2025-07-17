@@ -709,7 +709,7 @@ class LoggerManager private constructor(
 
                     // 🎯 GPS 복구 감지 시 즉시 처리
                     if (dataSynchronizer.hasGpsRecoveryData()) {
-                        Log.d(TAG, "🎯 GPS 복구 감지 - 즉시 처리 시작")
+                        //Log.d(TAG, "🎯 GPS 복구 감지 - 즉시 처리 시작")
                         processGpsRecovery()
                     }
 
@@ -774,11 +774,11 @@ class LoggerManager private constructor(
         try {
             // ✅ 로깅이 비활성화되어 있으면 GPS 복구만 수행하고 저장은 스킵
             if (!isLogSavingEnabled) {
-                Log.w(TAG, "⚠️ 로깅 비활성화 상태 - GPS 복구 데이터 저장 스킵")
+                //Log.w(TAG, "⚠️ 로깅 비활성화 상태 - GPS 복구 데이터 저장 스킵")
             
                 // GPS 복구는 수행하되 파일 저장은 하지 않음
                 if (dataSynchronizer.hasGpsRecoveryData()) {
-                    Log.d(TAG, "🎯 GPS 복구 감지 (저장 스킵)")
+                    //Log.d(TAG, "🎯 GPS 복구 감지 (저장 스킵)")
                 }
                 return@withContext
             }
