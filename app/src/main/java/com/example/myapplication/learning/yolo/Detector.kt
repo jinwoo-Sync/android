@@ -225,25 +225,32 @@ class Detector(
             detectorListener.onEmptyDetect()
             return
         }
-        var inferenceTime = SystemClock.uptimeMillis()
 
         try {
+            // 🎯 전처리 단계 (시간 측정 제외)
             val resizedBitmap = Bitmap.createScaledBitmap(frame, tensorWidth, tensorHeight, false)
             val tensorImage = TensorImage(INPUT_IMAGE_TYPE)
             tensorImage.load(resizedBitmap)
             val processedImage = imageProcessor.process(tensorImage)
             val imageBuffer = processedImage.buffer
             val output = TensorBuffer.createFixedSize(intArrayOf(1, numChannel, numElements), OUTPUT_IMAGE_TYPE)
+
+            // ✅ 순수 GPU 추론 시간만 측정
+            val pureInferenceStart = SystemClock.uptimeMillis()
             interpreter.run(imageBuffer, output.buffer)
+            val pureInferenceTime = SystemClock.uptimeMillis() - pureInferenceStart
+
+            // 🎯 후처리 단계 (시간 측정 제외)
             val bestBoxes = bestBox(output.floatArray)
-            inferenceTime = SystemClock.uptimeMillis() - inferenceTime
 
             if (bestBoxes == null) {
                 detectorListener.onEmptyDetect()
                 return
             }
 
-            detectorListener.onDetect(bestBoxes, inferenceTime, frameId)
+            // ✅ 순수 추론 시간만 전달
+            detectorListener.onDetect(bestBoxes, pureInferenceTime, frameId)
+
         } catch (e: Exception) {
             Log.e(TAG, "Error in detection process: ${e.message}", e)
             detectorListener.onEmptyDetect()
