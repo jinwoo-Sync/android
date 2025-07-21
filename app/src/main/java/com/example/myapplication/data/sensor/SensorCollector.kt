@@ -344,8 +344,8 @@ class SensorCollector(private val context: Context) {
                         gpsCallback?.invoke(sensorData)
                         /**
                          * Log.d(
-                        *    TAG,
-                        *    "✅ GPS 콜백 호출: Lat=${location.latitude}, Lon=${location.longitude}"
+                         *    TAG,
+                         *    "✅ GPS 콜백 호출: Lat=${location.latitude}, Lon=${location.longitude}"
                         ) */
                     }
                 }

@@ -89,7 +89,7 @@ class CircularBitmapPool(
                 bitmapPool[index] = Bitmap.createBitmap(width, height, config)
                 usageState[index] = false
             } catch (e: OutOfMemoryError) {
-                FragmentUtils.logEvent(TAG, "ERROR", "초기화 중 OOM: $index", e)
+                FragmentUtils.logEvent(TAG, "ERROR", "초기화 중 OOM: $index", e as Exception)
                 return false
             }
         }
@@ -179,7 +179,7 @@ class CircularBitmapPool(
                         usageState[index] = false
                         recreatedCount++
                     } catch (e: OutOfMemoryError) {
-                        FragmentUtils.logEvent(TAG, "ERROR", "복구 중 OOM: $index", e)
+                        FragmentUtils.logEvent(TAG, "ERROR", "복구 중 OOM: $index", e as Exception)
                         // GC 후 재시도
                         System.gc()
                         Thread.sleep(100)
@@ -188,8 +188,8 @@ class CircularBitmapPool(
                             usageState[index] = false
                             recreatedCount++
                         } catch (e2: OutOfMemoryError) {
-                            FragmentUtils.logEvent(TAG, "ERROR", "복구 재시도 실패: $index", e2)
-                            break
+                            FragmentUtils.logEvent(TAG, "ERROR", "복구 재시도 실패: $index", e2 as Exception)
+                            return@repeat  // ✅ 현재 iteration만 종료
                         }
                     }
                 }
