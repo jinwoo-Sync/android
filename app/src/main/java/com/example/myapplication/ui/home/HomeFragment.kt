@@ -58,7 +58,7 @@ private object FragmentUtils {
  * 🚀 강화된 자가치유 비트맵 풀 - 완전한 복구 지원
  */
 class CircularBitmapPool(
-    private val poolSize: Int = 6,
+    private val poolSize: Int = 20,
     private val width: Int = 840,
     private val height: Int = 840,
     private val config: Bitmap.Config = Bitmap.Config.ARGB_8888
@@ -79,7 +79,27 @@ class CircularBitmapPool(
     fun initialize(): Boolean {
         return synchronized(poolLock) {
             if (isInitialized) return true
-            executeWithErrorHandling("초기화") { performInitialization() }
+
+            // ✅ 더 보수적인 초기화
+            repeat(poolSize) { index ->
+                try {
+                    Thread.sleep(50) // 비트맵 생성 간 지연
+                    bitmapPool[index] = Bitmap.createBitmap(width, height, config)
+                    usageState[index] = false
+                } catch (e: OutOfMemoryError) {
+                    FragmentUtils.logEvent(TAG, "ERROR", "초기화 중 OOM: $index", e as Exception)
+                    // 생성 실패시 중단하지 않고 계속 시도
+                    System.gc()
+                    Thread.sleep(100)
+                    return@repeat
+                }
+            }
+
+            val validBitmaps = bitmapPool.count { it != null && !it.isRecycled }
+            isInitialized = validBitmaps >= (poolSize / 2) // 절반 이상 성공하면 OK
+
+            FragmentUtils.logEvent(TAG, "DEBUG", "풀 초기화 완료 (유효: $validBitmaps/$poolSize)")
+            return isInitialized
         }
     }
 
@@ -353,7 +373,7 @@ class HomeFragment : Fragment() {
         resourceMonitor = ResourceMonitor.getInstance(requireContext())
 
         // UI 풀 초기화
-        bitmapPool = CircularBitmapPool(poolSize = 6, width = 840, height = 840)
+        bitmapPool = CircularBitmapPool(poolSize = 20, width = 840, height = 840)
         if (bitmapPool?.initialize() != true) {
             throw RuntimeException("UI 비트맵 풀 초기화 실패")
         }
@@ -362,7 +382,7 @@ class HomeFragment : Fragment() {
     private fun startHealthMonitoring() {
         lifecycleScope.launch {
             while (isActive) {
-                delay(3000) // 3초마다 체크
+                delay(5000) // 3초마다 체크
 
                 val pool = bitmapPool
                 if (pool != null && !pool.isHealthy()) {
@@ -383,8 +403,8 @@ class HomeFragment : Fragment() {
         try {
             val currentTime = System.currentTimeMillis()
 
-            // 복구 빈도 제한 (1초에 1회)
-            if (currentTime - lastRecoveryTime < 1000) {
+            // ✅ 복구 빈도를 더 엄격하게 제한 (5초에 1회)
+            if (currentTime - lastRecoveryTime < 5000) {
                 FragmentUtils.logEvent("HomeFragment", "WARN", "복구 시도 너무 빈번 - 스킵")
                 return
             }
@@ -392,21 +412,52 @@ class HomeFragment : Fragment() {
 
             FragmentUtils.logEvent("HomeFragment", "WARN", "🔧 UI Pool 복구 시작")
 
-            // 1단계: UI 상태 완전 정리 (Main Thread에서)
-            cleanupUIStateCompletely()
-
-            // 2단계: 짧은 지연 후 새 풀 생성 (GC 시간 확보)
-            Handler(Looper.getMainLooper()).postDelayed({
-                recreateUIPoolSafely()
-            }, 150)
+            // ✅ 단순하고 빠른 복구
+            performQuickUIRecovery()
 
         } catch (e: Exception) {
             FragmentUtils.logEvent("HomeFragment", "ERROR", "UI Pool 복구 중 예외: ${e.message}", e)
+            showCriticalError()
+        }
+    }
 
-            // 최후 수단: 응급 복구
-            if (surfaceDropRecoveryCount > 3) {
+    /**
+     * ✅ 빠른 UI 복구 - 복잡한 로직 제거
+     */
+    private fun performQuickUIRecovery() {
+        try {
+            // 1. 현재 비트맵만 해제
+            currentDisplayBitmap?.let { bitmap ->
+                bitmapPool?.releaseBitmap(bitmap)
+            }
+            currentDisplayBitmap = null
+
+            // 2. ImageView 클리어
+            binding.imageView.setImageBitmap(null)
+
+            // 3. 강제 GC
+            System.gc()
+
+            // 4. 간단한 풀 재초기화
+            val oldPool = bitmapPool
+            bitmapPool = CircularBitmapPool(poolSize = 20, width = 840, height = 840) // 풀 크기 축소
+
+            if (bitmapPool?.initialize() == true) {
+                oldPool?.cleanup()
+                frameSkipCount = 0
+                successfulFrameCount = 0
+
+                binding.poolStatusText.text = bitmapPool?.getStatus() ?: "풀 없음"
+                showToast("UI Pool 빠른 복구 완료")
+                FragmentUtils.logEvent("HomeFragment", "WARN", "✅ UI Pool 빠른 복구 성공")
+            } else {
+                FragmentUtils.logEvent("HomeFragment", "ERROR", "UI Pool 빠른 복구 실패")
                 showCriticalError()
             }
+
+        } catch (e: Exception) {
+            FragmentUtils.logEvent("HomeFragment", "ERROR", "UI Pool 빠른 복구 중 예외: ${e.message}", e)
+            showCriticalError()
         }
     }
 
@@ -448,15 +499,20 @@ class HomeFragment : Fragment() {
         try {
             FragmentUtils.logEvent("HomeFragment", "DEBUG", "🆕 새 UI Pool 생성 시작")
 
+            // ✅ GPU 메모리 상태 안정화 대기
+            Thread.sleep(100)
+
             // 새 풀 생성
-            bitmapPool = CircularBitmapPool(poolSize = 6, width = 840, height = 840)
+            bitmapPool = CircularBitmapPool(poolSize = 20, width = 840, height = 840)
 
             if (bitmapPool?.initialize() == true) {
                 frameSkipCount = 0
                 successfulFrameCount = 0
 
-                // 상태 텍스트 업데이트
-                binding.poolStatusText.text = bitmapPool?.getStatus() ?: "풀 없음"
+                // ✅ 상태 텍스트 업데이트 지연
+                Handler(Looper.getMainLooper()).postDelayed({
+                    binding.poolStatusText.text = bitmapPool?.getStatus() ?: "풀 없음"
+                }, 100)
 
                 showToast("UI Pool 복구 완료")
                 FragmentUtils.logEvent("HomeFragment", "WARN", "✅ UI Pool 복구 성공")

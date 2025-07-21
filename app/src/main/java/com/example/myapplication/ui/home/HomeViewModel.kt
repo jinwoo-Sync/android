@@ -12,6 +12,7 @@ import com.example.myapplication.data.sensor.SensorCollector
 import com.example.myapplication.learning.yolo.BoundingBox
 import com.example.myapplication.model.SensorData
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -505,40 +506,54 @@ class HomeViewModel(
                 frameCount++
                 val currentTime = System.currentTimeMillis()
 
-                // 1초마다 FPS 체크
-                if (currentTime - lastFpsCheckTime >= 1000) {
+                // ✅ 3초마다 FPS 체크 (더 여유롭게)
+                if (currentTime - lastFpsCheckTime >= 3000) {
                     val fps = frameCount * 1000.0 / (currentTime - lastFpsCheckTime)
 
-                    // 🎯 FPS 임계값 체크 및 연속 카운팅
-                    if (fps < FPS_THRESHOLD) {
+                    // ✅ FPS 임계값을 매우 관대하게 (5fps)
+                    if (fps < 5.0) {
                         consecutiveLowFpsCount++
-                        Log.w(TAG, "⚠️ Surface FPS 낮음: ${String.format("%.1f", fps)}fps (연속 ${consecutiveLowFpsCount}회)")
+                        Log.w(TAG, "⚠️ Surface FPS 매우 낮음: ${String.format("%.1f", fps)}fps (연속 ${consecutiveLowFpsCount}회)")
 
-                        // 🎯 연속으로 낮은 FPS가 감지되고 복구 진행 중이 아닐 때만 트리거
-                        if (consecutiveLowFpsCount >= LOW_FPS_TRIGGER_COUNT &&
+                        // ✅ 연속 감지 임계값을 매우 높게 (10회)
+                        if (consecutiveLowFpsCount >= 10 &&
                             isRecoveryInProgress.compareAndSet(false, true)) {
 
-                            Log.w(TAG, "🚨 연속 FPS 드롭 감지 - UI Pool 복구 트리거: ${consecutiveLowFpsCount}회")
+                            Log.w(TAG, "🚨 극심한 FPS 드롭 감지 - 응급 복구 트리거: ${consecutiveLowFpsCount}회")
 
-                            // 기존 풀 정리
-                            forceCleanupBitmapPool()
+                            // ✅ 더 긴 복구 시간
+                            viewModelScope.launch(Dispatchers.IO) {
+                                try {
+                                    // 강력한 메모리 정리
+                                    System.gc()
+                                    delay(500)
 
-                            // UI Pool 복구 신호 발송
-                            _shouldRecoverUIPool.postValue(true)
+                                    forceCleanupBitmapPool()
+                                    delay(300)
 
-                            // 복구 후 카운터 리셋 및 플래그 해제 (지연)
-                            viewModelScope.launch {
-                                kotlinx.coroutines.delay(2000) // 2초 후 복구 완료로 간주
-                                consecutiveLowFpsCount = 0
-                                isRecoveryInProgress.set(false)
-                                // UI Pool 복구 신호 리셋
-                                _shouldRecoverUIPool.postValue(false)
-                                Log.d(TAG, "🔄 복구 완료 - 모니터링 재시작")
+                                    // UI Pool 복구 신호 발송
+                                    launch(Dispatchers.Main) {
+                                        _shouldRecoverUIPool.postValue(true)
+                                    }
+
+                                    // 복구 완료까지 더 오래 대기
+                                    delay(10000) // 10초
+                                    consecutiveLowFpsCount = 0
+                                    isRecoveryInProgress.set(false)
+
+                                    launch(Dispatchers.Main) {
+                                        _shouldRecoverUIPool.postValue(false)
+                                    }
+                                    Log.d(TAG, "🔄 응급 복구 완료 - 모니터링 재시작")
+
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "❌ 응급 FPS 복구 처리 중 예외: ${e.message}", e)
+                                    isRecoveryInProgress.set(false)
+                                }
                             }
                         }
                     } else {
-// FPS가 정상이면 카운터 리셋
-
+                        // FPS가 정상이면 카운터 리셋
                         consecutiveLowFpsCount = 0
                     }
 
@@ -555,7 +570,7 @@ class HomeViewModel(
         }
 
         Choreographer.getInstance().postFrameCallback(surfaceFpsMonitor!!)
-        Log.d(TAG, "🎯 강화된 Surface FPS 모니터링 시작 (임계값: ${FPS_THRESHOLD}fps, 연속감지: ${LOW_FPS_TRIGGER_COUNT}회)")
+        Log.d(TAG, "🎯 완화된 Surface FPS 모니터링 시작 (임계값: 5fps, 연속감지: 10회)")
     }
 
     /**
