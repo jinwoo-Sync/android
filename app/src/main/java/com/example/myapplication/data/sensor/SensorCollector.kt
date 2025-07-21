@@ -208,6 +208,10 @@ class SensorCollector(private val context: Context) {
     private lateinit var dataSynchronizer: DataSynchronizer
 
     private val isDetecting = AtomicBoolean(false)
+    //추론용 복사 용지
+    private var gpuInferenceBitmap: Bitmap? = null
+    private var gpuCanvas: Canvas? = null
+    private val gpuBitmapLock = Object()
 
     var cameraConfig = CameraConfig(
         imageSize = Size(840, 840),
@@ -1147,9 +1151,23 @@ class SensorCollector(private val context: Context) {
 
                         detectorExecutor.submit {
                             var inferenceSuccess = false
+                            var gpuSafeBitmap: Bitmap? = null
+
+                            // 기존 try 블록 내용을 아래로 교체
                             try {
-                                detector?.detect(detectionRef.bitmap, frameId)
-                                inferenceSuccess = true
+                                // 🎯 재사용 비트맵에 복사 (매번 새로 생성하지 않음)
+                                val reusableGpuBitmap = copyToGpuInferenceBitmap(detectionRef.bitmap)
+
+                                // 🛡️ 원본 SharedBitmap 즉시 해제 (GPU 추론과 무관하게)
+                                detectionRef.release()
+
+                                if (reusableGpuBitmap != null) {
+                                    Log.d(TAG, "🎯 재사용 GPU 비트맵으로 추론 시작")
+                                    detector?.detect(reusableGpuBitmap, frameId)
+                                    inferenceSuccess = true
+                                } else {
+                                    Log.e(TAG, "❌ 재사용 GPU 비트맵 준비 실패")
+                                }
 
                                 val inferenceEndTime = System.currentTimeMillis()
                                 val actualInferenceTime = inferenceEndTime - inferenceStartTime
@@ -1159,22 +1177,20 @@ class SensorCollector(private val context: Context) {
 
                             } catch (e: Exception) {
                                 Log.e(TAG, "❌ Detection 오류: ${e.message}", e)
-                            } finally {
-                                // ✅ 강화: 무조건 정리 및 플래그 해제
+                                // 예외 발생 시에만 detectionRef 해제 (이미 해제되었을 수도 있음)
                                 try {
                                     detectionRef.release()
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "❌ Detection ref 해제 실패: ${e.message}", e)
+                                } catch (releaseEx: Exception) {
+                                    // 이미 해제된 경우 무시
                                 }
-
-                                // ✅ AtomicBoolean 사용으로 안전한 플래그 해제
+                            } finally {
+                                // 🎯 재사용 비트맵은 해제하지 않음! (계속 재사용)
                                 isDetecting.set(false)
-
                                 Log.d(TAG, "🎯 딥러닝 추론 종료: frameId=$frameId, success=$inferenceSuccess")
                             }
                         }
                     } else {
-                        Log.w(TAG, "⚠️ 딥러닝 추론 스킵: initialized=$detectorInitialized, detecting=$isDetecting")
+                        Log.w(TAG, "⚠️ 딥러닝 추론 스킵: initialized=$detectorInitialized, detecting=${isDetecting.get()}")
                         detectionRef.release()
                     }
                 }
@@ -1241,6 +1257,13 @@ class SensorCollector(private val context: Context) {
 
             highSpeedProcessor.cleanup()
             zeroCopyPool.cleanup()
+
+            synchronized(gpuBitmapLock) {
+                gpuCanvas = null
+                gpuInferenceBitmap?.takeIf { !it.isRecycled }?.recycle()
+                gpuInferenceBitmap = null
+                Log.d(TAG, "🗑️ GPU 추론용 비트맵 정리 완료")
+            }
 
             Log.d(TAG, "🎯 Zero-Copy 카메라 스트리밍 중지 완료")
         } catch (e: Exception) {
@@ -1681,5 +1704,78 @@ class SensorCollector(private val context: Context) {
         frameSkipInterval = if (interval > 0) interval else 2
         currentDetectionStrategy = currentDetectionStrategy.copy(skipInterval = frameSkipInterval)
         Log.d(TAG, "프레임 스킵 간격 설정: $frameSkipInterval")
+    }
+
+    /**
+     * 🎯 GPU 추론용 재사용 비트맵 획득/생성
+     */
+    private fun getOrCreateGpuInferenceBitmap(width: Int, height: Int): Bitmap? {
+        synchronized(gpuBitmapLock) {
+            val existing = gpuInferenceBitmap
+
+            // 기존 비트맵 재사용 가능 여부 체크
+            if (existing != null &&
+                !existing.isRecycled &&
+                existing.width == width &&
+                existing.height == height) {
+
+                Log.d(TAG, "🔄 GPU 추론용 비트맵 재사용: ${width}x${height}")
+                return existing
+            }
+
+            // 기존 비트맵이 다른 크기거나 손상된 경우 교체
+            if (existing != null && !existing.isRecycled) {
+                Log.d(TAG, "🗑️ 기존 GPU 비트맵 교체: ${existing.width}x${existing.height} → ${width}x${height}")
+                existing.recycle()
+            }
+
+            // 새 비트맵 생성
+            return try {
+                val newBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                gpuInferenceBitmap = newBitmap
+                Log.d(TAG, "🆕 GPU 추론용 비트맵 생성: ${width}x${height}")
+                newBitmap
+            } catch (e: OutOfMemoryError) {
+                Log.e(TAG, "💥 OOM: GPU 비트맵 생성 실패", e)
+                gpuInferenceBitmap = null
+                System.gc()
+                null
+            }
+        }
+    }
+
+    /**
+     * 🎯 GPU 추론용 비트맵에 안전하게 복사
+     */
+    private fun copyToGpuInferenceBitmap(sourceBitmap: Bitmap): Bitmap? {
+        return try {
+            if (sourceBitmap.isRecycled || sourceBitmap.width <= 0 || sourceBitmap.height <= 0) {
+                Log.e(TAG, "❌ 소스 비트맵이 유효하지 않음")
+                return null
+            }
+
+            val targetBitmap = getOrCreateGpuInferenceBitmap(sourceBitmap.width, sourceBitmap.height)
+            if (targetBitmap == null) {
+                Log.e(TAG, "❌ GPU 타겟 비트맵 획득 실패")
+                return null
+            }
+
+            // 🎯 기존 비트맵에 덮어쓰기 (새로운 할당 없음)
+            synchronized(gpuBitmapLock) {
+                // 🎯 Canvas도 재사용
+                val canvas = gpuCanvas ?: Canvas(targetBitmap).also { gpuCanvas = it }
+                canvas.setBitmap(targetBitmap) // 비트맵 바인딩 업데이트
+
+                canvas.drawColor(android.graphics.Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+                canvas.drawBitmap(sourceBitmap, 0f, 0f, null)
+            }
+
+            Log.d(TAG, "✅ GPU 비트맵 덮어쓰기 완료")
+            targetBitmap
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ GPU 비트맵 복사 예외: ${e.message}", e)
+            null
+        }
     }
 }

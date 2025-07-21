@@ -1,8 +1,8 @@
 package com.example.myapplication.ui.home
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.util.Log
+import android.view.Choreographer
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
@@ -13,8 +13,7 @@ import com.example.myapplication.learning.yolo.BoundingBox
 import com.example.myapplication.model.SensorData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import android.view.Choreographer
-
+import java.util.concurrent.atomic.AtomicBoolean
 
 class HomeViewModel(
     private val sensorCollector: SensorCollector,
@@ -52,7 +51,7 @@ class HomeViewModel(
     }
     val imuData: LiveData<String> = _imuData
 
-    // UI 풀 복구 신호 추가
+    // 🚀 UI 풀 복구 신호 강화
     private val _shouldRecoverUIPool = MutableLiveData<Boolean>()
     val shouldRecoverUIPool: LiveData<Boolean> = _shouldRecoverUIPool
 
@@ -86,11 +85,14 @@ class HomeViewModel(
     private var isSensorStreamingStarted = false
     private var isCameraStreamingJob: kotlinx.coroutines.Job? = null
 
-    // 간단한 Surface FPS 모니터링
+    // 🚀 강화된 Surface FPS 모니터링
     private var surfaceFpsMonitor: Choreographer.FrameCallback? = null
     private var lastFpsCheckTime = 0L
     private var frameCount = 0
-    private val FPS_THRESHOLD = 15.0  // 15fps 이하면 풀 정리
+    private var consecutiveLowFpsCount = 0
+    private val FPS_THRESHOLD = 12.0  // 12fps 이하면 풀 정리
+    private val LOW_FPS_TRIGGER_COUNT = 3  // 3회 연속 낮으면 트리거
+    private val isRecoveryInProgress = AtomicBoolean(false)
 
     fun setServerTransmissionEnabled(enabled: Boolean) {
         _isServerTransmissionEnabled.postValue(enabled)
@@ -189,7 +191,6 @@ class HomeViewModel(
                     append("\nMonoTS: ${sensorDataString.monoTimestamp}")
                 }
                 _gpsData.postValue(gpsInfo)
-                //Log.d("HomeViewModel", "✅ GPS 데이터 UI 업데이트: ${sensorDataString.value}")
                 updateSyncStatus()
             },
             imuCallback = { sensorDataString ->
@@ -275,8 +276,8 @@ class HomeViewModel(
         Log.d(TAG, " 카메라 스트리밍 시작")
         _text.value = "카메라 스트리밍 중..."
 
-        // Surface FPS 모니터링 시작
-        startSurfaceFpsMonitoring()
+        // 🚀 강화된 Surface FPS 모니터링 시작
+        startAdvancedSurfaceFpsMonitoring()
 
         homeRepository.detectionCallback = { boundingBoxes, inferenceTime, frameId ->
             Log.d(TAG, "🎯 ViewModel Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
@@ -492,11 +493,12 @@ class HomeViewModel(
     }
 
     /**
-     * Surface FPS 모니터링 시작
+     * 🚀 강화된 Surface FPS 모니터링 시작 - 더 정교한 감지
      */
-    private fun startSurfaceFpsMonitoring() {
+    private fun startAdvancedSurfaceFpsMonitoring() {
         lastFpsCheckTime = System.currentTimeMillis()
         frameCount = 0
+        consecutiveLowFpsCount = 0
 
         surfaceFpsMonitor = object : Choreographer.FrameCallback {
             override fun doFrame(frameTimeNanos: Long) {
@@ -507,12 +509,37 @@ class HomeViewModel(
                 if (currentTime - lastFpsCheckTime >= 1000) {
                     val fps = frameCount * 1000.0 / (currentTime - lastFpsCheckTime)
 
-                    // FPS가 임계값 이하면 기존 풀 정리 함수 호출
+                    // 🎯 FPS 임계값 체크 및 연속 카운팅
                     if (fps < FPS_THRESHOLD) {
-                        Log.w(TAG, "⚠️ Surface FPS 낮음: ${String.format("%.1f", fps)}fps")
-                        forceCleanupBitmapPool()  // 기존 함수 그대로 호출
+                        consecutiveLowFpsCount++
+                        Log.w(TAG, "⚠️ Surface FPS 낮음: ${String.format("%.1f", fps)}fps (연속 ${consecutiveLowFpsCount}회)")
 
-                        _shouldRecoverUIPool.postValue(true) // ui bitmap pool도 정리
+                        // 🎯 연속으로 낮은 FPS가 감지되고 복구 진행 중이 아닐 때만 트리거
+                        if (consecutiveLowFpsCount >= LOW_FPS_TRIGGER_COUNT &&
+                            isRecoveryInProgress.compareAndSet(false, true)) {
+
+                            Log.w(TAG, "🚨 연속 FPS 드롭 감지 - UI Pool 복구 트리거: ${consecutiveLowFpsCount}회")
+
+                            // 기존 풀 정리
+                            forceCleanupBitmapPool()
+
+                            // UI Pool 복구 신호 발송
+                            _shouldRecoverUIPool.postValue(true)
+
+                            // 복구 후 카운터 리셋 및 플래그 해제 (지연)
+                            viewModelScope.launch {
+                                kotlinx.coroutines.delay(2000) // 2초 후 복구 완료로 간주
+                                consecutiveLowFpsCount = 0
+                                isRecoveryInProgress.set(false)
+                                // UI Pool 복구 신호 리셋
+                                _shouldRecoverUIPool.postValue(false)
+                                Log.d(TAG, "🔄 복구 완료 - 모니터링 재시작")
+                            }
+                        }
+                    } else {
+// FPS가 정상이면 카운터 리셋
+
+                        consecutiveLowFpsCount = 0
                     }
 
                     // 리셋
@@ -528,7 +555,7 @@ class HomeViewModel(
         }
 
         Choreographer.getInstance().postFrameCallback(surfaceFpsMonitor!!)
-        Log.d(TAG, "🎯 Surface FPS 모니터링 시작")
+        Log.d(TAG, "🎯 강화된 Surface FPS 모니터링 시작 (임계값: ${FPS_THRESHOLD}fps, 연속감지: ${LOW_FPS_TRIGGER_COUNT}회)")
     }
 
     /**
@@ -539,6 +566,8 @@ class HomeViewModel(
             Choreographer.getInstance().removeFrameCallback(it)
         }
         surfaceFpsMonitor = null
+        consecutiveLowFpsCount = 0
+        isRecoveryInProgress.set(false)
         Log.d(TAG, "🛑 Surface FPS 모니터링 중지")
     }
 }
