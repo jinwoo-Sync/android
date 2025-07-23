@@ -2,8 +2,16 @@ package com.example.myapplication.utils
 
 import android.app.ActivityManager
 import android.content.Context
-import android.graphics.Bitmap
+import android.content.Intent
+import android.content.IntentFilter
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.BatteryManager
+import android.os.Build
 import android.os.Debug
+import android.os.StatFs
 import android.util.Log
 import java.io.File
 import java.text.DecimalFormat
@@ -26,14 +34,659 @@ class ResourceMonitor private constructor(private val context: Context) {
     }
 
     private val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+    private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+
+    // 온도 센서 관련
+    private var temperatureSensor: Sensor? = null
+    private var currentTemperature: Float = -1f
+    private val temperatureListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent?) {
+            event?.let {
+                currentTemperature = it.values[0]
+            }
+        }
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    init {
+        // 온도 센서 초기화 (안전한 방식)
+        try {
+            temperatureSensor = sensorManager.getDefaultSensor(Sensor.TYPE_AMBIENT_TEMPERATURE)
+            temperatureSensor?.let {
+                sensorManager.registerListener(temperatureListener, it, SensorManager.SENSOR_DELAY_NORMAL)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "온도 센서 초기화 실패: ${e.message}")
+        }
+    }
 
     /**
-     * 🎯 앱 전용 메모리 정보 (가장 중요!) - 순환 호출 해결
+     * 🔥 크리티컬 성능 분석 정보 수집 (호환성 보장)
      */
+    fun getCriticalPerformanceAnalysis(): CriticalAnalysisInfo {
+        val appMemory = getAppMemoryInfo()
+        val systemMemory = getSystemMemoryInfo()
+        val cpu = getAdvancedCpuInfo()
+        val thermal = getThermalInfo()
+        val battery = getBatteryInfo()
+        val storage = getStorageInfo()
+        val gc = getGCInfo()
+        val processes = getProcessInfo()
+        val graphics = getGraphicsInfo()
+
+        return CriticalAnalysisInfo(
+            timestamp = System.currentTimeMillis(),
+            monoTimestamp = System.nanoTime(),
+            appMemory = appMemory,
+            systemMemory = systemMemory,
+            cpu = cpu,
+            thermal = thermal,
+            battery = battery,
+            storage = storage,
+            gc = gc,
+            processes = processes,
+            graphics = graphics
+        )
+    }
+
+    /**
+     * 🌡️ 안전한 온도 정보 수집
+     */
+    private fun getThermalInfo(): ThermalInfo {
+        return try {
+            val cpuTemp = getCpuTemperature()
+            val batteryTemp = getBatteryTemperature()
+            val sensorTemp = currentTemperature
+
+            ThermalInfo(
+                cpuTemperature = cpuTemp,
+                batteryTemperature = batteryTemp,
+                ambientTemperature = if (sensorTemp > -1f) sensorTemp else -1f,
+                thermalState = getThermalState(cpuTemp),
+                thermalThrottling = isThermalThrottling()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "온도 정보 수집 실패: ${e.message}", e)
+            ThermalInfo(-1f, -1f, -1f, "Unknown", false)
+        }
+    }
+
+    private fun getCpuTemperature(): Float {
+        return try {
+            val tempFiles = listOf(
+                "/sys/class/thermal/thermal_zone0/temp",
+                "/sys/class/thermal/thermal_zone1/temp",
+                "/sys/devices/system/cpu/cpu0/cpufreq/cpu_temp",
+                "/sys/devices/virtual/thermal/thermal_zone0/temp"
+            )
+
+            for (path in tempFiles) {
+                try {
+                    val file = File(path)
+                    if (file.exists() && file.canRead()) {
+                        val tempStr = file.readText().trim()
+                        val temp = tempStr.toFloatOrNull()
+                        if (temp != null && temp > 0) {
+                            return if (temp > 1000) temp / 1000f else temp
+                        }
+                    }
+                } catch (e: Exception) {
+                    // 다음 파일 시도
+                    continue
+                }
+            }
+            -1f
+        } catch (e: Exception) {
+            Log.w(TAG, "CPU 온도 읽기 실패: ${e.message}")
+            -1f
+        }
+    }
+
+    private fun getBatteryTemperature(): Float {
+        return try {
+            val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val temp = batteryIntent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1) ?: -1
+            if (temp > 0) temp / 10f else -1f
+        } catch (e: Exception) {
+            Log.w(TAG, "배터리 온도 읽기 실패: ${e.message}")
+            -1f
+        }
+    }
+
+    private fun getThermalState(cpuTemp: Float): String {
+        return try {
+            when {
+                cpuTemp > 85f -> "CRITICAL"
+                cpuTemp > 75f -> "SEVERE"
+                cpuTemp > 65f -> "MODERATE"
+                cpuTemp > 50f -> "LIGHT"
+                cpuTemp > 0f -> "NONE"
+                else -> "UNKNOWN"
+            }
+        } catch (e: Exception) {
+            "UNKNOWN"
+        }
+    }
+
+    private fun isThermalThrottling(): Boolean {
+        return try {
+            val cpuMaxFreq = getCurrentCpuMaxFreq()
+            val cpuDesignFreq = getDesignCpuMaxFreq()
+            if (cpuMaxFreq > 0 && cpuDesignFreq > 0) {
+                cpuMaxFreq < cpuDesignFreq * 0.8f
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 🔋 안전한 배터리 정보
+     */
+    private fun getBatteryInfo(): BatteryInfo {
+        return try {
+            val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+
+            BatteryInfo(
+                level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1,
+                scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1,
+                voltage = batteryIntent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: -1,
+                temperature = getBatteryTemperature(),
+                status = getBatteryStatus(batteryIntent),
+                health = getBatteryHealth(batteryIntent),
+                isCharging = isCharging(batteryIntent),
+                powerSaveModeEnabled = isPowerSaveModeEnabled()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "배터리 정보 수집 실패: ${e.message}", e)
+            BatteryInfo(-1, -1, -1, -1f, "Unknown", "Unknown", false, false)
+        }
+    }
+
+    private fun getBatteryStatus(intent: Intent?): String {
+        return try {
+            val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            when (status) {
+                BatteryManager.BATTERY_STATUS_CHARGING -> "CHARGING"
+                BatteryManager.BATTERY_STATUS_DISCHARGING -> "DISCHARGING"
+                BatteryManager.BATTERY_STATUS_FULL -> "FULL"
+                BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "NOT_CHARGING"
+                else -> "UNKNOWN"
+            }
+        } catch (e: Exception) {
+            "UNKNOWN"
+        }
+    }
+
+    private fun getBatteryHealth(intent: Intent?): String {
+        return try {
+            val health = intent?.getIntExtra(BatteryManager.EXTRA_HEALTH, -1) ?: -1
+            when (health) {
+                BatteryManager.BATTERY_HEALTH_GOOD -> "GOOD"
+                BatteryManager.BATTERY_HEALTH_OVERHEAT -> "OVERHEAT"
+                BatteryManager.BATTERY_HEALTH_DEAD -> "DEAD"
+                BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE -> "OVER_VOLTAGE"
+                BatteryManager.BATTERY_HEALTH_COLD -> "COLD"
+                else -> "UNKNOWN"
+            }
+        } catch (e: Exception) {
+            "UNKNOWN"
+        }
+    }
+
+    private fun isCharging(intent: Intent?): Boolean {
+        return try {
+            val plugged = intent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1) ?: -1
+            plugged == BatteryManager.BATTERY_PLUGGED_AC ||
+                    plugged == BatteryManager.BATTERY_PLUGGED_USB ||
+                    (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 &&
+                            plugged == BatteryManager.BATTERY_PLUGGED_WIRELESS)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun isPowerSaveModeEnabled(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                val powerManager = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                powerManager.isPowerSaveMode
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 🖥️ 안전한 고급 CPU 정보
+     */
+    private fun getAdvancedCpuInfo(): AdvancedCpuInfo {
+        return try {
+            AdvancedCpuInfo(
+                coreCount = Runtime.getRuntime().availableProcessors(),
+                currentFreqs = getCpuCurrentFrequencies(),
+                maxFreqs = getCpuMaxFrequencies(),
+                minFreqs = getCpuMinFrequencies(),
+                governor = getCpuGovernor(),
+                loadAverage = getLoadAverage(),
+                usagePercent = getCpuUsagePercent(),
+                isThrottling = isThermalThrottling()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "CPU 정보 수집 실패: ${e.message}", e)
+            AdvancedCpuInfo(
+                coreCount = Runtime.getRuntime().availableProcessors(),
+                currentFreqs = emptyList(),
+                maxFreqs = emptyList(),
+                minFreqs = emptyList(),
+                governor = "unknown",
+                loadAverage = listOf(-1.0, -1.0, -1.0),
+                usagePercent = -1.0,
+                isThrottling = false
+            )
+        }
+    }
+
+    private fun getCpuCurrentFrequencies(): List<Long> {
+        val freqs = mutableListOf<Long>()
+        val coreCount = Runtime.getRuntime().availableProcessors()
+
+        for (i in 0 until coreCount) {
+            try {
+                val freq = File("/sys/devices/system/cpu/cpu$i/cpufreq/scaling_cur_freq")
+                if (freq.exists() && freq.canRead()) {
+                    val freqStr = freq.readText().trim()
+                    val freqValue = freqStr.toLongOrNull()
+                    freqs.add(freqValue ?: -1L)
+                } else {
+                    freqs.add(-1L)
+                }
+            } catch (e: Exception) {
+                freqs.add(-1L)
+            }
+        }
+        return freqs
+    }
+
+    private fun getCpuMaxFrequencies(): List<Long> {
+        val freqs = mutableListOf<Long>()
+        val coreCount = Runtime.getRuntime().availableProcessors()
+
+        for (i in 0 until coreCount) {
+            try {
+                val freq = File("/sys/devices/system/cpu/cpu$i/cpufreq/scaling_max_freq")
+                if (freq.exists() && freq.canRead()) {
+                    val freqStr = freq.readText().trim()
+                    val freqValue = freqStr.toLongOrNull()
+                    freqs.add(freqValue ?: -1L)
+                } else {
+                    freqs.add(-1L)
+                }
+            } catch (e: Exception) {
+                freqs.add(-1L)
+            }
+        }
+        return freqs
+    }
+
+    private fun getCpuMinFrequencies(): List<Long> {
+        val freqs = mutableListOf<Long>()
+        val coreCount = Runtime.getRuntime().availableProcessors()
+
+        for (i in 0 until coreCount) {
+            try {
+                val freq = File("/sys/devices/system/cpu/cpu$i/cpufreq/scaling_min_freq")
+                if (freq.exists() && freq.canRead()) {
+                    val freqStr = freq.readText().trim()
+                    val freqValue = freqStr.toLongOrNull()
+                    freqs.add(freqValue ?: -1L)
+                } else {
+                    freqs.add(-1L)
+                }
+            } catch (e: Exception) {
+                freqs.add(-1L)
+            }
+        }
+        return freqs
+    }
+
+    private fun getCurrentCpuMaxFreq(): Long {
+        return try {
+            getCpuMaxFrequencies().filter { it > 0 }.maxOrNull() ?: -1L
+        } catch (e: Exception) {
+            -1L
+        }
+    }
+
+    private fun getDesignCpuMaxFreq(): Long {
+        return try {
+            val freq = File("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
+            if (freq.exists() && freq.canRead()) {
+                val freqStr = freq.readText().trim()
+                freqStr.toLongOrNull() ?: -1L
+            } else {
+                -1L
+            }
+        } catch (e: Exception) {
+            -1L
+        }
+    }
+
+    private fun getCpuGovernor(): String {
+        return try {
+            val governor = File("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+            if (governor.exists() && governor.canRead()) {
+                governor.readText().trim()
+            } else {
+                "unknown"
+            }
+        } catch (e: Exception) {
+            "error"
+        }
+    }
+
+    private fun getLoadAverage(): List<Double> {
+        return try {
+            val loadavgFile = File("/proc/loadavg")
+            if (loadavgFile.exists() && loadavgFile.canRead()) {
+                val loadavg = loadavgFile.readText().trim()
+                loadavg.split(" ").take(3).mapNotNull {
+                    it.toDoubleOrNull()
+                }
+            } else {
+                listOf(-1.0, -1.0, -1.0)
+            }
+        } catch (e: Exception) {
+            listOf(-1.0, -1.0, -1.0)
+        }
+    }
+
+    private fun getCpuUsagePercent(): Double {
+        return try {
+            val stat1 = readCpuStat()
+            if (stat1.isEmpty()) return -1.0
+
+            Thread.sleep(100)
+            val stat2 = readCpuStat()
+            if (stat2.isEmpty()) return -1.0
+
+            val idle1 = stat1.getOrNull(3) ?: return -1.0
+            val total1 = stat1.sum()
+            val idle2 = stat2.getOrNull(3) ?: return -1.0
+            val total2 = stat2.sum()
+
+            val idleDiff = idle2 - idle1
+            val totalDiff = total2 - total1
+
+            if (totalDiff > 0) {
+                ((totalDiff - idleDiff) * 100.0 / totalDiff)
+            } else {
+                -1.0
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "CPU 사용률 계산 실패: ${e.message}")
+            -1.0
+        }
+    }
+
+    private fun readCpuStat(): List<Long> {
+        return try {
+            val statFile = File("/proc/stat")
+            if (statFile.exists() && statFile.canRead()) {
+                val stat = statFile.readText()
+                val cpuLine = stat.lines().firstOrNull { it.startsWith("cpu ") }
+                cpuLine?.split("\\s+".toRegex())?.drop(1)?.mapNotNull {
+                    it.toLongOrNull()
+                } ?: emptyList()
+            } else {
+                emptyList()
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * 💾 안전한 스토리지 정보
+     */
+    private fun getStorageInfo(): StorageInfo {
+        return try {
+            val internal = getInternalStorageInfo()
+            val external = getExternalStorageInfo()
+
+            StorageInfo(
+                internalTotal = internal.first,
+                internalFree = internal.second,
+                externalTotal = external.first,
+                externalFree = external.second,
+                cacheSize = getCacheSize()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "스토리지 정보 수집 실패: ${e.message}", e)
+            StorageInfo(-1L, -1L, -1L, -1L, -1L)
+        }
+    }
+
+    private fun getInternalStorageInfo(): Pair<Long, Long> {
+        return try {
+            val stat = StatFs(context.filesDir.absolutePath)
+            val total = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                stat.totalBytes
+            } else {
+                @Suppress("DEPRECATION")
+                stat.blockCount.toLong() * stat.blockSize.toLong()
+            }
+            val free = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                stat.freeBytes
+            } else {
+                @Suppress("DEPRECATION")
+                stat.freeBlocks.toLong() * stat.blockSize.toLong()
+            }
+            Pair(total, free)
+        } catch (e: Exception) {
+            Pair(-1L, -1L)
+        }
+    }
+
+    private fun getExternalStorageInfo(): Pair<Long, Long> {
+        return try {
+            val extDir = android.os.Environment.getExternalStorageDirectory()
+            if (extDir?.exists() == true) {
+                val stat = StatFs(extDir.absolutePath)
+                val total = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                    stat.totalBytes
+                } else {
+                    @Suppress("DEPRECATION")
+                    stat.blockCount.toLong() * stat.blockSize.toLong()
+                }
+                val free = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                    stat.freeBytes
+                } else {
+                    @Suppress("DEPRECATION")
+                    stat.freeBlocks.toLong() * stat.blockSize.toLong()
+                }
+                Pair(total, free)
+            } else {
+                Pair(-1L, -1L)
+            }
+        } catch (e: Exception) {
+            Pair(-1L, -1L)
+        }
+    }
+
+    private fun getCacheSize(): Long {
+        return try {
+            context.cacheDir.walkTopDown()
+                .filter { it.isFile }
+                .map { it.length() }
+                .sum()
+        } catch (e: Exception) {
+            -1L
+        }
+    }
+
+    /**
+     * 🗑️ 안전한 GC 정보 (API 호환성 문제 해결)
+     */
+    private fun getGCInfo(): GCInfo {
+        return try {
+            // Debug.getGlobal* 메서드들은 API 레벨에 따라 다르므로 안전하게 처리
+            val gcCount = try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    Debug.getRuntimeStat("art.gc.gc-count").toIntOrNull() ?: -1
+                } else {
+                    -1
+                }
+            } catch (e: Exception) {
+                -1
+            }
+
+            val gcTime = try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    Debug.getRuntimeStat("art.gc.gc-time").toLongOrNull() ?: -1L
+                } else {
+                    -1L
+                }
+            } catch (e: Exception) {
+                -1L
+            }
+
+            GCInfo(
+                gcCount = gcCount,
+                gcTime = gcTime,
+                gcFreedSize = -1L, // API 제한으로 인해 사용 불가
+                gcFreedCount = -1L, // API 제한으로 인해 사용 불가
+                lastGcReason = getLastGcReason()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "GC 정보 수집 실패: ${e.message}", e)
+            GCInfo(-1, -1L, -1L, -1L, "unknown")
+        }
+    }
+
+    private fun getLastGcReason(): String {
+        return try {
+            val heapUsage = getAppMemoryInfo().heapUsagePercent
+            when {
+                heapUsage > 90 -> "HEAP_FULL"
+                heapUsage > 80 -> "MEMORY_PRESSURE"
+                else -> "CONCURRENT"
+            }
+        } catch (e: Exception) {
+            "unknown"
+        }
+    }
+
+    /**
+     * 🔧 안전한 프로세스 정보
+     */
+    private fun getProcessInfo(): ProcessInfo {
+        return try {
+            val runningProcesses = try {
+                activityManager.runningAppProcesses ?: emptyList()
+            } catch (e: Exception) {
+                emptyList()
+            }
+
+            val myPid = android.os.Process.myPid()
+            val myProcess = runningProcesses.find { it.pid == myPid }
+
+            ProcessInfo(
+                pid = myPid,
+                uid = android.os.Process.myUid(),
+                processName = myProcess?.processName ?: "unknown",
+                importance = myProcess?.importance ?: -1,
+                totalProcessCount = runningProcesses.size,
+                threadCount = getThreadCount(),
+                fdCount = getFdCount()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "프로세스 정보 수집 실패: ${e.message}", e)
+            ProcessInfo(-1, -1, "unknown", -1, -1, -1, -1)
+        }
+    }
+
+    private fun getThreadCount(): Int {
+        return try {
+            val threadGroup = Thread.currentThread().threadGroup
+            threadGroup?.activeCount() ?: -1
+        } catch (e: Exception) {
+            -1
+        }
+    }
+
+    private fun getFdCount(): Int {
+        return try {
+            val fdDir = File("/proc/${android.os.Process.myPid()}/fd")
+            if (fdDir.exists() && fdDir.canRead()) {
+                fdDir.listFiles()?.size ?: -1
+            } else {
+                -1
+            }
+        } catch (e: Exception) {
+            -1
+        }
+    }
+
+    /**
+     * 🎮 안전한 그래픽스 정보
+     */
+    private fun getGraphicsInfo(): GraphicsInfo {
+        return try {
+            GraphicsInfo(
+                renderer = getGpuRenderer(),
+                vendor = getGpuVendor(),
+                version = getGpuVersion(),
+                extensions = getGpuExtensions(),
+                surfaceFlinger = "limited_access" // 시스템 레벨 접근 제한
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "그래픽스 정보 수집 실패: ${e.message}", e)
+            GraphicsInfo("unknown", "unknown", "unknown", emptyList(), "unknown")
+        }
+    }
+
+    private fun getGpuRenderer(): String {
+        return try {
+            javax.microedition.khronos.opengles.GL10::class.java.getDeclaredField("GL_RENDERER")
+            "OpenGL_Available"
+        } catch (e: Exception) {
+            "unknown"
+        }
+    }
+
+    private fun getGpuVendor(): String {
+        return try {
+            "Android_GPU" // 안전한 기본값
+        } catch (e: Exception) {
+            "unknown"
+        }
+    }
+
+    private fun getGpuVersion(): String {
+        return try {
+            "OpenGL_ES_2.0+" // 안전한 기본값
+        } catch (e: Exception) {
+            "unknown"
+        }
+    }
+
+    private fun getGpuExtensions(): List<String> {
+        return try {
+            // GPU 확장 기능은 OpenGL 컨텍스트가 필요하므로 기본값 반환
+            emptyList()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    // 기존 메서드들 유지 (수정됨)
     fun getAppMemoryInfo(): AppMemoryInfo {
         val runtime = Runtime.getRuntime()
-
-        // 앱 힙 메모리 (GC 관리 영역)
         val maxHeap = runtime.maxMemory()
         val totalHeap = runtime.totalMemory()
         val freeHeap = runtime.freeMemory()
@@ -41,11 +694,9 @@ class ResourceMonitor private constructor(private val context: Context) {
         val availableHeap = maxHeap - usedHeap
         val heapUsagePercent = (usedHeap * 100.0 / maxHeap)
 
-        // 앱 프로세스 메모리 상세 (Native + Dalvik)
         val debugMemoryInfo = Debug.MemoryInfo()
         Debug.getMemoryInfo(debugMemoryInfo)
 
-        // 메모리 압박 상태 계산 (내부에서 직접 계산 - 순환 호출 방지)
         val isLowMemory = heapUsagePercent > 85.0 || (availableHeap / MB.toDouble()) < 20.0
         val memoryPressureLevel = when {
             heapUsagePercent > 90.0 -> MemoryPressureLevel.CRITICAL
@@ -55,30 +706,22 @@ class ResourceMonitor private constructor(private val context: Context) {
         }
 
         return AppMemoryInfo(
-            // 힙 메모리 (Java/Kotlin 객체)
             maxHeapMB = maxHeap / MB.toDouble(),
             totalHeapMB = totalHeap / MB.toDouble(),
             usedHeapMB = usedHeap / MB.toDouble(),
             freeHeapMB = freeHeap / MB.toDouble(),
             availableHeapMB = availableHeap / MB.toDouble(),
             heapUsagePercent = heapUsagePercent,
-
-            // 프로세스 메모리 (OS 레벨)
-            dalvikHeapMB = debugMemoryInfo.dalvikPrivateDirty / 1024.0,    // Java/Kotlin
-            nativeHeapMB = debugMemoryInfo.nativePrivateDirty / 1024.0,   // C/C++ (NDK, 비트맵 등)
-            otherMemoryMB = debugMemoryInfo.otherPrivateDirty / 1024.0,   // 기타
-            totalPrivateMB = debugMemoryInfo.totalPrivateDirty / 1024.0,  // 앱 전용 총합
-            totalPssMB = debugMemoryInfo.totalPss / 1024.0,               // 공유 메모리 포함
-
-            // 메모리 압박 상태 (내부에서 계산된 값 사용)
+            dalvikHeapMB = debugMemoryInfo.dalvikPrivateDirty / 1024.0,
+            nativeHeapMB = debugMemoryInfo.nativePrivateDirty / 1024.0,
+            otherMemoryMB = debugMemoryInfo.otherPrivateDirty / 1024.0,
+            totalPrivateMB = debugMemoryInfo.totalPrivateDirty / 1024.0,
+            totalPssMB = debugMemoryInfo.totalPss / 1024.0,
             isLowMemory = isLowMemory,
             memoryPressureLevel = memoryPressureLevel
         )
     }
 
-    /**
-     * 🌐 시스템 전체 메모리 정보 (참고용)
-     */
     fun getSystemMemoryInfo(): SystemMemoryInfo {
         val memoryInfo = ActivityManager.MemoryInfo()
         activityManager.getMemoryInfo(memoryInfo)
@@ -93,9 +736,29 @@ class ResourceMonitor private constructor(private val context: Context) {
         )
     }
 
-    /**
-     * 🎯 앱 메모리 위험도 분석 - 순환 호출 방지를 위해 별도 계산
-     */
+    fun getCpuInfo(): CpuInfo {
+        return try {
+            CpuInfo(
+                usagePercent = getCpuUsagePercent(),
+                coreCount = Runtime.getRuntime().availableProcessors()
+            )
+        } catch (e: Exception) {
+            CpuInfo(0.0, Runtime.getRuntime().availableProcessors())
+        }
+    }
+
+    fun getThreadInfo(): ThreadInfo {
+        val threadGroup = Thread.currentThread().threadGroup
+        val activeThreads = threadGroup?.activeCount() ?: 0
+
+        return ThreadInfo(
+            activeThreadCount = activeThreads,
+            currentThreadName = Thread.currentThread().name,
+            mainThreadName = "main"
+        )
+    }
+
+    // 기존 호환성 메서드들...
     fun isAppMemoryLow(): Boolean {
         val runtime = Runtime.getRuntime()
         val maxHeap = runtime.maxMemory()
@@ -124,9 +787,28 @@ class ResourceMonitor private constructor(private val context: Context) {
         }
     }
 
-    /**
-     * 📊 앱 중심 리소스 상태 로깅
-     */
+
+    fun getBitmapMemoryUsage(bitmap: android.graphics.Bitmap?): BitmapMemoryInfo {
+        return try {
+            if (bitmap != null && !bitmap.isRecycled) {
+                val bytes = bitmap.allocationByteCount
+                BitmapMemoryInfo(
+                    isValid = true,
+                    sizeMB = bytes / MB.toDouble(),
+                    width = bitmap.width,
+                    height = bitmap.height,
+                    config = bitmap.config?.name ?: "Unknown",
+                    isInNativeHeap = true  // Android O+ 비트맵은 Native 힙에 저장
+                )
+            } else {
+                BitmapMemoryInfo(false, 0.0, 0, 0, "Invalid/Recycled", false)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "비트맵 메모리 정보 수집 실패: ${e.message}", e)
+            BitmapMemoryInfo(false, 0.0, 0, 0, "Error", false)
+        }
+    }
+
     fun logAppResourceStatus(tag: String = "ResourceMonitor", context: String = "") {
         try {
             val appMemory = getAppMemoryInfo()
@@ -175,41 +857,6 @@ class ResourceMonitor private constructor(private val context: Context) {
                 appendLine("   앱 활성 스레드: ${thread.activeThreadCount}개")
                 appendLine("   현재 스레드: ${thread.currentThreadName}")
                 appendLine()
-
-                // 🚨 경고 및 권장사항
-                val warnings = mutableListOf<String>()
-                if (appMemory.heapUsagePercent > 85) {
-                    warnings.add("앱 힙 메모리 사용률 위험: ${formatter.format(appMemory.heapUsagePercent)}%")
-                }
-                if (appMemory.availableHeapMB < 20) {
-                    warnings.add("앱 힙 여유 공간 부족: ${formatter.format(appMemory.availableHeapMB)} MB")
-                }
-                if (appMemory.nativeHeapMB > 100) {
-                    warnings.add("Native 메모리 과다 사용: ${formatter.format(appMemory.nativeHeapMB)} MB (비트맵 확인 필요)")
-                }
-                if (systemMemory.systemMemoryLow) {
-                    warnings.add("시스템 전체 메모리 부족 상태")
-                }
-
-                if (warnings.isNotEmpty()) {
-                    appendLine("⚠️ 메모리 경고:")
-                    warnings.forEach { appendLine("   🚨 $it") }
-                    appendLine()
-
-                    // 권장사항
-                    appendLine("💡 권장사항:")
-                    if (appMemory.heapUsagePercent > 85) {
-                        appendLine("   • 불필요한 객체 참조 해제")
-                        appendLine("   • System.gc() 호출 고려")
-                    }
-                    if (appMemory.nativeHeapMB > 100) {
-                        appendLine("   • 비트맵 재활용 확인")
-                        appendLine("   • 순환 비트맵 풀 효율성 점검")
-                    }
-                    appendLine()
-                }
-
-                appendLine("📊 ========================================================")
             }
 
             Log.i(tag, report)
@@ -218,9 +865,6 @@ class ResourceMonitor private constructor(private val context: Context) {
         }
     }
 
-    /**
-     * 🎯 앱 메모리 경고 확인 (앱 중심)
-     */
     fun checkAppMemoryWarnings(): List<String> {
         val warnings = mutableListOf<String>()
 
@@ -228,7 +872,6 @@ class ResourceMonitor private constructor(private val context: Context) {
             val appMemory = getAppMemoryInfo()
             val systemMemory = getSystemMemoryInfo()
 
-            // 앱 힙 메모리 경고
             if (appMemory.heapUsagePercent > 90) {
                 warnings.add("🔴 앱 힙 메모리 위험: ${formatter.format(appMemory.heapUsagePercent)}%")
             } else if (appMemory.heapUsagePercent > 80) {
@@ -241,14 +884,12 @@ class ResourceMonitor private constructor(private val context: Context) {
                 warnings.add("🟡 앱 힙 여유공간 주의: ${formatter.format(appMemory.availableHeapMB)} MB")
             }
 
-            // Native 메모리 경고 (비트맵 등)
             if (appMemory.nativeHeapMB > 200) {
                 warnings.add("🔴 Native 메모리 과다: ${formatter.format(appMemory.nativeHeapMB)} MB")
             } else if (appMemory.nativeHeapMB > 100) {
                 warnings.add("🟡 Native 메모리 주의: ${formatter.format(appMemory.nativeHeapMB)} MB")
             }
 
-            // 시스템 메모리 참고 경고
             if (systemMemory.systemMemoryLow) {
                 warnings.add("⚠️ 시스템 전체 메모리 부족 (앱 종료 위험)")
             }
@@ -260,100 +901,98 @@ class ResourceMonitor private constructor(private val context: Context) {
         return warnings
     }
 
-    /**
-     * 🎯 비트맵 메모리 정보 (Native 영역에 할당됨)
-     */
-    fun getBitmapMemoryUsage(bitmap: Bitmap?): BitmapMemoryInfo {
-        return try {
-            if (bitmap != null && !bitmap.isRecycled) {
-                val bytes = bitmap.allocationByteCount
-                BitmapMemoryInfo(
-                    isValid = true,
-                    sizeMB = bytes / MB.toDouble(),
-                    width = bitmap.width,
-                    height = bitmap.height,
-                    config = bitmap.config?.name ?: "Unknown",
-                    isInNativeHeap = true  // Android O+ 비트맵은 Native 힙에 저장
-                )
-            } else {
-                BitmapMemoryInfo(false, 0.0, 0, 0, "Invalid/Recycled", false)
+    // 정리
+    fun cleanup() {
+        try {
+            temperatureSensor?.let {
+                sensorManager.unregisterListener(temperatureListener)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "비트맵 메모리 정보 수집 실패: ${e.message}", e)
-            BitmapMemoryInfo(false, 0.0, 0, 0, "Error", false)
+            Log.w(TAG, "센서 정리 중 오류: ${e.message}")
         }
-    }
-
-    // 나머지 함수들은 기존과 동일...
-    fun getCpuInfo(): CpuInfo {
-        return try {
-            val stat = File("/proc/stat").readText()
-            val cpuLine = stat.lines().first { it.startsWith("cpu ") }
-            val values = cpuLine.split("\\s+".toRegex()).drop(1).map { it.toLong() }
-
-            val idle = values[3]
-            val total = values.sum()
-            val usage = ((total - idle) * 100.0 / total)
-
-            CpuInfo(
-                usagePercent = usage,
-                coreCount = Runtime.getRuntime().availableProcessors()
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "CPU 정보 수집 실패: ${e.message}")
-            CpuInfo(0.0, Runtime.getRuntime().availableProcessors())
-        }
-    }
-
-    fun getThreadInfo(): ThreadInfo {
-        val threadGroup = Thread.currentThread().threadGroup
-        val activeThreads = threadGroup?.activeCount() ?: 0
-
-        return ThreadInfo(
-            activeThreadCount = activeThreads,
-            currentThreadName = Thread.currentThread().name,
-            mainThreadName = "main"
-        )
-    }
-
-    // 기존 호환성을 위한 함수들...
-    @Deprecated("Use getAppMemoryInfo() and getSystemMemoryInfo() instead")
-    fun getDetailedMemoryInfo(): MemoryInfo {
-        val appMem = getAppMemoryInfo()
-        val sysMem = getSystemMemoryInfo()
-
-        return MemoryInfo(
-            maxHeapMB = appMem.maxHeapMB,
-            totalHeapMB = appMem.totalHeapMB,
-            usedHeapMB = appMem.usedHeapMB,
-            freeHeapMB = appMem.freeHeapMB,
-            availableHeapMB = appMem.availableHeapMB,
-            heapUsagePercent = appMem.heapUsagePercent,
-            totalSystemMB = sysMem.totalSystemMB,
-            availableSystemMB = sysMem.availableSystemMB,
-            systemMemoryLow = sysMem.systemMemoryLow,
-            systemThresholdMB = sysMem.systemThresholdMB,
-            dalvikHeapMB = appMem.dalvikHeapMB,
-            nativeHeapMB = appMem.nativeHeapMB,
-            otherMemoryMB = appMem.otherMemoryMB,
-            totalPrivateMB = appMem.totalPrivateMB,
-            totalPssMB = appMem.totalPssMB,
-            totalSharedMB = 0.0
-        )
-    }
-
-    @Deprecated("Use logAppResourceStatus() instead")
-    fun logResourceStatus(tag: String = "ResourceMonitor", context: String = "") {
-        logAppResourceStatus(tag, context)
-    }
-
-    @Deprecated("Use checkAppMemoryWarnings() instead")
-    fun checkMemoryWarnings(): List<String> {
-        return checkAppMemoryWarnings()
     }
 }
 
-// 데이터 클래스들은 기존과 동일...
+// 데이터 클래스들은 동일하게 유지...
+data class CriticalAnalysisInfo(
+    val timestamp: Long,
+    val monoTimestamp: Long,
+    val appMemory: AppMemoryInfo,
+    val systemMemory: SystemMemoryInfo,
+    val cpu: AdvancedCpuInfo,
+    val thermal: ThermalInfo,
+    val battery: BatteryInfo,
+    val storage: StorageInfo,
+    val gc: GCInfo,
+    val processes: ProcessInfo,
+    val graphics: GraphicsInfo
+)
+
+data class ThermalInfo(
+    val cpuTemperature: Float,
+    val batteryTemperature: Float,
+    val ambientTemperature: Float,
+    val thermalState: String,
+    val thermalThrottling: Boolean
+)
+
+data class BatteryInfo(
+    val level: Int,
+    val scale: Int,
+    val voltage: Int,
+    val temperature: Float,
+    val status: String,
+    val health: String,
+    val isCharging: Boolean,
+    val powerSaveModeEnabled: Boolean
+)
+
+data class AdvancedCpuInfo(
+    val coreCount: Int,
+    val currentFreqs: List<Long>,
+    val maxFreqs: List<Long>,
+    val minFreqs: List<Long>,
+    val governor: String,
+    val loadAverage: List<Double>,
+    val usagePercent: Double,
+    val isThrottling: Boolean
+)
+
+data class StorageInfo(
+    val internalTotal: Long,
+    val internalFree: Long,
+    val externalTotal: Long,
+    val externalFree: Long,
+    val cacheSize: Long
+)
+
+data class GCInfo(
+    val gcCount: Int,
+    val gcTime: Long,
+    val gcFreedSize: Long,
+    val gcFreedCount: Long,
+    val lastGcReason: String
+)
+
+data class ProcessInfo(
+    val pid: Int,
+    val uid: Int,
+    val processName: String,
+    val importance: Int,
+    val totalProcessCount: Int,
+    val threadCount: Int,
+    val fdCount: Int
+)
+
+data class GraphicsInfo(
+    val renderer: String,
+    val vendor: String,
+    val version: String,
+    val extensions: List<String>,
+    val surfaceFlinger: String
+)
+
+// 기존 데이터 클래스들 유지
 data class AppMemoryInfo(
     val maxHeapMB: Double,
     val totalHeapMB: Double,
@@ -383,15 +1022,18 @@ enum class MemoryPressureLevel {
     LOW, MEDIUM, HIGH, CRITICAL
 }
 
-data class BitmapMemoryInfo(
-    val isValid: Boolean,
-    val sizeMB: Double,
-    val width: Int,
-    val height: Int,
-    val config: String,
-    val isInNativeHeap: Boolean
+data class CpuInfo(
+    val usagePercent: Double,
+    val coreCount: Int
 )
 
+data class ThreadInfo(
+    val activeThreadCount: Int,
+    val currentThreadName: String,
+    val mainThreadName: String
+)
+
+// 기존 호환성 데이터 클래스
 data class MemoryInfo(
     val maxHeapMB: Double,
     val totalHeapMB: Double,
@@ -411,13 +1053,11 @@ data class MemoryInfo(
     val totalSharedMB: Double
 )
 
-data class CpuInfo(
-    val usagePercent: Double,
-    val coreCount: Int
-)
-
-data class ThreadInfo(
-    val activeThreadCount: Int,
-    val currentThreadName: String,
-    val mainThreadName: String
+data class BitmapMemoryInfo(
+    val isValid: Boolean,
+    val sizeMB: Double,
+    val width: Int,
+    val height: Int,
+    val config: String,
+    val isInNativeHeap: Boolean
 )

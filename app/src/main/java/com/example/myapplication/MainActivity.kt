@@ -25,6 +25,8 @@ import android.location.LocationManager
 import android.net.Uri
 import android.provider.Settings
 import android.os.PowerManager
+import com.example.myapplication.utils.CrashHandler  // ✅ 추가
+import com.example.myapplication.utils.PerformanceMonitoringService  // ✅ 추가
 
 class MainActivity : AppCompatActivity() {
     private val PERMISSION_REQUEST_CODE = 100
@@ -39,8 +41,20 @@ class MainActivity : AppCompatActivity() {
     private var batteryOptimizationDialog: AlertDialog? = null
     private var locationServiceDialog: AlertDialog? = null
 
+    // ✅ 성능 모니터링 서비스 추가
+    private var performanceMonitoringService: PerformanceMonitoringService? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // ✅ 크래시 핸들러 초기화 (가장 먼저!)
+        CrashHandler.setup(this)
+        Log.d("MainActivity", "🛡️ 크래시 핸들러 설정 완료")
+
+        // ✅ 성능 모니터링 서비스 초기화 및 시작
+        performanceMonitoringService = PerformanceMonitoringService.getInstance(this)
+        performanceMonitoringService?.startMonitoring()
+        Log.d("MainActivity", "🚀 성능 모니터링 서비스 시작 - 30초마다 .txt 로깅")
 
         sensorCollector = SensorCollector(this)
         val dataSynchronizer = DataSynchronizer()
@@ -213,9 +227,15 @@ class MainActivity : AppCompatActivity() {
         intent.data = uri
         startActivity(intent)
     }
-    // ✅ 액티비티 종료 시 리소스 정리
+
+    // ✅ 액티비티 종료 시 리소스 정리 - 성능 모니터링 추가
     override fun onDestroy() {
         super.onDestroy()
+
+        // ✅ 성능 모니터링 서비스 중지
+        performanceMonitoringService?.stopMonitoring()
+        performanceMonitoringService = null
+        Log.d("MainActivity", "🛑 성능 모니터링 서비스 중지")
 
         // ✅ 다이얼로그 해제로 메모리 누수 방지
         batteryOptimizationDialog?.dismiss()

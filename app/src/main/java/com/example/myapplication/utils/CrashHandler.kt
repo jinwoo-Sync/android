@@ -51,7 +51,8 @@ class CrashHandler private constructor(
             val systemMemory = resourceMonitor.getSystemMemoryInfo()
 
             fileLogger.emergencyLog(TAG, "=== 크래시 직전 메모리 상태 ===")
-            fileLogger.emergencyLog(TAG, "앱 힙 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
+            fileLogger.emergencyLog(TAG, "앱 힙 사용률: ${String.format("%.1f", appMemory.
+            heapUsagePercent)}%")
             fileLogger.emergencyLog(TAG, "앱 힙 가용: ${String.format("%.1f", appMemory.availableHeapMB)} MB")
             fileLogger.emergencyLog(TAG, "Native 메모리: ${String.format("%.1f", appMemory.nativeHeapMB)} MB")
             fileLogger.emergencyLog(TAG, "시스템 메모리 부족: ${systemMemory.systemMemoryLow}")
