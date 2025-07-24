@@ -30,6 +30,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.text.DecimalFormat
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import com.example.myapplication.utils.FileLogger
 
 /**
  * 공통 유틸리티 모음
@@ -393,6 +397,60 @@ class HomeFragment : Fragment() {
                 // UI 상태 업데이트
                 binding.poolStatusText.text = pool?.getStatus() ?: "풀 없음"
             }
+        }
+        // 🎯 15초 주기 UI Pool 정보 로깅 추가
+        lifecycleScope.launch {
+            while (isActive) {
+                delay(15000) // 15초마다 로깅
+
+                try {
+                    val pool = bitmapPool
+                    val fileLogger = FileLogger.getInstance(requireContext())
+
+                    if (pool != null) {
+                        val poolReport = buildUIPoolReport(pool)
+                        fileLogger.i("UIBitmapPool", poolReport)
+                        Log.d("HomeFragment", "📊 UI Pool 상태 로깅 완료")
+                    } else {
+                        fileLogger.w("UIBitmapPool", "UI Pool이 초기화되지 않음")
+                    }
+                } catch (e: Exception) {
+                    FragmentUtils.logEvent("HomeFragment", "ERROR", "UI Pool 로깅 실패: ${e.message}", e)
+                }
+            }
+        }
+    }
+
+    private fun buildUIPoolReport(pool: CircularBitmapPool): String {
+        return buildString {
+            appendLine("╔═══════════════════════════════════════════════════════════════╗")
+            appendLine("║                      UI 비트맵 풀 상태 리포트 (15초 주기)               ║")
+            appendLine("╠═══════════════════════════════════════════════════════════════╣")
+            appendLine("║ ⏰ 시간: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(
+                Date()
+            )}")
+            appendLine("║")
+            appendLine("║ 🎨 UI Pool 상태:")
+            appendLine("║   ├─ 전체 상태: ${pool.getStatus()}")
+            appendLine("║   ├─ 건강성: ${if (pool.isHealthy()) "✅ 정상" else "⚠️ 문제"}")
+            appendLine("║   ├─ 초기화 상태: ${if (pool.isReady()) "✅ 완료" else "❌ 미완료"}")
+            appendLine("║   └─ 성공률: ${if (successfulFrameCount + frameSkipCount > 0)
+                String.format("%.1f", (successfulFrameCount.toFloat() / (successfulFrameCount + frameSkipCount) * 100)) + "%"
+            else "N/A"}")
+            appendLine("║")
+            appendLine("║ 📊 통계:")
+            appendLine("║   ├─ 성공한 프레임: ${successfulFrameCount}개")
+            appendLine("║   ├─ 스킵된 프레임: ${frameSkipCount}개")
+            appendLine("║   ├─ Surface 복구: ${surfaceDropRecoveryCount}회")
+            appendLine("║   └─ 마지막 복구: ${if (lastRecoveryTime > 0) "${(System.currentTimeMillis() - lastRecoveryTime)/1000}초 전" else "없음"}")
+            appendLine("║")
+            appendLine("║ 🧠 메모리 사용량:")
+            val resourceMonitor = ResourceMonitor.getInstance(requireContext())
+            val memInfo = resourceMonitor.getAppMemoryInfo()
+            appendLine("║   ├─ 앱 힙 사용률: ${String.format("%.1f", memInfo.heapUsagePercent)}%")
+            appendLine("║   ├─ Native 힙: ${String.format("%.1f", memInfo.nativeHeapMB)} MB")
+            appendLine("║   └─ 메모리 압박: ${memInfo.memoryPressureLevel}")
+            appendLine("╚═══════════════════════════════════════════════════════════════╝")
         }
     }
 

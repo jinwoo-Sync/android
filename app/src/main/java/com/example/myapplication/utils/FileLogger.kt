@@ -1,4 +1,3 @@
-// app/src/main/java/com/example/myapplication/utils/FileLogger.kt
 package com.example.myapplication.utils
 
 import android.content.Context
@@ -17,7 +16,8 @@ class FileLogger private constructor(private val context: Context) {
     companion object {
         private const val TAG = "FileLogger"
         private const val MAX_LOG_FILES = 10
-        private const val MAX_FILE_SIZE_MB = 10
+        private const val MAX_FILE_SIZE_MB = 50  // 파일 크기 증가
+        private const val MAX_SINGLE_LOG_SIZE = 100000  // 로그 크기 증가
 
         @Volatile
         private var INSTANCE: FileLogger? = null
@@ -50,29 +50,37 @@ class FileLogger private constructor(private val context: Context) {
 
     private fun getLogDirectory(): File? {
         return try {
-            // API 29+ (Android 10+) - Documents/save 경로 사용
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Documents 폴더 내 save 폴더
-                val documentsDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "save")
-                if (!documentsDir.exists()) {
-                    documentsDir.mkdirs()
-                }
-                documentsDir
+            // 외부 저장소의 Documents/save 디렉토리 사용
+            val documentsDir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "save")
             } else {
-                // API 28 이하 - 기존 방식
-                val saveDir = File(Environment.getExternalStorageDirectory(), "Documents/save")
-                if (!saveDir.exists()) {
-                    saveDir.mkdirs()
-                }
-                saveDir
+                File(Environment.getExternalStorageDirectory(), "Documents/save")
             }
+
+            if (!documentsDir.exists()) {
+                val created = documentsDir.mkdirs()
+                Log.d(TAG, "로그 디렉토리 생성: ${documentsDir.absolutePath}, 성공: $created")
+            }
+
+            // 디렉토리가 쓰기 가능한지 확인
+            if (!documentsDir.canWrite()) {
+                Log.e(TAG, "로그 디렉토리 쓰기 권한 없음: ${documentsDir.absolutePath}")
+                return getInternalLogDirectory()
+            }
+
+            documentsDir
         } catch (e: Exception) {
-            Log.e(TAG, "로그 디렉터리 생성 실패: ${e.message}", e)
-            // 폴백: 앱 내부 저장소
-            File(context.filesDir, "logs").apply {
-                if (!exists()) mkdirs()
-            }
+            Log.e(TAG, "외부 저장소 접근 실패: ${e.message}", e)
+            getInternalLogDirectory()
         }
+    }
+
+    private fun getInternalLogDirectory(): File {
+        val internalDir = File(context.filesDir, "logs")
+        if (!internalDir.exists()) {
+            internalDir.mkdirs()
+        }
+        return internalDir
     }
 
     fun startFileLogging() {
@@ -85,7 +93,7 @@ class FileLogger private constructor(private val context: Context) {
             while (isLoggingActive) {
                 try {
                     processLogQueue()
-                    delay(500) // 0.5초마다 로그 처리
+                    delay(100)  // 딜레이 감소 (500ms -> 100ms)
                 } catch (e: Exception) {
                     Log.e(TAG, "로그 처리 오류: ${e.message}", e)
                 }
@@ -95,15 +103,6 @@ class FileLogger private constructor(private val context: Context) {
         Log.d(TAG, "📝 파일 로깅 시작: ${currentLogFile?.absolutePath}")
     }
 
-    fun stopFileLogging() {
-        isLoggingActive = false
-        runBlocking {
-            processLogQueue() // 남은 로그 처리
-        }
-        Log.d(TAG, "📝 파일 로깅 중지")
-    }
-
-    // 🎯 메인 로깅 함수들
     fun d(tag: String, message: String) {
         addLog("DEBUG", tag, message)
         Log.d(tag, message)
@@ -124,7 +123,27 @@ class FileLogger private constructor(private val context: Context) {
         Log.e(tag, message, throwable)
     }
 
-    // 🎯 중요한 크래시 전 상태 저장
+    // 종합 분석용 로그 - 즉시 파일에 기록
+    fun comprehensiveLog(tag: String, message: String) {
+        val entry = LogEntry(
+            timestamp = System.currentTimeMillis(),
+            level = "COMPREHENSIVE",
+            tag = tag,
+            message = message
+        )
+
+        // 큐에 추가
+        logQueue.offer(entry)
+
+        // 중요한 로그는 즉시 파일에 기록
+        loggingScope.launch {
+            writeLogEntryToFileDirectly(entry)
+        }
+
+        Log.i(tag, "📊 COMPREHENSIVE: ${message.take(200)}...")  // 로그캣에는 요약만
+    }
+
+    // 긴급 로그 - 즉시 파일에 기록
     fun emergencyLog(tag: String, message: String) {
         val entry = LogEntry(
             timestamp = System.currentTimeMillis(),
@@ -132,11 +151,13 @@ class FileLogger private constructor(private val context: Context) {
             tag = tag,
             message = message
         )
-        // 즉시 파일에 기록 (큐 우회)
-        loggingScope.launch {
-            writeLogEntryToFile(entry)
+
+        // 즉시 파일에 기록
+        runBlocking {
+            writeLogEntryToFileDirectly(entry)
         }
-        Log.e(tag, "🚨 EMERGENCY: $message")
+
+        Log.e(tag, "🚨 EMERGENCY: ${message.take(200)}...")
     }
 
     private fun addLog(level: String, tag: String, message: String, throwable: Throwable? = null) {
@@ -149,8 +170,8 @@ class FileLogger private constructor(private val context: Context) {
         )
         logQueue.offer(entry)
 
-        // 큐가 너무 크면 정리
-        while (logQueue.size > 1000) {
+        // 큐 크기 제한 증가
+        while (logQueue.size > 5000) {
             logQueue.poll()
         }
     }
@@ -158,11 +179,12 @@ class FileLogger private constructor(private val context: Context) {
     private suspend fun processLogQueue() = withContext(Dispatchers.IO) {
         val currentFile = currentLogFile ?: return@withContext
 
-        // 파일 크기 체크 및 로테이션
+        // 파일 크기 체크
         if (currentFile.length() > MAX_FILE_SIZE_MB * 1024 * 1024) {
             rotateLogFile()
         }
 
+        // 한 번에 더 많은 로그 처리
         val entries = mutableListOf<LogEntry>()
         while (logQueue.isNotEmpty() && entries.size < 100) {
             logQueue.poll()?.let { entries.add(it) }
@@ -177,29 +199,41 @@ class FileLogger private constructor(private val context: Context) {
         val logFile = currentLogFile ?: return
 
         try {
-            // 파일이 존재하지 않으면 생성
+            // 파일이 없으면 생성
             if (!logFile.exists()) {
                 logFile.parentFile?.mkdirs()
                 logFile.createNewFile()
+                Log.d(TAG, "새 로그 파일 생성: ${logFile.absolutePath}")
             }
 
+            // 파일에 쓰기
             FileWriter(logFile, true).use { fileWriter ->
                 PrintWriter(fileWriter).use { writer ->
                     for (entry in entries) {
-                        writeLogEntry(writer, entry)
+                        try {
+                            writeLogEntry(writer, entry)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "로그 엔트리 쓰기 실패: ${e.message}", e)
+                        }
                     }
-                    writer.flush()
+                    writer.flush()  // 강제 플러시
                 }
             }
+
+            Log.v(TAG, "✅ ${entries.size}개 로그 저장 완료 (파일: ${logFile.name})")
+
         } catch (e: Exception) {
-            Log.e(TAG, "로그 파일 쓰기 실패: ${e.message}", e)
-            // 폴백으로 내부 저장소에 저장 시도
+            Log.e(TAG, "파일 쓰기 실패: ${e.message}", e)
             tryWriteToInternalStorage(entries)
         }
     }
 
-    private fun writeLogEntryToFile(entry: LogEntry) {
-        val logFile = currentLogFile ?: return
+    // 직접 파일에 쓰기 (중요한 로그용)
+    fun writeLogEntryToFileDirectly(entry: LogEntry) {
+        val logFile = currentLogFile ?: run {
+            Log.e(TAG, "로그 파일이 없음!")
+            return
+        }
 
         try {
             if (!logFile.exists()) {
@@ -213,22 +247,28 @@ class FileLogger private constructor(private val context: Context) {
                     writer.flush()
                 }
             }
+
+            Log.d(TAG, "✅ 직접 로그 저장 완료: ${entry.level}/${entry.tag}")
+
         } catch (e: Exception) {
-            Log.e(TAG, "응급 로그 파일 쓰기 실패: ${e.message}", e)
+            Log.e(TAG, "직접 로그 쓰기 실패: ${e.message}", e)
+            // 실패 시 내부 저장소로 시도
+            tryWriteToInternalStorage(listOf(entry))
         }
     }
 
     private fun tryWriteToInternalStorage(entries: List<LogEntry>) {
         try {
-            val internalLogDir = File(context.filesDir, "logs")
-            if (!internalLogDir.exists()) internalLogDir.mkdirs()
-
+            val internalLogDir = getInternalLogDirectory()
             val timestamp = fileNameFormat.format(Date())
             val fallbackFile = File(internalLogDir, "fallback_log_$timestamp.txt")
 
             FileWriter(fallbackFile, true).use { fileWriter ->
                 PrintWriter(fileWriter).use { writer ->
-                    writer.println("=== 외부 저장소 접근 실패로 내부 저장소에 기록 ===")
+                    writer.println("=== 폴백 로그 (외부 저장소 실패) ===")
+                    writer.println("시간: ${dateFormat.format(Date())}")
+                    writer.println()
+
                     for (entry in entries) {
                         writeLogEntry(writer, entry)
                     }
@@ -236,20 +276,45 @@ class FileLogger private constructor(private val context: Context) {
                 }
             }
 
-            Log.w(TAG, "폴백으로 내부 저장소에 로그 저장: ${fallbackFile.absolutePath}")
+            Log.w(TAG, "폴백 저장 성공: ${fallbackFile.absolutePath}")
         } catch (e: Exception) {
-            Log.e(TAG, "폴백 로그 저장도 실패: ${e.message}", e)
+            Log.e(TAG, "폴백 저장도 실패: ${e.message}", e)
         }
     }
 
     private fun writeLogEntry(writer: PrintWriter, entry: LogEntry) {
         val timestamp = dateFormat.format(Date(entry.timestamp))
-        writer.println("$timestamp ${entry.level}/${entry.tag}: ${entry.message}")
 
-        entry.throwable?.let { throwable ->
-            writer.println("Exception: ${throwable.javaClass.simpleName}: ${throwable.message}")
-            throwable.stackTrace.forEach { element ->
-                writer.println("    at $element")
+        when (entry.level) {
+            "EMERGENCY" -> {
+                writer.println()
+                writer.println("🚨🚨🚨 EMERGENCY LOG 🚨🚨🚨")
+                writer.println("$timestamp ${entry.level}/${entry.tag}:")
+                writer.println(entry.message)
+                writer.println("🚨🚨🚨 EMERGENCY END 🚨🚨🚨")
+                writer.println()
+            }
+            "COMPREHENSIVE" -> {
+                writer.println()
+                writer.println("📊 COMPREHENSIVE ANALYSIS 📊")
+                writer.println("$timestamp ${entry.level}/${entry.tag}:")
+                writer.println(entry.message)
+                writer.println("📊 COMPREHENSIVE END 📊")
+                writer.println()
+            }
+            "ERROR" -> {
+                writer.println()
+                writer.println("❌ ERROR LOG ❌")
+                writer.println("$timestamp ${entry.level}/${entry.tag}:")
+                writer.println(entry.message)
+                entry.throwable?.let {
+                    writer.println("Exception: ${it.javaClass.simpleName}: ${it.message}")
+                    it.printStackTrace(writer)
+                }
+                writer.println()
+            }
+            else -> {
+                writer.println("$timestamp ${entry.level}/${entry.tag}: ${entry.message}")
             }
         }
     }
@@ -258,20 +323,66 @@ class FileLogger private constructor(private val context: Context) {
         val timestamp = fileNameFormat.format(Date())
         val logDir = getLogDirectory() ?: return null
 
-        return File(logDir, "app_crash_log_$timestamp.txt")
+        val newFile = File(logDir, "app_performance_log_$timestamp.txt")
+
+        try {
+            if (!newFile.exists()) {
+                newFile.createNewFile()
+                Log.i(TAG, "새 로그 파일 생성: ${newFile.absolutePath}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "로그 파일 생성 실패: ${e.message}", e)
+            return null
+        }
+
+        return newFile
     }
 
     private fun rotateLogFile() {
+        Log.i(TAG, "로그 파일 로테이션 시작")
         currentLogFile = createNewLogFile()
         cleanupOldLogFiles()
-        Log.d(TAG, "📝 로그 파일 로테이션: ${currentLogFile?.absolutePath}")
+    }
+
+    // 나머지 메서드들은 그대로...
+
+    fun getCurrentLogFilePath(): String? = currentLogFile?.absolutePath
+
+    fun getAllLogFiles(): List<File> {
+        val logDir = getLogDirectory() ?: return emptyList()
+        return logDir.listFiles { file ->
+            file.name.startsWith("app_") && file.name.endsWith(".txt")
+        }?.toList() ?: emptyList()
+    }
+
+    fun getLogDirectoryPath(): String? = getLogDirectory()?.absolutePath
+
+    fun getLogFileStatus(): String {
+        return try {
+            val currentFile = currentLogFile
+            if (currentFile != null) {
+                "파일: ${currentFile.name}, 크기: ${currentFile.length() / 1024}KB, 큐: ${logQueue.size}"
+            } else {
+                "로그 파일 없음, 큐: ${logQueue.size}"
+            }
+        } catch (e: Exception) {
+            "상태 확인 실패: ${e.message}"
+        }
+    }
+
+    fun stopFileLogging() {
+        isLoggingActive = false
+        runBlocking {
+            processLogQueue()  // 남은 로그 모두 처리
+        }
+        Log.d(TAG, "📝 파일 로깅 중지")
     }
 
     private fun cleanupOldLogFiles() {
         try {
             val logDir = getLogDirectory() ?: return
             val logFiles = logDir.listFiles { file ->
-                file.name.startsWith("app_crash_log_") && file.name.endsWith(".txt")
+                file.name.startsWith("app_") && file.name.endsWith(".txt")
             }?.toList() ?: return
 
             if (logFiles.size > MAX_LOG_FILES) {
@@ -286,16 +397,4 @@ class FileLogger private constructor(private val context: Context) {
             Log.e(TAG, "오래된 로그 파일 정리 실패: ${e.message}", e)
         }
     }
-
-    fun getCurrentLogFilePath(): String? = currentLogFile?.absolutePath
-
-    fun getAllLogFiles(): List<File> {
-        val logDir = getLogDirectory() ?: return emptyList()
-        return logDir.listFiles { file ->
-            file.name.startsWith("app_crash_log_") && file.name.endsWith(".txt")
-        }?.toList() ?: emptyList()
-    }
-
-    // 🎯 로그 파일 위치 확인용
-    fun getLogDirectoryPath(): String? = getLogDirectory()?.absolutePath
 }

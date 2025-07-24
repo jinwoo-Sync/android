@@ -1,4 +1,3 @@
-// PerformanceMonitoringService.kt
 package com.example.myapplication.utils
 
 import android.content.Context
@@ -17,10 +16,11 @@ class PerformanceMonitoringService private constructor(
 ) {
     companion object {
         private const val TAG = "PerformanceMonitoringService"
-        private const val ROUTINE_LOG_INTERVAL_MS = 30_000L  // 30초
+        private const val ROUTINE_LOG_INTERVAL_MS = 30_000L  // 30초 - 크리티컬 분석
+        private const val COMPREHENSIVE_LOG_INTERVAL_MS = 30_000L  // 1분 - 종합 상태
         private const val FPS_MONITOR_INTERVAL_MS = 1_000L   // 1초
-        private const val CRITICAL_FPS_THRESHOLD = 10.0     // 10fps 미만
-        private const val SEVERE_FPS_THRESHOLD = 5.0        // 5fps 미만 (크리티컬)
+        private const val CRITICAL_FPS_THRESHOLD = 10.0
+        private const val SEVERE_FPS_THRESHOLD = 5.0
 
         private val MB = 1024 * 1024
 
@@ -51,15 +51,22 @@ class PerformanceMonitoringService private constructor(
 
     // 크리티컬 분석 관련
     private var lastCriticalAnalysisTime = 0L
-    private val criticalAnalysisInterval = 5_000L  // 5초 최소 간격
+    private val criticalAnalysisInterval = 5_000L
+
+    // 🎯 앱 시작 시간 기록
+    private val appStartTime = System.currentTimeMillis()
 
     /**
-     * 모니터링 시작
+     * 모니터링 시작 - 30초 크리티컬 + 1분 종합
      */
     fun startMonitoring() {
         if (isMonitoring.compareAndSet(false, true)) {
-            Log.d(TAG, "🚀 성능 모니터링 서비스 시작")
-            startRoutineLogging()
+            fileLogger.i(TAG, "🚀 확장된 성능 모니터링 서비스 시작")
+            fileLogger.i(TAG, "  📊 30초마다: 크리티컬 성능 분석")
+            fileLogger.i(TAG, "  📋 1분마다: 종합 앱 상태 리포트")
+
+            startCriticalAnalysisLogging()  // 30초 크리티컬 분석
+            startComprehensiveStatusLogging()  // 1분 종합 상태
             startFpsMonitoring()
         }
     }
@@ -69,82 +76,328 @@ class PerformanceMonitoringService private constructor(
      */
     fun stopMonitoring() {
         if (isMonitoring.compareAndSet(true, false)) {
-            Log.d(TAG, "🛑 성능 모니터링 서비스 중지")
+            fileLogger.i(TAG, "🛑 성능 모니터링 서비스 중지")
             stopFpsMonitoring()
             monitoringScope.cancel()
         }
     }
 
     /**
-     * 📊 30초 주기 정기 로깅
+     * 📊 30초 주기 크리티컬 분석 (기존 유지)
      */
-    private fun startRoutineLogging() {
+    private fun startCriticalAnalysisLogging() {
         monitoringScope.launch {
             while (isActive && isMonitoring.get()) {
                 try {
-                    logRoutinePerformanceData()
+                    logFullCriticalAnalysisReport()
                     delay(ROUTINE_LOG_INTERVAL_MS)
                 } catch (e: Exception) {
-                    Log.e(TAG, "정기 로깅 오류: ${e.message}", e)
-                    delay(5000) // 오류 시 5초 대기
+                    fileLogger.e(TAG, "크리티컬 분석 로깅 오류: ${e.message}", e)
+                    delay(5000)
                 }
             }
         }
     }
 
     /**
-     * 📊 30초 주기 성능 데이터 로깅
+     * 📋 1분 주기 종합 앱 상태 로깅 (새로 추가)
      */
-    private suspend fun logRoutinePerformanceData() = withContext(Dispatchers.IO) {
-        try {
-            val timestamp = dateFormat.format(Date())
-            val appMemory = resourceMonitor.getAppMemoryInfo()
-            val systemMemory = resourceMonitor.getSystemMemoryInfo()
-            val cpuInfo = resourceMonitor.getCpuInfo()
-            val threadInfo = resourceMonitor.getThreadInfo()
+    private fun startComprehensiveStatusLogging() {
+        monitoringScope.launch {
+            // 첫 번째 종합 리포트는 1분 후부터 시작
+            delay(COMPREHENSIVE_LOG_INTERVAL_MS)
 
-            val logEntry = buildString {
-                appendLine("╔══════════════════════════════════════════════════════════════╗")
-                appendLine("║                     정기 성능 모니터링 (30초 주기)                   ║")
-                appendLine("╠══════════════════════════════════════════════════════════════╣")
-                appendLine("║ ⏰ 시간: $timestamp")
-                appendLine("║ 📱 현재 FPS: ${String.format("%.1f", currentFps)} fps")
-                appendLine("║")
-                appendLine("║ 🧠 앱 메모리:")
-                appendLine("║   ├─ 힙 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
-                appendLine("║   ├─ 사용량: ${String.format("%.1f", appMemory.usedHeapMB)} MB")
-                appendLine("║   ├─ 가용: ${String.format("%.1f", appMemory.availableHeapMB)} MB")
-                appendLine("║   ├─ Native: ${String.format("%.1f", appMemory.nativeHeapMB)} MB")
-                appendLine("║   └─ 압박: ${appMemory.memoryPressureLevel}")
-                appendLine("║")
-                appendLine("║ 🌐 시스템 메모리:")
-                appendLine("║   ├─ 전체: ${String.format("%.1f", systemMemory.totalSystemMB)} MB")
-                appendLine("║   ├─ 가용: ${String.format("%.1f", systemMemory.availableSystemMB)} MB")
-                appendLine("║   ├─ 사용률: ${String.format("%.1f", systemMemory.systemMemoryPressure)}%")
-                appendLine("║   └─ 부족: ${if (systemMemory.systemMemoryLow) "예" else "아니오"}")
-                appendLine("║")
-                appendLine("║ ⚡ CPU:")
-                appendLine("║   ├─ 사용률: ${String.format("%.1f", cpuInfo.usagePercent)}%")
-                appendLine("║   └─ 코어: ${cpuInfo.coreCount}개")
-                appendLine("║")
-                appendLine("║ 🧵 스레드:")
-                appendLine("║   ├─ 활성: ${threadInfo.activeThreadCount}개")
-                appendLine("║   └─ 현재: ${threadInfo.currentThreadName}")
-                appendLine("╚══════════════════════════════════════════════════════════════╝")
+            while (isActive && isMonitoring.get()) {
+                try {
+                    logComprehensiveAppStatus()
+                    delay(COMPREHENSIVE_LOG_INTERVAL_MS)
+                } catch (e: Exception) {
+                    fileLogger.e(TAG, "종합 상태 로깅 오류: ${e.message}", e)
+                    delay(10000) // 오류 시 10초 대기
+                }
             }
-
-            fileLogger.i(TAG, logEntry)
-            Log.d(TAG, "📊 정기 성능 데이터 로깅 완료")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "정기 성능 데이터 로깅 실패: ${e.message}", e)
-            fileLogger.e(TAG, "정기 성능 데이터 로깅 실패: ${e.message}", e)
         }
     }
 
     /**
-     * 🎯 FPS 모니터링 시작
+     * 🎯 30초마다 크리티컬 분석 리포트 (기존 메서드 유지)
      */
+    private suspend fun logFullCriticalAnalysisReport() = withContext(Dispatchers.IO) {
+        try {
+            val analysis = resourceMonitor.getCriticalPerformanceAnalysis()
+            val timestamp = dateFormat.format(Date(analysis.timestamp))
+
+            val routineReport = buildCriticalAnalysisReport(
+                reason = "ROUTINE_MONITORING",
+                fps = currentFps,
+                timestamp = timestamp,
+                analysis = analysis
+            )
+
+            fileLogger.i(TAG, routineReport)
+            Log.d(TAG, "📊 30초 정기 크리티컬 분석 리포트 저장 완료")
+
+        } catch (e: Exception) {
+            val errorMsg = "30초 정기 크리티컬 분석 리포트 저장 실패: ${e.message}"
+            Log.e(TAG, errorMsg, e)
+            fileLogger.e(TAG, errorMsg, e)
+        }
+    }
+
+    /**
+     * 🎯 1분마다 종합 앱 상태 리포트 (새로 추가)
+     */
+    private suspend fun logComprehensiveAppStatus() = withContext(Dispatchers.IO) {
+        try {
+            val currentTime = System.currentTimeMillis()
+            val timestamp = dateFormat.format(Date(currentTime))
+            val uptimeMs = currentTime - appStartTime
+
+            val comprehensiveReport = buildComprehensiveAppStatusReport(timestamp, uptimeMs)
+
+            // 종합 리포트는 comprehensiveLog로 구분해서 저장
+            fileLogger.comprehensiveLog(TAG, comprehensiveReport)
+
+            Log.d(TAG, "📋 1분 종합 앱 상태 리포트 저장 완료 (업타임: ${formatUptime(uptimeMs)})")
+
+        } catch (e: Exception) {
+            val errorMsg = "종합 앱 상태 리포트 생성 실패: ${e.message}"
+            Log.e(TAG, errorMsg, e)
+            fileLogger.e(TAG, errorMsg, e)
+        }
+    }
+
+    /**
+     * 📋 종합 앱 상태 리포트 빌더 (UI 포함)
+     */
+    private fun buildComprehensiveAppStatusReport(timestamp: String, uptimeMs: Long): String {
+        return buildString {
+            appendLine("🏠                   종합 앱 상태 리포트 (1분 주기)                   🏠")
+            appendLine()
+            appendLine("🕐 리포트 시간: $timestamp")
+            appendLine("⏱️ 앱 업타임: ${formatUptime(uptimeMs)}")
+            appendLine("📱 현재 FPS: ${String.format("%.2f", currentFps)} fps")
+            appendLine("🔄 FPS 연속 저하 횟수: $consecutiveLowFpsCount")
+            appendLine()
+
+            // 1. 메모리 상태 요약
+            val appMemory = resourceMonitor.getAppMemoryInfo()
+            val systemMemory = resourceMonitor.getSystemMemoryInfo()
+
+            appendLine("🧠 ═══════════════════ 메모리 상태 요약 ═══════════════════")
+            appendLine("앱 힙 메모리:")
+            appendLine("  ├─ 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
+            appendLine("  ├─ 사용량: ${String.format("%.1f", appMemory.usedHeapMB)} MB")
+            appendLine("  ├─ 최대량: ${String.format("%.1f", appMemory.maxHeapMB)} MB")
+            appendLine("  ├─ 가용량: ${String.format("%.1f", appMemory.availableHeapMB)} MB")
+            appendLine("  └─ 압박수준: ${appMemory.memoryPressureLevel}")
+            appendLine()
+            appendLine("네이티브 메모리:")
+            appendLine("  ├─ Dalvik: ${String.format("%.1f", appMemory.dalvikHeapMB)} MB")
+            appendLine("  ├─ Native: ${String.format("%.1f", appMemory.nativeHeapMB)} MB")
+            appendLine("  └─ 기타: ${String.format("%.1f", appMemory.otherMemoryMB)} MB")
+            appendLine()
+            appendLine("시스템 메모리:")
+            appendLine("  ├─ 전체: ${String.format("%.1f", systemMemory.totalSystemMB)} MB")
+            appendLine("  ├─ 가용: ${String.format("%.1f", systemMemory.availableSystemMB)} MB")
+            appendLine("  ├─ 사용률: ${String.format("%.1f", systemMemory.systemMemoryPressure)}%")
+            appendLine("  └─ 부족상태: ${if (systemMemory.systemMemoryLow) "⚠️ 예" else "✅ 아니오"}")
+            appendLine()
+
+            // 2. CPU 및 온도 상태
+            try {
+                val analysis = resourceMonitor.getCriticalPerformanceAnalysis()
+                val cpu = analysis.cpu
+                val thermal = analysis.thermal
+
+                appendLine("⚡ ═══════════════════ CPU & 온도 상태 ═══════════════════")
+                appendLine("CPU 정보:")
+                appendLine("  ├─ 사용률: ${String.format("%.1f", cpu.usagePercent)}%")
+                appendLine("  ├─ 코어 수: ${cpu.coreCount}개")
+                appendLine("  ├─ 거버너: ${cpu.governor}")
+                appendLine("  └─ 스로틀링: ${if (cpu.isThrottling) "⚠️ 활성" else "✅ 비활성"}")
+                appendLine()
+                appendLine("온도 정보:")
+                appendLine("  ├─ CPU: ${if (thermal.cpuTemperature > 0) "${String.format("%.1f", thermal.cpuTemperature)}°C" else "N/A"}")
+                appendLine("  ├─ 배터리: ${if (thermal.batteryTemperature > 0) "${String.format("%.1f", thermal.batteryTemperature)}°C" else "N/A"}")
+                appendLine("  ├─ 열 상태: ${thermal.thermalState}")
+                appendLine("  └─ 열 스로틀링: ${if (thermal.thermalThrottling) "⚠️ 활성" else "✅ 비활성"}")
+                appendLine()
+
+                // 3. 배터리 상태
+                val battery = analysis.battery
+                val batteryPercent = if (battery.scale > 0) (battery.level * 100 / battery.scale) else -1
+
+                appendLine("🔋 ═══════════════════ 배터리 상태 ═══════════════════")
+                appendLine("배터리 정보:")
+                appendLine("  ├─ 충전량: ${if (batteryPercent >= 0) "$batteryPercent%" else "N/A"}")
+                appendLine("  ├─ 상태: ${battery.status}")
+                appendLine("  ├─ 건강: ${battery.health}")
+                appendLine("  ├─ 충전중: ${if (battery.isCharging) "예" else "아니오"}")
+                appendLine("  └─ 절전모드: ${if (battery.powerSaveModeEnabled) "⚠️ 활성" else "✅ 비활성"}")
+                appendLine()
+
+                // 4. 프로세스 및 스레드 상태
+                val processes = analysis.processes
+                val threads = resourceMonitor.getThreadInfo()
+
+                appendLine("🔧 ═══════════════════ 프로세스 & 스레드 ═══════════════════")
+                appendLine("프로세스 정보:")
+                appendLine("  ├─ PID: ${processes.pid}")
+                appendLine("  ├─ 프로세스명: ${processes.processName}")
+                appendLine("  ├─ 중요도: ${processes.importance}")
+                appendLine("  └─ 총 프로세스: ${processes.totalProcessCount}개")
+                appendLine()
+                appendLine("스레드 정보:")
+                appendLine("  ├─ 활성 스레드: ${threads.activeThreadCount}개")
+                appendLine("  ├─ 현재 스레드: ${threads.currentThreadName}")
+                appendLine("  └─ 파일 디스크립터: ${if (processes.fdCount >= 0) "${processes.fdCount}개" else "N/A"}")
+                appendLine()
+
+            } catch (e: Exception) {
+                appendLine("⚠️ CPU/온도/배터리 정보 수집 실패: ${e.message}")
+                appendLine()
+            }
+
+            // 5. UI 및 그래픽스 상태
+            appendLine("🎮 ═══════════════════ UI & 그래픽스 상태 ═══════════════════")
+            appendLine("FPS 성능:")
+            appendLine("  ├─ 현재 FPS: ${String.format("%.2f", currentFps)} fps")
+            appendLine("  ├─ 연속 저하 횟수: $consecutiveLowFpsCount")
+            appendLine("  ├─ 심각 임계값: $SEVERE_FPS_THRESHOLD fps")
+            appendLine("  └─ 경고 임계값: $CRITICAL_FPS_THRESHOLD fps")
+            appendLine()
+
+            // 🎯 비트맵 풀 상태 (UI에서 사용되는 것들 추정치)
+            appendLine("비트맵 메모리 추정:")
+            appendLine("  ├─ Native 힙 메모리: ${String.format("%.1f", appMemory.nativeHeapMB)} MB")
+            appendLine("  ├─ 비트맵 예상 비중: ${String.format("%.1f", appMemory.nativeHeapMB * 0.7)} MB (추정)")
+            appendLine("  └─ 메모리 압박으로 인한 비트맵 위험도: ${getBitmapRiskLevel(appMemory)}")
+            appendLine()
+
+            // 6. 파일 시스템 및 로깅 상태
+            appendLine("📝 ═══════════════════ 로깅 & 파일 시스템 ═══════════════════")
+            val loggerStatus = fileLogger.getLogFileStatus()
+            val logFileCount = fileLogger.getAllLogFiles().size
+
+            appendLine("로깅 시스템:")
+            appendLine("  ├─ 현재 상태: $loggerStatus")
+            appendLine("  ├─ 로그 파일 수: ${logFileCount}개")
+            appendLine("  └─ 저장 경로: ${fileLogger.getLogDirectoryPath() ?: "Unknown"}")
+            appendLine()
+
+            // 7. 종합 위험도 평가
+            appendLine("⚠️ ═══════════════════ 종합 위험도 평가 ═══════════════════")
+            val riskFactors = evaluateOverallRisks(appMemory, systemMemory, currentFps, uptimeMs)
+            if (riskFactors.isNotEmpty()) {
+                riskFactors.forEach { appendLine("  $it") }
+            } else {
+                appendLine("  ✅ 현재 감지된 위험 요소 없음")
+            }
+            appendLine()
+
+            // 8. 10-20분 버그 추적 정보
+            appendLine("🕐 ═══════════════════ 장시간 실행 추적 정보 ═══════════════════")
+            val uptimeMinutes = uptimeMs / 60000
+            appendLine("실행 시간 분석:")
+            appendLine("  ├─ 현재 업타임: ${uptimeMinutes}분")
+            appendLine("  ├─ 10분 경과: ${if (uptimeMinutes >= 10) "✅ 경과" else "⏳ ${10 - uptimeMinutes}분 남음"}")
+            appendLine("  ├─ 20분 경과: ${if (uptimeMinutes >= 20) "✅ 경과" else "⏳ ${20 - uptimeMinutes}분 남음"}")
+            appendLine("  └─ 버그 발생 구간: ${if (uptimeMinutes in 10..20) "🚨 위험 구간" else "일반 구간"}")
+
+            if (uptimeMinutes >= 10) {
+                appendLine()
+                appendLine("⚠️ 10분 이상 실행 - 장시간 실행 버그 모니터링 활성:")
+                appendLine("  • 메모리 누수 가능성 추적 중")
+                appendLine("  • UI 응답성 저하 모니터링 중")
+                appendLine("  • 네이티브 메모리 증가 추세 관찰 중")
+            }
+
+            appendLine()
+            appendLine("🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠")
+            appendLine("🏠                      종합 앱 상태 리포트 종료                      🏠")
+            appendLine("🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠🏠")
+        }
+    }
+
+    /**
+     * 🎯 비트맵 위험도 평가 (실제 풀 없이도 추정)
+     */
+    private fun getBitmapRiskLevel(appMemory: AppMemoryInfo): String {
+        val nativeHeapMB = appMemory.nativeHeapMB
+        val heapUsagePercent = appMemory.heapUsagePercent
+
+        return when {
+            nativeHeapMB > 200 || heapUsagePercent > 90 -> "🔴 높음"
+            nativeHeapMB > 150 || heapUsagePercent > 80 -> "🟡 중간"
+            nativeHeapMB > 100 || heapUsagePercent > 70 -> "🟠 낮음"
+            else -> "🟢 안전"
+        }
+    }
+
+    /**
+     * 🎯 종합 위험도 평가
+     */
+    private fun evaluateOverallRisks(
+        appMemory: AppMemoryInfo,
+        systemMemory: SystemMemoryInfo,
+        fps: Double,
+        uptimeMs: Long
+    ): List<String> {
+        val risks = mutableListOf<String>()
+        val uptimeMinutes = uptimeMs / 60000
+
+        // 메모리 위험도
+        if (appMemory.heapUsagePercent > 85) {
+            risks.add("🔴 힙 메모리 위험: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
+        }
+        if (appMemory.nativeHeapMB > 200) {
+            risks.add("🔴 Native 메모리 과다: ${String.format("%.1f", appMemory.nativeHeapMB)} MB")
+        }
+        if (systemMemory.systemMemoryLow) {
+            risks.add("🔴 시스템 메모리 부족")
+        }
+
+        // FPS 위험도
+        if (fps < SEVERE_FPS_THRESHOLD) {
+            risks.add("🔴 심각한 FPS 저하: ${String.format("%.1f", fps)} fps")
+        } else if (fps < CRITICAL_FPS_THRESHOLD) {
+            risks.add("🟡 FPS 저하: ${String.format("%.1f", fps)} fps")
+        }
+
+        // 장시간 실행 위험도
+        if (uptimeMinutes >= 15) {
+            risks.add("🟡 장시간 실행: ${uptimeMinutes}분 (메모리 누수 주의)")
+        }
+        if (uptimeMinutes in 10..20) {
+            risks.add("🚨 버그 발생 가능 구간 (10-20분)")
+        }
+
+        // 연속적인 성능 저하
+        if (consecutiveLowFpsCount >= 5) {
+            risks.add("🟡 연속적인 성능 저하: ${consecutiveLowFpsCount}회")
+        }
+
+        return risks
+    }
+
+    /**
+     * 🎯 업타임 포맷팅
+     */
+    private fun formatUptime(uptimeMs: Long): String {
+        val seconds = uptimeMs / 1000
+        val minutes = seconds / 60
+        val hours = minutes / 60
+
+        return when {
+            hours > 0 -> "${hours}시간 ${minutes % 60}분 ${seconds % 60}초"
+            minutes > 0 -> "${minutes}분 ${seconds % 60}초"
+            else -> "${seconds}초"
+        }
+    }
+
+    // ... 나머지 기존 메서드들 (FPS 모니터링, 크리티컬 트리거 등) 모두 그대로 유지 ...
+
     private fun startFpsMonitoring() {
         lastFpsCalculationTime = System.currentTimeMillis()
         frameCount.set(0)
@@ -160,7 +413,6 @@ class PerformanceMonitoringService private constructor(
                     frameCount.set(0)
                 }
 
-                // 다음 프레임 등록
                 if (fpsMonitorCallback != null && isMonitoring.get()) {
                     Choreographer.getInstance().postFrameCallback(this)
                 }
@@ -168,12 +420,9 @@ class PerformanceMonitoringService private constructor(
         }
 
         Choreographer.getInstance().postFrameCallback(fpsMonitorCallback!!)
-        Log.d(TAG, "🎯 FPS 모니터링 시작")
+        fileLogger.d(TAG, "🎯 FPS 모니터링 시작")
     }
 
-    /**
-     * 🎯 FPS 계산 및 크리티컬 상황 감지
-     */
     private fun calculateAndCheckFps(currentTime: Long) {
         val frames = frameCount.get()
         val timeDiff = currentTime - lastFpsCalculationTime
@@ -181,11 +430,12 @@ class PerformanceMonitoringService private constructor(
 
         Log.d(TAG, "📊 현재 FPS: ${String.format("%.1f", currentFps)}")
 
-        // 크리티컬 FPS 감지
         when {
             currentFps < SEVERE_FPS_THRESHOLD -> {
                 consecutiveLowFpsCount++
-                Log.w(TAG, "🚨 SEVERE FPS 감지: ${String.format("%.1f", currentFps)} fps (연속 ${consecutiveLowFpsCount}회)")
+                val warningMsg = "🚨 SEVERE FPS 감지: ${String.format("%.1f", currentFps)} fps (연속 ${consecutiveLowFpsCount}회)"
+                Log.w(TAG, warningMsg)
+                fileLogger.w(TAG, warningMsg)
 
                 if (consecutiveLowFpsCount >= 3) {
                     triggerCriticalAnalysis("SEVERE_FPS_DROP", currentFps)
@@ -193,21 +443,20 @@ class PerformanceMonitoringService private constructor(
             }
             currentFps < CRITICAL_FPS_THRESHOLD -> {
                 consecutiveLowFpsCount++
-                Log.w(TAG, "⚠️ LOW FPS 감지: ${String.format("%.1f", currentFps)} fps (연속 ${consecutiveLowFpsCount}회)")
+                val warningMsg = "⚠️ LOW FPS 감지: ${String.format("%.1f", currentFps)} fps (연속 ${consecutiveLowFpsCount}회)"
+                Log.w(TAG, warningMsg)
+                fileLogger.w(TAG, warningMsg)
 
                 if (consecutiveLowFpsCount >= 5) {
                     triggerCriticalAnalysis("CRITICAL_FPS_DROP", currentFps)
                 }
             }
             else -> {
-                consecutiveLowFpsCount = 0  // FPS가 정상이면 카운터 리셋
+                consecutiveLowFpsCount = 0
             }
         }
     }
 
-    /**
-     * 🚨 크리티컬 분석 트리거 (중복 호출 방지)
-     */
     private fun triggerCriticalAnalysis(reason: String, fps: Double) {
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastCriticalAnalysisTime < criticalAnalysisInterval) {
@@ -216,37 +465,37 @@ class PerformanceMonitoringService private constructor(
         }
 
         lastCriticalAnalysisTime = currentTime
-        consecutiveLowFpsCount = 0  // 분석 후 카운터 리셋
+        consecutiveLowFpsCount = 0
 
         monitoringScope.launch {
-            performCriticalAnalysis(reason, fps)
+            performEmergencyCriticalAnalysis(reason, fps)
         }
     }
 
-    /**
-     * 🔍 크리티컬 상황 정밀 분석
-     */
-    private suspend fun performCriticalAnalysis(reason: String, fps: Double) = withContext(Dispatchers.IO) {
+    private suspend fun performEmergencyCriticalAnalysis(reason: String, fps: Double) = withContext(Dispatchers.IO) {
         try {
-            Log.e(TAG, "🚨🚨🚨 크리티컬 분석 시작: $reason (FPS: ${String.format("%.1f", fps)})")
+            val analysisStartMsg = "🚨🚨🚨 긴급 크리티컬 분석 시작: $reason (FPS: ${String.format("%.1f", fps)})"
+            Log.e(TAG, analysisStartMsg)
+            fileLogger.e(TAG, analysisStartMsg)
 
             val analysis = resourceMonitor.getCriticalPerformanceAnalysis()
             val timestamp = dateFormat.format(Date(analysis.timestamp))
 
-            val criticalReport = buildCriticalAnalysisReport(reason, fps, timestamp, analysis)
+            val emergencyReport = buildCriticalAnalysisReport(reason, fps, timestamp, analysis)
+            fileLogger.emergencyLog(TAG, emergencyReport)
 
-            // 긴급 로그로 저장
-            fileLogger.emergencyLog(TAG, criticalReport)
-
-            Log.e(TAG, "🚨 크리티컬 분석 완료 및 로그 저장")
+            val completionMsg = "🚨 긴급 크리티컬 분석 완료 및 로그 저장"
+            Log.e(TAG, completionMsg)
+            fileLogger.e(TAG, completionMsg)
 
         } catch (e: Exception) {
-            Log.e(TAG, "크리티컬 분석 실패: ${e.message}", e)
-            fileLogger.emergencyLog(TAG, "크리티컬 분석 실패: $reason, FPS: $fps, 오류: ${e.message}")
+            val errorMsg = "긴급 크리티컬 분석 실패: ${e.message}"
+            Log.e(TAG, errorMsg, e)
+            fileLogger.emergencyLog(TAG, "긴급 크리티컬 분석 실패: $reason, FPS: $fps, 오류: ${e.message}")
         }
     }
 
-    /**
+     /**
      * 📋 크리티컬 분석 리포트 생성
      */
     private fun buildCriticalAnalysisReport(
@@ -256,9 +505,7 @@ class PerformanceMonitoringService private constructor(
         analysis: CriticalAnalysisInfo
     ): String {
         return buildString {
-            appendLine("🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨")
             appendLine("🚨                         크리티컬 성능 분석 리포트                        🚨")
-            appendLine("🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨")
             appendLine()
             appendLine("📅 발생 시간: $timestamp")
             appendLine("🎯 트리거 원인: $reason")
@@ -483,17 +730,11 @@ class PerformanceMonitoringService private constructor(
             Choreographer.getInstance().removeFrameCallback(it)
         }
         fpsMonitorCallback = null
-        Log.d(TAG, "🛑 FPS 모니터링 중지")
+        fileLogger.d(TAG, "🛑 FPS 모니터링 중지")
     }
 
-    /**
-     * 현재 FPS 반환
-     */
     fun getCurrentFps(): Double = currentFps
 
-    /**
-     * 서비스 정리
-     */
     fun cleanup() {
         stopMonitoring()
     }
