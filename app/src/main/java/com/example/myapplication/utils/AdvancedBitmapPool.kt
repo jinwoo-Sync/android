@@ -14,11 +14,11 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
-
 
 // 기존 enum과 data class 유지
 enum class HealthLevel { HEALTHY, DEGRADED, WARNING, CRITICAL }
@@ -61,9 +61,10 @@ class AdvancedTaggedBitmapPool(
     private val matrixPool = CircularQueue<Matrix>(poolSize)
 
     // --- 자동 복구 (Stale-Checking) 스레드 ---
-    private val cleanupScheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r ->
-        Thread(r, "AdvTaggedPool-Cleanup").apply { isDaemon = true }
-    }
+    @Volatile
+    private var currentScheduler: ScheduledExecutorService = createNewScheduler()
+    private val schedulerLock = java.util.concurrent.locks.ReentrantLock()
+    private val isShutdown = AtomicBoolean(false)
 
     // --- 통계 ---
     private val totalAcquired = AtomicLong(0)
@@ -81,6 +82,17 @@ class AdvancedTaggedBitmapPool(
     init {
         initializePool()
         startPeriodicCleanup()
+    }
+
+    /**
+     * 🔧 새 스케줄러 생성
+     */
+    private fun createNewScheduler(): ScheduledExecutorService {
+        return Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "AdvTaggedPool-Cleanup-${System.currentTimeMillis()}").apply {
+                isDaemon = true
+            }
+        }
     }
 
     private fun initializePool() = poolLock.write {
@@ -111,6 +123,11 @@ class AdvancedTaggedBitmapPool(
      * @return 사용 가능한 ManagedBitmap 객체, 없으면 null
      */
     fun acquire(tag: String): ManagedBitmap? = poolLock.read {
+        if (isShutdown.get()) {
+            Log.w(TAG, "⚠️ 풀이 종료된 상태에서 acquire 시도")
+            return null
+        }
+
         val index = availableIndices.poll() ?: run {
             Log.w(TAG, "⚠️ 사용 가능한 비트맵이 없습니다. 현재 활성: ${activeTags.size}개")
             return null
@@ -177,17 +194,69 @@ class AdvancedTaggedBitmapPool(
 
     // --- 자동 복구 및 정리 ---
 
+    /**
+     * 🔧 주기적 정리 시작
+     */
     private fun startPeriodicCleanup() {
-        cleanupScheduler.scheduleAtFixedRate(
-            this::performStaleCheck,
-            autoCleanupIntervalMs,
-            autoCleanupIntervalMs,
-            TimeUnit.MILLISECONDS
-        )
+        schedulerLock.lock()
+        try {
+            if (!currentScheduler.isShutdown && !isShutdown.get()) {
+                currentScheduler.scheduleAtFixedRate(
+                    this::performStaleCheck,
+                    autoCleanupIntervalMs,
+                    autoCleanupIntervalMs,
+                    TimeUnit.MILLISECONDS
+                )
+                Log.d(TAG, "✅ 주기적 정리 스케줄링 시작")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "주기적 정리 시작 실패: ${e.message}", e)
+        } finally {
+            schedulerLock.unlock()
+        }
+    }
+
+    /**
+     * 🔧 현재 스케줄러 안전 종료
+     */
+    private fun shutdownCurrentScheduler() {
+        schedulerLock.lock()
+        try {
+            if (!currentScheduler.isShutdown) {
+                currentScheduler.shutdown()
+                try {
+                    if (!currentScheduler.awaitTermination(2, TimeUnit.SECONDS)) {
+                        Log.w(TAG, "스케줄러 정상 종료 실패, 강제 종료 시도")
+                        currentScheduler.shutdownNow()
+                        if (!currentScheduler.awaitTermination(1, TimeUnit.SECONDS)) {
+                            Log.e(TAG, "스케줄러 강제 종료도 실패")
+                        }
+                    }
+                } catch (e: InterruptedException) {
+                    currentScheduler.shutdownNow()
+                    Thread.currentThread().interrupt()
+                }
+            }
+        } finally {
+            schedulerLock.unlock()
+        }
+    }
+
+    /**
+     * 🔧 새 스케줄러 생성 및 시작
+     */
+    private fun recreateScheduler() {
+        schedulerLock.lock()
+        try {
+            currentScheduler = createNewScheduler()
+            Log.d(TAG, "✅ 새 cleanup 스케줄러 생성 완료")
+        } finally {
+            schedulerLock.unlock()
+        }
     }
 
     private fun performStaleCheck() {
-        if (activeTags.isEmpty()) return
+        if (activeTags.isEmpty() || isShutdown.get()) return
 
         val currentTime = System.currentTimeMillis()
         val staleEntries = activeTags.filter { (_, tagInfo) ->
@@ -206,31 +275,79 @@ class AdvancedTaggedBitmapPool(
     }
 
     /**
-     * 🚨 비정상 상태에서 풀을 완전히 초기화하는 응급 복구 메서드입니다.
+     * 🚨 안전한 응급 복구 - 스케줄러 재생성 포함
      */
     fun performEmergencyReset() = poolLock.write {
         Log.w(TAG, "🚨🚨 응급 풀 리셋을 시작합니다! 🚨🚨")
-        shutdown() // 스케줄러 중지
 
-        // 모든 상태 초기화
-        activeTags.clear()
-        availableIndices.clear()
-        bitmapPool.forEach { it?.recycle() }
-        canvasPool.clear()
-        paintPool.clear()
-        matrixPool.clear()
+        try {
+            // ✅ 1. 현재 스케줄러 안전 종료
+            shutdownCurrentScheduler()
 
-        // 풀 재초기화 및 스케줄러 재시작
-        initializePool()
-        startPeriodicCleanup()
-        Log.w(TAG, "✅✅ 응급 풀 리셋 완료! ✅✅")
+            // ✅ 2. 활성 참조 안전 해제
+            val activeRefs = activeTags.values.toList()
+            activeTags.clear()
+
+            activeRefs.forEach { tagInfo ->
+                try {
+                    // ManagedBitmap의 isReleased 플래그만 설정
+                    if (!tagInfo.managedBitmap.isReleased()) {
+                        tagInfo.managedBitmap.release()
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "활성 참조 해제 중 오류: ${e.message}")
+                }
+            }
+
+            // ✅ 3. 풀 상태 재구성 (비트맵 재활용 없이)
+            availableIndices.clear()
+            for (index in 0 until poolSize) {
+                val bitmap = bitmapPool[index]
+                if (bitmap != null && !bitmap.isRecycled) {
+                    availableIndices.push(index)
+                } else if (bitmap == null || bitmap.isRecycled) {
+                    // 손상된 비트맵 재생성 시도
+                    try {
+                        bitmapPool[index] = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        availableIndices.push(index)
+                    } catch (e: OutOfMemoryError) {
+                        Log.w(TAG, "비트맵 재생성 실패 (OOM): index $index")
+                        bitmapPool[index] = null
+                    }
+                }
+            }
+
+            // ✅ 4. 그래픽 객체 풀 정리
+            canvasPool.clear()
+            paintPool.clear()
+            matrixPool.clear()
+
+            // 재생성
+            repeat(availableIndices.size()) {
+                canvasPool.push(Canvas())
+                paintPool.push(Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG))
+                matrixPool.push(Matrix())
+            }
+
+            // ✅ 5. 새 스케줄러 생성 및 시작
+            recreateScheduler()
+            startPeriodicCleanup()
+
+            Log.w(TAG, "✅✅ 응급 풀 리셋 완료! Available: ${availableIndices.size()}/${poolSize} ✅✅")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "응급 리셋 중 오류: ${e.message}", e)
+            throw e
+        }
     }
 
     /**
-     * 풀을 영구적으로 종료하고 모든 리소스를 해제합니다. 앱 종료 시 호출될 수 있습니다.
+     * 🗑️ 안전한 종료
      */
     fun shutdown() {
-        cleanupScheduler.shutdownNow()
+        isShutdown.set(true)
+        shutdownCurrentScheduler()
+
         poolLock.write {
             activeTags.clear()
             availableIndices.clear()
@@ -238,6 +355,9 @@ class AdvancedTaggedBitmapPool(
                 bitmap?.recycle()
                 bitmapPool[index] = null
             }
+            canvasPool.clear()
+            paintPool.clear()
+            matrixPool.clear()
             Log.d(TAG, "AdvancedTaggedBitmapPool gracefully shut down.")
         }
     }
@@ -315,7 +435,7 @@ class AdvancedTaggedBitmapPool(
     }
 
     fun isReady(): Boolean = poolLock.read {
-        availableIndices.size() > 0
+        availableIndices.size() > 0 && !isShutdown.get()
     }
 }
 
@@ -333,50 +453,77 @@ class ManagedBitmap internal constructor(
     private var isReleased = false
     private val creationTime = System.currentTimeMillis()
 
-    /**
-     * 비트맵을 풀에 반납합니다. 중복 호출은 무시됩니다.
-     */
-    fun release() {
-        if (isReleased) {
-            Log.w(TAG, "⚠️ 이미 반납된 비트맵 중복 반납 시도: $tag (index: $poolIndex)")
-            return
-        }
+    // ✅ 스레드 안전성을 위한 락 추가
+    private val accessLock = java.util.concurrent.locks.ReentrantReadWriteLock()
 
-        isReleased = true
-        pool.release(this)
-        Log.d(TAG, "✅ ManagedBitmap 반납: $tag (index: $poolIndex)")
+    /**
+     * 🔒 스레드 안전한 비트맵 유효성 검사
+     */
+    fun isValid(): Boolean {
+        return accessLock.readLock().let { lock ->
+            lock.lock()
+            try {
+                !isReleased && !bitmap.isRecycled && bitmap.width > 0 && bitmap.height > 0
+            } catch (e: Exception) {
+                Log.w(TAG, "⚠️ 비트맵 유효성 검사 중 예외: ${e.message}")
+                false
+            } finally {
+                lock.unlock()
+            }
+        }
     }
 
     /**
-     * 비트맵이 반납되었는지 확인합니다.
+     * 🔒 스레드 안전한 반납
      */
-    fun isReleased(): Boolean = isReleased
+    fun release() {
+        accessLock.writeLock().let { lock ->
+            lock.lock()
+            try {
+                if (isReleased) {
+                    Log.w(TAG, "⚠️ 이미 반납된 비트맵 중복 반납 시도: $tag (index: $poolIndex)")
+                    return
+                }
+
+                isReleased = true
+                pool.release(this)
+                Log.d(TAG, "✅ ManagedBitmap 반납: $tag (index: $poolIndex)")
+            } finally {
+                lock.unlock()
+            }
+        }
+    }
 
     /**
-     * 비트맵의 유효성을 검사합니다.
+     * 🔒 UI용 안전한 복사본 생성
      */
-    fun isValid(): Boolean = !isReleased && !bitmap.isRecycled
+    fun createSafeCopyForUI(): Bitmap? {
+        return accessLock.readLock().let { lock ->
+            lock.lock()
+            try {
+                if (!isValid()) return null
+
+                updateLastAccess()
+                bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ UI 복사본 생성 실패: ${e.message}", e)
+                null
+            } finally {
+                lock.unlock()
+            }
+        }
+    }
+
+    /**
+     * ✅ 반납 상태 확인 메서드 추가
+     */
+    fun isReleased(): Boolean = isReleased
 
     /**
      * 비트맵의 사용 시간을 업데이트합니다. (Stale-Check 방지)
      */
     fun updateLastAccess() {
         pool.activeTags[poolIndex]?.lastAccessTime?.set(System.currentTimeMillis())
-    }
-
-    /**
-     * UI용 안전한 복사본을 생성합니다.
-     */
-    fun createSafeCopyForUI(): Bitmap? {
-        if (!isValid()) return null
-
-        return try {
-            updateLastAccess()
-            bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ UI 복사본 생성 실패: ${e.message}", e)
-            null
-        }
     }
 
     fun getAgeMillis(): Long = System.currentTimeMillis() - creationTime

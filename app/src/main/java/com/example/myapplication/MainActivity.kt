@@ -621,30 +621,36 @@ class MainActivity : AppCompatActivity() {
         try {
             fileLogger.w("MainActivity", "🔧🔧 응급 복구 시작: $reason 🔧🔧")
 
-            // 1. UI 프레임 즉시 클리어 (크래시 방지)
+            // ✅ 1. UI 프레임 먼저 안전하게 클리어
             launch(Dispatchers.Main) {
                 try {
-                    // HomeFragment의 현재 프레임 클리어 요청
-                    // 이 부분은 HomeViewModel을 통해 처리 필요
-                    fileLogger.w("MainActivity", "UI 프레임 클리어 요청")
+                    // HomeFragment에 안전한 클리어 신호 전송
+                    // TODO: HomeViewModel을 통해 안전한 UI 클리어 요청
+                    fileLogger.w("MainActivity", "UI 프레임 안전 클리어 요청")
                 } catch (e: Exception) {
                     fileLogger.e("MainActivity", "UI 프레임 클리어 실패: ${e.message}", e)
                 }
             }
 
-            delay(200) // UI 정리 대기
+            delay(500) // UI 정리 완료 대기
 
-            // 2. 강제 GC
+            // ✅ 2. BitmapPool 정리 (ThreadPoolExecutor 종료 방지)
+            try {
+                bitmapPoolManager.requestPoolCleanup() // 응급 리셋 대신 정리만
+                delay(300)
+            } catch (e: Exception) {
+                fileLogger.e("MainActivity", "BitmapPool 정리 실패: ${e.message}", e)
+                // ThreadPoolExecutor 재생성 시도
+                try {
+                    bitmapPoolManager.performEmergencyReset()
+                } catch (resetError: Exception) {
+                    fileLogger.e("MainActivity", "응급 리셋도 실패: ${resetError.message}", resetError)
+                }
+            }
+
+            // ✅ 3. 강제 GC (마지막에)
             System.gc()
-            delay(500)
-
-            // 3. BitmapPool 응급 정리
-            bitmapPoolManager.performEmergencyReset()
-            delay(500)
-
-            // 4. 상태 재확인
-            val poolHealth = bitmapPoolManager.advancedTaggedBitmapPool.getPoolHealthStatus()
-            fileLogger.w("MainActivity", "복구 후 BitmapPool 상태: ${poolHealth.healthLevel}")
+            delay(200)
 
             fileLogger.w("MainActivity", "✅✅ 응급 복구 완료: $reason ✅✅")
 
