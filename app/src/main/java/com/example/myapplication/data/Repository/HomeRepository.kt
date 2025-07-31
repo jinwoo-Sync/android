@@ -1,6 +1,7 @@
 package com.example.myapplication.data.repository
 
 import android.content.Context
+import android.graphics.Bitmap
 import com.example.myapplication.data.sensor.SensorCollector
 import com.example.myapplication.data.sync.DataSynchronizer
 import com.example.myapplication.model.SensorData
@@ -11,6 +12,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import com.example.myapplication.learning.yolo.BoundingBox
 import com.example.myapplication.data.logging.LoggerManager
+import com.example.myapplication.utils.SharedBitmap
 
 class HomeRepository(
     private val context: Context,
@@ -313,6 +315,30 @@ class HomeRepository(
         continuation.invokeOnCancellation {
             Log.d(TAG, "Coroutine cancelled, closing camera")
             sensorCollector.closeCamera()
+        }
+    }
+
+    /**
+     * 🎯 UI용 SharedBitmap 획득
+     */
+    fun acquireSharedBitmapForUI(sourceBitmap: Bitmap): SharedBitmap? {
+        return try {
+            sensorCollector.acquireSharedBitmapForUI(sourceBitmap)
+        } catch (e: Exception) {
+            Log.e("HomeRepository", "SharedBitmap 획득 실패: ${e.message}", e)
+            null
+        }
+    }
+
+    /**
+     * 🎯 응급 풀 복구
+     */
+    fun performEmergencyPoolRecovery(): Boolean {
+        return try {
+            sensorCollector.performEmergencyPoolRecovery()
+        } catch (e: Exception) {
+            Log.e("HomeRepository", "응급 풀 복구 실패: ${e.message}", e)
+            false
         }
     }
 }

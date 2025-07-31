@@ -32,6 +32,7 @@ import com.example.myapplication.learning.yolo.BoundingBox
 import com.example.myapplication.learning.yolo.Constants
 import com.example.myapplication.learning.yolo.Detector
 import com.example.myapplication.model.*
+import com.example.myapplication.utils.HealthLevel
 import com.google.android.gms.location.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -49,6 +50,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import com.example.myapplication.utils.TrueZeroCopyBitmapPool
 import com.example.myapplication.utils.HighSpeedZeroCopyProcessor
+import com.example.myapplication.utils.PoolHealthStatus
 import com.example.myapplication.utils.SharedBitmap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -1090,111 +1092,131 @@ class SensorCollector(private val context: Context) {
 
         frameProcessingStats.incrementAndGet()
 
-        if (::dataSynchronizer.isInitialized) {
-            val sensorData = SensorData(
-                value = "AllFrame: $frameId",
-                bitmap = sharedBitmap.bitmap,
-                timestamp = systemTime,
-                monoTimestamp = System.nanoTime(),
-                frameId = frameId
-            )
-            LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
-        }
+        try {
+            // 🎯 UI용 독립적인 복사본 생성
+            val uiBitmap = sharedBitmap.createSafeCopyForUI()
 
-        val uiRef = sharedBitmap.addRef()
-        if (uiRef != null) {
-            coroutineScope.launch(Dispatchers.Main) {
-                try {
-                    callback(
-                        SensorData(
-                            value = "ZeroCopy Frame: $frameId",
-                            bitmap = uiRef.bitmap,
+            if (uiBitmap != null) {
+                // UI 콜백용 SensorData 생성
+                coroutineScope.launch(Dispatchers.Main) {
+                    try {
+                        val sensorData = SensorData(
+                            value = "SafeUIBitmap: $frameId",
+                            bitmap = uiBitmap,
                             timestamp = systemTime,
                             monoTimestamp = System.nanoTime(),
                             frameId = frameId
                         )
+                        callback(sensorData)
+                        Log.d(TAG, "✅ UI 안전 비트맵 전달: frameId=$frameId")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ UI callback failed: ${e.message}", e)
+                        uiBitmap.recycle()
+                        callback(null)
+                    }
+                }
+            } else {
+                Log.w(TAG, "⚠️ UI 복사본 생성 실패 - null 전달")
+                coroutineScope.launch(Dispatchers.Main) { callback(null) }
+            }
+
+            // 로깅용 처리 (원본 비트맵 사용)
+            if (::dataSynchronizer.isInitialized) {
+                try {
+                    val sensorData = SensorData(
+                        value = "ZeroCopyLog: $frameId",
+                        bitmap = sharedBitmap.bitmap,
+                        timestamp = systemTime,
+                        monoTimestamp = System.nanoTime(),
+                        frameId = frameId
                     )
-                    Log.d(TAG, "✅ Zero-Copy frame delivered: frameId=$frameId")
-                } finally {
-                    uiRef.release()
+                    LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ 로깅 실패: ${e.message}", e)
                 }
             }
-        }
 
-        handleSelectiveDetection(sharedBitmap, frameId)
+            // 🔧 수정: 딥러닝 처리 전에 참조 추가하고, 처리 완료 후 해제하도록 수정
+            handleSelectiveDetection(sharedBitmap, frameId)
 
-        sharedBitmap.release()
-
-        if (frameCount % 90 == 0) {
-            Log.i(TAG, "📊 ${zeroCopyPool.getStatus()}")
-            Log.i(TAG, "📊 ${highSpeedProcessor.getStatus()}")
-            Log.i(TAG, "🎯 딥러닝 전략: ${currentDetectionStrategy}")
+        } finally {
+            // 🔧 수정: finally 블록에서 원본 SharedBitmap 해제
+            // 딥러닝 처리가 참조를 추가했다면, 그쪽에서 별도로 해제함
+            sharedBitmap.release()
+            Log.d(TAG, "📉 원본 SharedBitmap 해제: frameId=$frameId")
         }
     }
 
     private fun handleSelectiveDetection(sharedBitmap: SharedBitmap, frameId: Long) {
         inferenceFrameSkipCount++
-        Log.d(TAG, "🎯 프레임 스킵 카운트: $inferenceFrameSkipCount / ${currentDetectionStrategy.skipInterval}")
 
         if (inferenceFrameSkipCount >= currentDetectionStrategy.skipInterval) {
             inferenceFrameSkipCount = 0
-            Log.d(TAG, "🎯 딥러닝 처리 시작: frameId=$frameId")
 
             if (currentDetectionStrategy.enableDetection) {
-                val detectionRef = sharedBitmap.addRef()
-                if (detectionRef != null) {
+                // 🔧 수정: 딥러닝용 참조 추가 (원본이 해제되기 전에 참조 확보)
+                if (sharedBitmap.addRef()) {
                     ensureDetectorExecutor()
+
                     if (detectorInitialized && isDetecting.compareAndSet(false, true)) {
                         Log.d(TAG, "🎯 딥러닝 추론 시작: frameId=$frameId")
 
                         val inferenceStartTime = System.currentTimeMillis()
 
                         detectorExecutor.submit {
-                            var inferenceSuccess = false
-                            var gpuSafeBitmap: Bitmap? = null
+                            var detectionSharedBitmapReleased = false
 
-                            // 기존 try 블록 내용을 아래로 교체
                             try {
-                                // 🎯 재사용 비트맵에 복사 (매번 새로 생성하지 않음)
-                                val reusableGpuBitmap = copyToGpuInferenceBitmap(detectionRef.bitmap)
+                                // 🔧 수정: GPU 추론용 복사본 생성 (SharedBitmap 유지)
+                                val gpuBitmap = copyToGpuInferenceBitmap(sharedBitmap.bitmap)
 
-                                // 🛡️ 원본 SharedBitmap 즉시 해제 (GPU 추론과 무관하게)
-                                detectionRef.release()
+                                // 🔧 수정: GPU 복사 완료 후 SharedBitmap 해제
+                                sharedBitmap.release()
+                                detectionSharedBitmapReleased = true
+                                Log.d(TAG, "📉 Detection용 SharedBitmap 해제: frameId=$frameId")
 
-                                if (reusableGpuBitmap != null) {
-                                    Log.d(TAG, "🎯 재사용 GPU 비트맵으로 추론 시작")
-                                    detector?.detect(reusableGpuBitmap, frameId)
-                                    inferenceSuccess = true
+                                if (gpuBitmap != null) {
+                                    detector?.detect(gpuBitmap, frameId)
+
+                                    val actualInferenceTime = System.currentTimeMillis() - inferenceStartTime
+                                    updateLastInferenceTime(actualInferenceTime)
+
+                                    Log.d(TAG, "🔍 Detection 완료: frameId=$frameId, 추론시간=${actualInferenceTime}ms")
                                 } else {
-                                    Log.e(TAG, "❌ 재사용 GPU 비트맵 준비 실패")
+                                    Log.e(TAG, "❌ GPU 비트맵 준비 실패")
                                 }
-
-                                val inferenceEndTime = System.currentTimeMillis()
-                                val actualInferenceTime = inferenceEndTime - inferenceStartTime
-                                updateLastInferenceTime(actualInferenceTime)
-
-                                Log.d(TAG, "🔍 Detection 완료: frameId=$frameId, 추론시간=${actualInferenceTime}ms")
 
                             } catch (e: Exception) {
                                 Log.e(TAG, "❌ Detection 오류: ${e.message}", e)
-                                // 예외 발생 시에만 detectionRef 해제 (이미 해제되었을 수도 있음)
-                                try {
-                                    detectionRef.release()
-                                } catch (releaseEx: Exception) {
-                                    // 이미 해제된 경우 무시
+
+                                // 🔧 수정: 예외 상황에서만 해제
+                                if (!detectionSharedBitmapReleased) {
+                                    try {
+                                        sharedBitmap.release()
+                                        Log.d(TAG, "📉 예외상황 Detection용 SharedBitmap 해제: frameId=$frameId")
+                                    } catch (releaseEx: Exception) {
+                                        Log.w(TAG, "⚠️ 예외 상황 해제 실패: ${releaseEx.message}")
+                                    }
                                 }
                             } finally {
-                                // 🎯 재사용 비트맵은 해제하지 않음! (계속 재사용)
                                 isDetecting.set(false)
-                                Log.d(TAG, "🎯 딥러닝 추론 종료: frameId=$frameId, success=$inferenceSuccess")
+                                Log.d(TAG, "🎯 딥러닝 추론 종료: frameId=$frameId")
                             }
                         }
                     } else {
-                        Log.w(TAG, "⚠️ 딥러닝 추론 스킵: initialized=$detectorInitialized, detecting=${isDetecting.get()}")
-                        detectionRef.release()
+                        Log.w(TAG, "⚠️ Detection 스킵 - 이미 진행중 또는 미초기화")
+                        // 🔧 수정: 참조 추가했지만 사용하지 않는 경우 해제
+                        sharedBitmap.release()
+                        Log.d(TAG, "📉 미사용 Detection용 SharedBitmap 해제: frameId=$frameId")
                     }
+                } else {
+                    Log.w(TAG, "⚠️ 딥러닝용 참조 추가 실패 - SharedBitmap이 이미 해제됨")
                 }
+            } else {
+                Log.d(TAG, "⚠️ Detection 비활성화됨")
             }
+        } else {
+            Log.d(TAG, "🔄 프레임 스킵: $inferenceFrameSkipCount/${currentDetectionStrategy.skipInterval}")
         }
     }
 
@@ -1776,6 +1798,73 @@ class SensorCollector(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "❌ GPU 비트맵 복사 예외: ${e.message}", e)
             null
+        }
+    }
+
+    /**
+     * 🎯 UI용 SharedBitmap 획득
+     */
+    fun acquireSharedBitmapForUI(sourceBitmap: Bitmap): SharedBitmap? {
+        return try {
+            if (::zeroCopyPool.isInitialized) {
+                val sharedBitmap = zeroCopyPool.acquireSharedBitmap()
+                if (sharedBitmap != null && !sourceBitmap.isRecycled) {
+                    // 소스 비트맵을 SharedBitmap으로 복사
+                    val canvas = Canvas(sharedBitmap.bitmap)
+                    canvas.drawBitmap(sourceBitmap, 0f, 0f, null)
+                    return sharedBitmap
+                }
+            }
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "UI용 SharedBitmap 획득 실패: ${e.message}", e)
+            null
+        }
+    }
+
+    /**
+     * 🎯 풀 건강성 상태 조회
+     */
+    fun getPoolHealthStatus(): PoolHealthStatus {
+        return try {
+            if (::zeroCopyPool.isInitialized) {
+                zeroCopyPool.getPoolHealthStatus()
+            } else {
+                PoolHealthStatus(
+                    healthLevel = HealthLevel.CRITICAL,
+                    availableSlots = 0,
+                    totalSlots = 0,
+                    totalReferences = 0,
+                    staleSlots = 0,
+                    recommendation = "풀이 초기화되지 않음"
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "풀 건강성 조회 실패: ${e.message}", e)
+            PoolHealthStatus(
+                healthLevel = HealthLevel.CRITICAL,
+                availableSlots = 0,
+                totalSlots = 0,
+                totalReferences = 0,
+                staleSlots = 0,
+                recommendation = "조회 실패: ${e.message}"
+            )
+        }
+    }
+
+    /**
+     * 🎯 응급 풀 복구
+     */
+    fun performEmergencyPoolRecovery(): Boolean {
+        return try {
+            if (::zeroCopyPool.isInitialized) {
+                zeroCopyPool.performEmergencyReset()
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "응급 풀 복구 실패: ${e.message}", e)
+            false
         }
     }
 }
