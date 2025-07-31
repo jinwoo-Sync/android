@@ -24,7 +24,7 @@ class BitmapPoolManager private constructor(private val context: Context) {
 
     // 🎯 전역 싱글톤 BitmapPool
     val advancedTaggedBitmapPool = AdvancedTaggedBitmapPool(
-        poolSize = 15,  // 좀 더 여유롭게
+        poolSize = 50,  // 좀 더 여유롭게
         width = 840,
         height = 840
     )
