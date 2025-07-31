@@ -995,11 +995,18 @@ class SensorCollector(
 
         frameProcessingStats.incrementAndGet()
 
+        // ✅ ManagedBitmap 유효성 재검증
+        if (!managedBitmap.isValid() || managedBitmap.bitmap.isRecycled) {
+            Log.w(TAG, "❌ 무효한 ManagedBitmap 감지 - 프레임 스킵: frameId=$frameId")
+            coroutineScope.launch(Dispatchers.Main) { callback(null) }
+            return
+        }
+
         if (::dataSynchronizer.isInitialized) {
             val sensorData = SensorData(
                 value = "TaggedFrame: $frameId",
                 bitmap = managedBitmap.bitmap,
-                managedBitmap = managedBitmap,      // ✅ ManagedBitmap 전달
+                managedBitmap = managedBitmap,
                 timestamp = systemTime,
                 monoTimestamp = System.nanoTime(),
                 frameId = frameId
@@ -1007,22 +1014,29 @@ class SensorCollector(
             LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
         }
 
-        // UI로 전달 (원본 비트맵 그대로)
-            coroutineScope.launch(Dispatchers.Main) {
-                try {
+        // UI로 전달 - 추가 검증
+        coroutineScope.launch(Dispatchers.Main) {
+            try {
+                // 🔒 UI 스레드에서 재검증
+                if (managedBitmap.isValid() && !managedBitmap.bitmap.isRecycled) {
                     callback(
                         SensorData(
-                        value = "Advanced Tagged Frame: $frameId",
-                        bitmap = managedBitmap.bitmap,
-                            managedBitmap = managedBitmap,      // ✅ ManagedBitmap 전달
+                            value = "Advanced Tagged Frame: $frameId",
+                            bitmap = managedBitmap.bitmap,
+                            managedBitmap = managedBitmap,
                             timestamp = systemTime,
                             monoTimestamp = System.nanoTime(),
                             frameId = frameId
                         )
                     )
-                Log.d(TAG, "✅ Advanced Tagged frame delivered: frameId=$frameId")
+                    Log.d(TAG, "✅ Advanced Tagged frame delivered: frameId=$frameId")
+                } else {
+                    Log.w(TAG, "⚠️ UI 스레드에서 ManagedBitmap 무효화 감지: frameId=$frameId")
+                    callback(null)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Frame delivery error: ${e.message}", e)
+                callback(null)
             }
         }
 
@@ -1168,22 +1182,33 @@ class SensorCollector(
             return
         }
 
-        if (!isGnssCallbackRegistered.getAndSet(true)) {
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    locationManager.registerGnssMeasurementsCallback(gnssMeasurementsCallback)
-                    locationManager.registerGnssStatusCallback(gnssStatusCallback)
-                    locationManager.registerGnssNavigationMessageCallback(
-                        gnssNavigationMessageCallback
-                    )
-                    Log.d(TAG, "GNSS 콜백들 등록 성공")
+        // ✅ GNSS 콜백 강제 재등록 (기존 조건 제거)
+        try {
+            // 기존 콜백 해제
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                try {
+                    locationManager.unregisterGnssMeasurementsCallback(gnssMeasurementsCallback)
+                    locationManager.unregisterGnssStatusCallback(gnssStatusCallback)
+                    locationManager.unregisterGnssNavigationMessageCallback(gnssNavigationMessageCallback)
+                } catch (e: Exception) {
+                    Log.d(TAG, "기존 GNSS 콜백 해제: ${e.message}")
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "GNSS 콜백 등록 실패: ${e.message}", e)
-                isGnssCallbackRegistered.set(false)
             }
+
+            // 새로 등록
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                locationManager.registerGnssMeasurementsCallback(gnssMeasurementsCallback)
+                locationManager.registerGnssStatusCallback(gnssStatusCallback)
+                locationManager.registerGnssNavigationMessageCallback(gnssNavigationMessageCallback)
+                Log.d(TAG, "✅ GNSS 콜백들 재등록 성공")
+            }
+            isGnssCallbackRegistered.set(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "GNSS 콜백 등록 실패: ${e.message}", e)
+            isGnssCallbackRegistered.set(false)
         }
 
+        // GPS 위치 업데이트 재시작
         val locationRequest = com.google.android.gms.location.LocationRequest.Builder(
             Priority.PRIORITY_HIGH_ACCURACY,
             1000L
@@ -1193,12 +1218,19 @@ class SensorCollector(
             .setMinUpdateDistanceMeters(0f)
             .build()
 
-        fusedLocationClient.requestLocationUpdates(
-            locationRequest,
-            locationCallback,
-            Looper.getMainLooper()
-        )
+        try {
+            fusedLocationClient.removeLocationUpdates(locationCallback)
+            fusedLocationClient.requestLocationUpdates(
+                locationRequest,
+                locationCallback,
+                Looper.getMainLooper()
+            )
+            Log.d(TAG, "✅ GPS 위치 업데이트 재시작")
+        } catch (e: Exception) {
+            Log.e(TAG, "GPS 위치 업데이트 실패: ${e.message}", e)
+        }
 
+        // IMU 센서 재등록
         try {
             sensorManager.unregisterListener(accelerometerListener)
             sensorManager.unregisterListener(gyroscopeListener)
@@ -1214,7 +1246,7 @@ class SensorCollector(
                     accelSensor,
                     SensorManager.SENSOR_DELAY_GAME
                 )
-                Log.d(TAG, "가속도계 등록 ${if (success) "성공" else "실패"}")
+                Log.d(TAG, "가속도계 재등록 ${if (success) "성공" else "실패"}")
             }
 
             if (gyroSensor != null) {
@@ -1223,7 +1255,7 @@ class SensorCollector(
                     gyroSensor,
                     SensorManager.SENSOR_DELAY_GAME
                 )
-                Log.d(TAG, "자이로스코프 등록 ${if (success) "성공" else "실패"}")
+                Log.d(TAG, "자이로스코프 재등록 ${if (success) "성공" else "실패"}")
             }
 
             if (magSensor != null) {
@@ -1232,7 +1264,7 @@ class SensorCollector(
                     magSensor,
                     SensorManager.SENSOR_DELAY_GAME
                 )
-                Log.d(TAG, "자기계 등록 ${if (success) "성공" else "실패"}")
+                Log.d(TAG, "자기계 재등록 ${if (success) "성공" else "실패"}")
             }
 
         } catch (e: Exception) {

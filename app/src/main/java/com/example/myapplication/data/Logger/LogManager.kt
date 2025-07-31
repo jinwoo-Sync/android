@@ -1144,17 +1144,65 @@ class LoggerManager private constructor(
     ) = withContext(Dispatchers.IO) {
         try {
             val append = file.exists()
+
+            // 🎯 디렉터리가 존재하는지 확인하고 생성
+            if (!file.parentFile?.exists()!!) {
+                file.parentFile?.mkdirs()
+                Log.d(TAG, "📁 디렉터리 생성: ${file.parentFile?.absolutePath}")
+            }
+
             BufferedWriter(FileWriter(file, append), BUFFER_SIZE).use { writer ->
-                if (!append) {
+                // 🎯 파일이 새로 생성되거나 비어있는 경우에만 헤더 추가
+                if (!append || file.length() == 0L) {
+                    writer.write(header)
+                    writer.newLine()
+                    Log.d(TAG, "📝 헤더 추가: ${file.name}")
+                }
+
+                // 데이터 추가 (항상 append)
+                writer.write(contentBuilder(data))
+                writer.flush()
+            }
+
+            Log.d(TAG, "✅ 데이터 저장: ${file.name}, +${data.size}개 (총 크기: ${file.length() / 1024}KB)")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 데이터 저장 실패: ${file.name}, ${e.message}", e)
+
+            // 🚨 중요한 데이터인 경우 폴백 저장 시도
+            if (file.name.contains("gps_sync") || file.name.contains("video_frame")) {
+                tryFallbackSave(file, header, data, contentBuilder)
+            } else {
+            }
+        }
+    }
+
+    private suspend fun <T> tryFallbackSave(
+        originalFile: File,
+        header: String,
+        data: List<T>,
+        contentBuilder: (List<T>) -> String
+    ) = withContext(Dispatchers.IO) {
+        try {
+            // 내부 저장소에 임시 저장
+            val fallbackDir = File(context.filesDir, "fallback_logs")
+            if (!fallbackDir.exists()) fallbackDir.mkdirs()
+
+            val fallbackFile = File(fallbackDir, "fallback_${originalFile.name}")
+
+            BufferedWriter(FileWriter(fallbackFile, true), BUFFER_SIZE).use { writer ->
+                if (!fallbackFile.exists() || fallbackFile.length() == 0L) {
                     writer.write(header)
                     writer.newLine()
                 }
                 writer.write(contentBuilder(data))
                 writer.flush()
             }
-            Log.d(TAG, "✅ 데이터 저장: ${file.name}, +${data.size}개")
+
+            Log.w(TAG, "🚨 폴백 저장 완료: ${fallbackFile.absolutePath}")
+
         } catch (e: Exception) {
-            Log.e(TAG, "❌ 데이터 저장 실패: ${file.name}, ${e.message}", e)
+            Log.e(TAG, "❌ 폴백 저장도 실패: ${e.message}", e)
         }
     }
 
@@ -1409,6 +1457,26 @@ class LoggerManager private constructor(
         return currentLogDirectory ?: throw IllegalStateException("로깅이 활성화되지 않음")
     }
 
+    /**
+     * 🎯 세션 기반 파일 관리 (분이 바뀌어도 append 보장)
+     */
+    private fun ensureFileAppendability(file: File): Boolean {
+        return try {
+            if (!file.exists()) {
+                file.parentFile?.mkdirs()
+                file.createNewFile()
+                Log.d(TAG, "📝 새 파일 생성: ${file.name}")
+                false // 새 파일이므로 헤더 필요
+            } else {
+                Log.d(TAG, "📝 기존 파일에 append: ${file.name}")
+                true // 기존 파일이므로 헤더 불필요
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "파일 생성/확인 실패: ${file.name}, ${e.message}", e)
+            false
+        }
+    }
+
     fun setTransportType(transportType: String) {
         try {
             currentTransportType = transportType
@@ -1448,7 +1516,52 @@ class LoggerManager private constructor(
             Log.e(TAG, "❌ Streaming 비활성화 실패: ${e.message}", e)
         }
     }
-    // ... 나머지 메서드들 (기존과 동일)
+
+    /**
+     * ✅ 현재 비디오 세션 ID 확인
+     */
+    fun getCurrentVideoSessionId(): String? {
+        return try {
+            videoEncoder?.getSessionId()
+        } catch (e: Exception) {
+            Log.e(TAG, "비디오 세션 ID 확인 실패: ${e.message}", e)
+            null
+        }
+    }
+
+    /**
+     * ✅ 비디오 녹화가 실제로 진행 중인지 확인
+     */
+    fun isVideoRecording(): Boolean {
+        return try {
+            isLogSavingEnabled && videoEncoder?.isRecording() == true
+        } catch (e: Exception) {
+            Log.e(TAG, "비디오 녹화 상태 확인 실패: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
+     * ✅ 현재 비디오 프레임 통계
+     */
+    fun getVideoFrameStats(): VideoFrameStats {
+        return VideoFrameStats(
+            totalFrames = videoFrameCounter.get(),
+            queueSize = videoFrameQueue.size(),
+            currentSessionId = getCurrentVideoSessionId(),
+            isRecording = isVideoRecording(),
+            metadataCount = videoMetadataList.size
+        )
+    }
+
+    // 데이터 클래스 추가
+    data class VideoFrameStats(
+        val totalFrames: Long,
+        val queueSize: Int,
+        val currentSessionId: String?,
+        val isRecording: Boolean,
+        val metadataCount: Int
+    )
 
     data class IndependentQueueStatusInfo(
         val gpsQueueSize: Int,

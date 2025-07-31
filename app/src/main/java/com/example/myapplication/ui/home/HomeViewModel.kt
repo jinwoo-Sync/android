@@ -108,14 +108,27 @@ class HomeViewModel(
                 sensorData.bitmap.width > 0 &&
                 sensorData.bitmap.height > 0) {
 
+                // ✅ ManagedBitmap 추가 검증
+                if (sensorData.managedBitmap != null) {
+                    if (!sensorData.managedBitmap!!.isValid()) {
+                        Log.w(TAG, "⚠️ 무효한 ManagedBitmap 필터링: frameId=${sensorData.frameId}")
+                        _cameraFrame.postValue(null)
+                        return
+                    }
+                }
+
                 // UI 스레드에서 안전한 비트맵 검증
                 viewModelScope.launch(Dispatchers.Main.immediate) {
                     try {
-                        if (!sensorData.bitmap.isRecycled) {
+                        // 🔒 UI 스레드에서 재검증
+                        if (!sensorData.bitmap.isRecycled &&
+                            sensorData.bitmap.width > 0 &&
+                            sensorData.bitmap.height > 0) {
+
                             _cameraFrame.value = sensorData
                             Log.d(TAG, "✅ Advanced Tagged frame update: frameId=${sensorData.frameId}")
                         } else {
-                            Log.w(TAG, "⚠️ Recycled bitmap filtered out: frameId=${sensorData.frameId}")
+                            Log.w(TAG, "⚠️ UI 스레드에서 비트맵 상태 변경 감지: frameId=${sensorData.frameId}")
                             _cameraFrame.value = null
                         }
                     } catch (e: Exception) {

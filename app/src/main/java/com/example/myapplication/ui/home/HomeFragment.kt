@@ -163,40 +163,46 @@ class HomeFragment : Fragment() {
      */
     private fun displayManagedBitmapDirectly(sensorData: com.example.myapplication.model.SensorData) {
         try {
-            // ✅ 새로운 ManagedBitmap 유효성 확인
             val newManagedBitmap = sensorData.managedBitmap
             if (newManagedBitmap == null || !newManagedBitmap.isValid()) {
                 Log.w("HomeFragment", "⚠️ 무효한 ManagedBitmap: frameId=${sensorData.frameId}")
-                // ❌ 무효한 프레임이라고 이전 프레임을 지우지 않음!
                 return
             }
 
-            Log.d("HomeFragment", "🎯 ManagedBitmap 직접 표시: frameId=${sensorData.frameId}, size=${newManagedBitmap.bitmap.width}x${newManagedBitmap.bitmap.height}")
+            // ✅ 추가 비트맵 검증
+            val bitmap = newManagedBitmap.bitmap
+            if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
+                Log.w("HomeFragment", "⚠️ 무효한 비트맵 상태: recycled=${bitmap.isRecycled}, size=${bitmap.width}x${bitmap.height}")
+                return
+            }
 
-            // UI 스레드에서 안전하게 업데이트
+            Log.d("HomeFragment", "🎯 ManagedBitmap 직접 표시: frameId=${sensorData.frameId}, size=${bitmap.width}x${bitmap.height}")
+
+            // ✅ UI 스레드에서 안전하게 업데이트 - 이중 검증
             binding.imageView.post {
                 try {
-                    // ✅ 새로운 프레임이 UI에 완전히 적용된 후에만 이전 프레임 해제
-                    if (newManagedBitmap.isValid()) {
-                        // 🎯 1단계: 새로운 비트맵을 UI에 먼저 설정
-                        binding.imageView.setImageBitmap(newManagedBitmap.bitmap)
+                    // 🚨 UI 스레드에서 다시 한번 검증 (중요!)
+                    if (newManagedBitmap.isValid() && !bitmap.isRecycled) {
 
-                        // 🎯 2단계: UI 업데이트가 성공한 후에만 이전 프레임 해제
+                        // 🎯 1단계: 이전 프레임 먼저 해제 (UI 업데이트 전)
                         val previousManagedBitmap = currentManagedBitmap
                         currentManagedBitmap = newManagedBitmap
+
+                        // 🎯 2단계: 새로운 비트맵을 UI에 설정
+                        binding.imageView.setImageBitmap(bitmap)
+
+                        // 🎯 3단계: 이전 프레임 해제 (UI 업데이트 후)
+                        previousManagedBitmap?.release()
 
                         // ✅ 사용 시간 업데이트 (Stale 방지)
                         currentManagedBitmap!!.updateLastAccess()
 
-                        // 🎯 3단계: 이전 프레임을 안전하게 해제 (깜빡임 없음!)
-                        previousManagedBitmap?.release()
-
                         successfulFrameCount++
                         frameSkipCount = 0
 
-                        Log.d("HomeFragment", "✅ UI 업데이트 성공: frameId=${sensorData.frameId} (이전 프레임 안전 해제)")
+                        Log.d("HomeFragment", "✅ UI 업데이트 성공: frameId=${sensorData.frameId}")
                     } else {
-                        Log.e("HomeFragment", "❌ UI 스레드에서 새로운 ManagedBitmap 무효화: frameId=${sensorData.frameId}")
+                        Log.e("HomeFragment", "❌ UI 스레드에서 비트맵 재검증 실패: frameId=${sensorData.frameId}")
                         handleUIUpdateFailure()
                     }
                 } catch (e: Exception) {
@@ -207,7 +213,6 @@ class HomeFragment : Fragment() {
 
         } catch (e: Exception) {
             Log.e("HomeFragment", "❌ ManagedBitmap 처리 실패: ${e.message}", e)
-            // ❌ 예외 상황에서도 이전 프레임을 지우지 않음 (깜빡임 방지)
         }
     }
 
@@ -340,30 +345,38 @@ class HomeFragment : Fragment() {
                 Log.d("HomeFragment", "📱 Camera Frame Observer: sensorData=${sensorData != null}")
 
                 if (sensorData?.managedBitmap?.isValid() == true) {
-                    Log.d("HomeFragment", "✅ 유효한 ManagedBitmap 수신: frameId=${sensorData.frameId}")
-
-                    // ✅ 깜빡임 방지 - 다음 프레임 준비 후 이전 프레임 해제
-                    displayManagedBitmapDirectly(sensorData)
+                    // ✅ 추가 검증
+                    val bitmap = sensorData.managedBitmap!!.bitmap
+                    if (!bitmap.isRecycled && bitmap.width > 0 && bitmap.height > 0) {
+                        Log.d("HomeFragment", "✅ 유효한 ManagedBitmap 수신: frameId=${sensorData.frameId}")
+                        displayManagedBitmapDirectly(sensorData)
+                    } else {
+                        Log.w("HomeFragment", "⚠️ 비트맵 상태 불량: recycled=${bitmap.isRecycled}, size=${bitmap.width}x${bitmap.height}")
+                    }
 
                 } else if (sensorData?.bitmap != null && !sensorData.bitmap.isRecycled) {
-                    // 폴백: 기존 bitmap 방식 (하위 호환성) - 여기서도 깜빡임 방지
-                    Log.w("HomeFragment", "⚠️ ManagedBitmap 없음, 기존 bitmap 사용: frameId=${sensorData.frameId}")
+                    // 폴백: 기존 bitmap 방식 - 추가 검증
+                    if (sensorData.bitmap.width > 0 && sensorData.bitmap.height > 0) {
+                        Log.w("HomeFragment", "⚠️ ManagedBitmap 없음, 기존 bitmap 사용: frameId=${sensorData.frameId}")
 
-                    binding.imageView.post {
-                        binding.imageView.setImageBitmap(sensorData.bitmap)
-                        // 🎯 폴백에서도 이전 ManagedBitmap만 해제하고 UI는 유지
-                        val previousManagedBitmap = currentManagedBitmap
-                        currentManagedBitmap = null
-                        previousManagedBitmap?.release()
+                        binding.imageView.post {
+                            try {
+                                if (!sensorData.bitmap.isRecycled) {
+                                    binding.imageView.setImageBitmap(sensorData.bitmap)
+                                    val previousManagedBitmap = currentManagedBitmap
+                                    currentManagedBitmap = null
+                                    previousManagedBitmap?.release()
+                                }
+                            } catch (e: Exception) {
+                                Log.e("HomeFragment", "❌ 폴백 비트맵 설정 실패: ${e.message}", e)
+                            }
+                        }
                     }
                 } else {
-                    // ❌ null이나 무효한 프레임이어도 이전 프레임을 지우지 않음!
-                    Log.w("HomeFragment", "⚠️ 무효한 프레임 수신 - 이전 프레임 유지 (깜빡임 방지)")
-                    // clearCurrentDisplay() 호출하지 않음!
+                    Log.w("HomeFragment", "⚠️ 무효한 프레임 수신 - 이전 프레임 유지")
                 }
             } catch (e: Exception) {
                 Log.e("HomeFragment", "❌ 프레임 Observer 처리 오류: ${e.message}", e)
-                // ❌ 예외 상황에서도 이전 프레임 유지
             }
         }
     }

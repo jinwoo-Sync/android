@@ -362,4 +362,44 @@ class HomeRepository(
             sensorCollector.closeCamera()
         }
     }
+
+    /**
+     * ✅ .mp4 녹화 상태 확인 (MainActivity용)
+     */
+    fun isMp4Recording(): Boolean {
+        return try {
+            val loggerManager = LoggerManager.getInstance(context, dataSynchronizer)
+            loggerManager.isLogSavingEnabled()
+        } catch (e: Exception) {
+            Log.e(TAG, ".mp4 녹화 상태 확인 실패: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
+     * ✅ 비디오 인코더 상태 확인
+     */
+    fun getVideoEncoderStatus(): String {
+        return try {
+            val loggerManager = LoggerManager.getInstance(context, dataSynchronizer)
+            loggerManager.getVideoEncoderStatus()
+        } catch (e: Exception) {
+            Log.e(TAG, "비디오 인코더 상태 확인 실패: ${e.message}", e)
+            "상태 확인 실패"
+        }
+    }
+
+    /**
+     * ✅ 현재 비디오 세션 ID 확인
+     */
+    fun getCurrentVideoSessionId(): String? {
+        return try {
+            val loggerManager = LoggerManager.getInstance(context, dataSynchronizer)
+            // LoggerManager에 getCurrentVideoSessionId() 메서드 추가 필요
+            loggerManager.getCurrentVideoSessionId()
+        } catch (e: Exception) {
+            Log.e(TAG, "비디오 세션 ID 확인 실패: ${e.message}", e)
+            null
+        }
+    }
 }
