@@ -1,6 +1,7 @@
 package com.example.myapplication.data.sensor
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -26,6 +27,7 @@ import android.util.Log
 import android.util.Range
 import android.util.Size
 import androidx.annotation.RequiresApi
+import androidx.annotation.RequiresPermission
 import com.example.myapplication.data.logging.LoggerManager
 import com.example.myapplication.data.sync.DataSynchronizer
 import com.example.myapplication.learning.yolo.BoundingBox
@@ -49,6 +51,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import com.example.myapplication.utils.BitmapPoolManager
 import com.example.myapplication.utils.ManagedBitmap
+import com.google.android.gms.location.LocationRequest
 import java.util.concurrent.atomic.AtomicBoolean
 
 class DeepLearningAdaptiveManager {
@@ -763,9 +766,9 @@ class SensorCollector(
                         camera.createCaptureSession(
                             listOf(surface),
                             object : CameraCaptureSession.StateCallback() {
+                                @SuppressLint("SuspiciousIndentation")
                                 override fun onConfigured(session: CameraCaptureSession) {
                                     captureSession = session
-
                                         session.setRepeatingRequest(
                                             builder.build(),
                                             cameraConfig.captureCallback,
@@ -804,6 +807,118 @@ class SensorCollector(
             Log.e(TAG, "Error in startCameraStreaming: ${e.message}", e)
             callback(null)
             closeCamera()
+        }
+    }
+
+    /**
+     * 🎯 카메라는 건드리지 않고 센서 콜백만 재등록
+     */
+    @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
+    fun restartSensorCallbacks(
+        gpsCallback: ((SensorData_String) -> Unit)? = null,
+        imuCallback: ((SensorData_String) -> Unit)? = null,
+        gnssCallback: ((SensorData_String) -> Unit)? = null
+    ) {
+        // 콜백들을 업데이트
+        this.gpsCallback = gpsCallback
+        this.imuCallback = imuCallback
+        this.gnssCallback = gnssCallback
+
+        Log.d(TAG, "🔄 센서 콜백만 재등록: GPS=${gpsCallback != null}, IMU=${imuCallback != null}, GNSS=${gnssCallback != null}")
+
+        // GPS는 위치 업데이트만 재시작 - 기존 방식 사용
+        if (gpsCallback != null) {
+            try {
+                fusedLocationClient.removeLocationUpdates(locationCallback)
+                Thread.sleep(100)
+
+                // 기존 코드와 동일한 방식으로 GPS 재시작
+                val locationRequest = LocationRequest.Builder(
+                    Priority.PRIORITY_HIGH_ACCURACY,
+                    1000L
+                )
+                    .setMinUpdateIntervalMillis(500L)
+                    .setMaxUpdateDelayMillis(2000L)
+                    .setMinUpdateDistanceMeters(0f)
+                    .build()
+
+                fusedLocationClient.requestLocationUpdates(
+                    locationRequest,
+                    locationCallback,
+                    Looper.getMainLooper()
+                )
+                Log.d(TAG, "✅ GPS만 재시작 완료")
+            } catch (e: Exception) {
+                Log.e(TAG, "GPS 재시작 실패: ${e.message}", e)
+            }
+        }
+
+        // IMU는 센서 리스너만 재등록 - 기존 방식 사용
+        if (imuCallback != null) {
+            try {
+                sensorManager.unregisterListener(accelerometerListener)
+                sensorManager.unregisterListener(gyroscopeListener)
+                sensorManager.unregisterListener(magnetometerListener)
+
+                Thread.sleep(100)
+
+                // 기존 코드와 동일한 방식으로 IMU 재시작
+                val accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+                val gyroSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+                val magSensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+
+                if (accelSensor != null) {
+                    val success = sensorManager.registerListener(
+                        accelerometerListener,
+                        accelSensor,
+                        SensorManager.SENSOR_DELAY_GAME
+                    )
+                    Log.d(TAG, "가속도계 재등록 ${if (success) "성공" else "실패"}")
+                }
+
+                if (gyroSensor != null) {
+                    val success = sensorManager.registerListener(
+                        gyroscopeListener,
+                        gyroSensor,
+                        SensorManager.SENSOR_DELAY_GAME
+                    )
+                    Log.d(TAG, "자이로스코프 재등록 ${if (success) "성공" else "실패"}")
+                }
+
+                if (magSensor != null) {
+                    val success = sensorManager.registerListener(
+                        magnetometerListener,
+                        magSensor,
+                        SensorManager.SENSOR_DELAY_GAME
+                    )
+                    Log.d(TAG, "자기계 재등록 ${if (success) "성공" else "실패"}")
+                }
+
+                Log.d(TAG, "✅ IMU 센서만 재시작 완료")
+            } catch (e: Exception) {
+                Log.e(TAG, "IMU 재시작 실패: ${e.message}", e)
+            }
+        }
+
+        // GNSS도 콜백만 재등록 - 기존 방식 사용
+        if (gnssCallback != null) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    locationManager.unregisterGnssMeasurementsCallback(gnssMeasurementsCallback)
+                    locationManager.unregisterGnssStatusCallback(gnssStatusCallback)
+                    locationManager.unregisterGnssNavigationMessageCallback(gnssNavigationMessageCallback)
+
+                    Thread.sleep(100)
+
+                    locationManager.registerGnssMeasurementsCallback(gnssMeasurementsCallback)
+                    locationManager.registerGnssStatusCallback(gnssStatusCallback)
+                    locationManager.registerGnssNavigationMessageCallback(gnssNavigationMessageCallback)
+                }
+                isGnssCallbackRegistered.set(true)
+                Log.d(TAG, "✅ GNSS 콜백만 재등록 완료")
+            } catch (e: Exception) {
+                Log.e(TAG, "GNSS 콜백 재등록 실패: ${e.message}", e)
+            }
         }
     }
 

@@ -21,7 +21,7 @@ class HomeRepository(
     private val context: Context,
     private val sensorCollector: SensorCollector,
     private val dataSynchronizer: DataSynchronizer,
-    private val bitmapPoolManager: BitmapPoolManager  // ✅ BitmapPoolManager 주입
+    private val bitmapPoolManager: BitmapPoolManager
 ) {
     private val TAG = "HomeRepository"
 
@@ -47,6 +47,11 @@ class HomeRepository(
 
     // ✅ Detection 콜백 변수 추가
     var detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
+
+    // 🎯 센서 콜백들을 인스턴스 변수로 저장
+    private var currentGpsCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null
+    private var currentImuCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null
+    private var currentGnssCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null
 
     suspend fun getDefaultSensorData(): List<SensorData> {
         val dataList = mutableListOf<SensorData>()
@@ -128,7 +133,7 @@ class HomeRepository(
     }
 
     /**
-     * ✅ 카메라 스트리밍 시작 - Raw 비트맵 그대로 전달
+     * ✅ 카메라 스트리밍 시작 - 센서 콜백 보존
      */
     fun startCameraStreaming() {
         if (isStreamingActive) {
@@ -136,35 +141,27 @@ class HomeRepository(
             return
         }
 
+        Log.d(TAG, "🎯 카메라 시작 - 센서 간섭 방지 모드")
         isStreamingActive = true
-        Log.d(TAG, "Starting camera streaming with Advanced Tagged Pool separation")
 
         sensorCollector.startCameraStreaming(
             callback = { sensorData ->
-                // 🎯 Raw 비트맵을 그대로 전달 (복사는 HomeFragment에서 처리)
                 if (sensorData?.bitmap != null &&
                     !sensorData.bitmap.isRecycled &&
                     sensorData.bitmap.width > 0 &&
                     sensorData.bitmap.height > 0) {
 
                     _cameraStreamFlow.value = sensorData
-                    Log.d(TAG, "✅ Raw frame forwarded to UI: frameId=${sensorData.frameId}, size=${sensorData.bitmap.width}x${sensorData.bitmap.height}")
-                } else {
-                    Log.w(TAG, "⚠️ Invalid raw frame filtered out: bitmap=${sensorData?.bitmap}, recycled=${sensorData?.bitmap?.isRecycled}")
-                    // null을 보내지 않고 그냥 무시
+                    Log.d(TAG, "✅ Camera frame: frameId=${sensorData.frameId}")
                 }
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
-                Log.d(TAG, "🎯 Repository Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, time=${inferenceTime}ms")
-
-                if (boundingBoxes.isNotEmpty()) {
-                    Log.d(TAG, "🎯 Repository에서 받은 객체들: ${boundingBoxes.map { "${it.clsName}(${it.cnf})" }}")
-                }
-
-                // ✅ ViewModel로 즉시 전달
                 detectionCallback?.invoke(boundingBoxes, inferenceTime, frameId)
             }
         )
+
+        // 🚨 카메라 시작 후 센서 복원은 하지 않음 (간섭 방지)
+        Log.d(TAG, "✅ 카메라 시작 완료 - 센서 간섭 방지")
     }
 
     /**
@@ -183,7 +180,7 @@ class HomeRepository(
     }
 
     /**
-     * ✅ 센서 데이터 스트리밍 시작 - 백그라운드 센서용 (GPS, IMU, GNSS)
+     * ✅ 센서 데이터 스트리밍 시작 - 수정된 버전
      */
     fun startSensorStreaming(
         gpsCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
@@ -191,26 +188,41 @@ class HomeRepository(
         gnssCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
         detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
     ) {
-        Log.d(TAG, "🎯 Repository startSensorStreaming - detectionCallback: ${detectionCallback != null}")
+        Log.d(TAG, "🎯 Repository startSensorStreaming - 카메라 보호 모드")
 
-        sensorCollector.startSensorStreaming(
-            gpsCallback = gpsCallback,
-            imuCallback = imuCallback,
-            gnssCallback = gnssCallback,
-            detectionCallback = { boundingBoxes, inferenceTime, frameId ->
-                Log.d(TAG, "🎯 Repository Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, time=${inferenceTime}ms")
+        // 콜백들을 저장
+        currentGpsCallback = gpsCallback
+        currentImuCallback = imuCallback
+        currentGnssCallback = gnssCallback
 
-                if (boundingBoxes.isNotEmpty()) {
-                    Log.d(TAG, "🎯 Repository에서 받은 객체들: ${boundingBoxes.map { "${it.clsName}(${it.cnf})" }}")
-                }
+        // 🚨 카메라가 활성화된 경우 센서만 조심스럽게 재등록
+        if (isStreamingActive) {
+            Log.w(TAG, "⚠️ 카메라 활성 상태 - 센서만 재등록 (카메라 보호)")
 
-                // ✅ ViewModel로 콜백 전달
-                Log.d(TAG, "🎯 ViewModel로 콜백 전달 시작 - detectionCallback: ${detectionCallback != null}")
-                detectionCallback?.invoke(boundingBoxes, inferenceTime, frameId)
-                Log.d(TAG, "🎯 ViewModel로 콜백 전달 완료")
+            CoroutineScope(Dispatchers.IO).launch {
+                delay(100) // 안전 대기
+
+                // 카메라와 완전 분리된 센서만 재등록
+                sensorCollector.restartSensorCallbacks(
+                    gpsCallback = gpsCallback,
+                    imuCallback = imuCallback,
+                    gnssCallback = gnssCallback
+                )
             }
-        )
-        Log.d(TAG, "✅ 모든 센서 스트리밍 시작 완료")
+        } else {
+            // 카메라 비활성 상태에서만 전체 재시작
+            Log.d(TAG, "🎯 카메라 비활성 - 전체 센서 재시작 가능")
+
+            CoroutineScope(Dispatchers.IO).launch {
+                delay(200)
+                sensorCollector.startSensorStreaming(
+                    gpsCallback = gpsCallback,
+                    imuCallback = imuCallback,
+                    gnssCallback = gnssCallback,
+                    detectionCallback = detectionCallback
+                )
+            }
+        }
     }
 
     /**
@@ -218,6 +230,9 @@ class HomeRepository(
      */
     fun stopSensorStreaming() {
         sensorCollector.stopSensorStreaming()
+        currentGpsCallback = null
+        currentImuCallback = null
+        currentGnssCallback = null
         Log.d(TAG, "센서 스트리밍 중지")
     }
 

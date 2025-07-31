@@ -88,7 +88,12 @@ class HomeFragment : Fragment() {
             checkGpsAndPermissions()
             setupObservers()
             setupClickListeners()
-            viewModel.startSensorStreaming()
+            // 🎯 센서 스트리밍을 늦게 시작 (UI 준비 후)
+            viewLifecycleOwner.lifecycleScope.launch {
+                delay(500) // UI 준비 대기
+                viewModel.startSensorStreaming()
+                Log.d("HomeFragment", "🎯 지연된 센서 스트리밍 시작")
+            }
             startHealthMonitoring()
 
         } catch (e: Exception) {
@@ -342,38 +347,52 @@ class HomeFragment : Fragment() {
     private fun setupCameraFrameObserver() {
         viewModel.cameraFrame.observe(viewLifecycleOwner) { sensorData ->
             try {
-                Log.d("HomeFragment", "📱 Camera Frame Observer: sensorData=${sensorData != null}")
+                Log.d("HomeFragment", "📱 Camera Frame Observer 호출: sensorData=${sensorData != null}")
 
                 if (sensorData?.managedBitmap?.isValid() == true) {
-                    // ✅ 추가 검증
                     val bitmap = sensorData.managedBitmap!!.bitmap
                     if (!bitmap.isRecycled && bitmap.width > 0 && bitmap.height > 0) {
                         Log.d("HomeFragment", "✅ 유효한 ManagedBitmap 수신: frameId=${sensorData.frameId}")
-                        displayManagedBitmapDirectly(sensorData)
+
+                        // 🎯 즉시 UI 업데이트 (post 제거)
+                        try {
+                            val previousManagedBitmap = currentManagedBitmap
+                            currentManagedBitmap = sensorData.managedBitmap
+
+                            binding.imageView.setImageBitmap(bitmap)
+                            previousManagedBitmap?.release()
+                            currentManagedBitmap!!.updateLastAccess()
+
+                            successfulFrameCount++
+                            frameSkipCount = 0
+
+                            Log.d("HomeFragment", "✅ 카메라 이미지 UI 업데이트 성공: frameId=${sensorData.frameId}")
+                        } catch (e: Exception) {
+                            Log.e("HomeFragment", "❌ 카메라 이미지 UI 업데이트 실패: ${e.message}", e)
+                            handleUIUpdateFailure()
+                        }
                     } else {
                         Log.w("HomeFragment", "⚠️ 비트맵 상태 불량: recycled=${bitmap.isRecycled}, size=${bitmap.width}x${bitmap.height}")
                     }
 
                 } else if (sensorData?.bitmap != null && !sensorData.bitmap.isRecycled) {
-                    // 폴백: 기존 bitmap 방식 - 추가 검증
+                    // 폴백: 기존 bitmap 방식
                     if (sensorData.bitmap.width > 0 && sensorData.bitmap.height > 0) {
                         Log.w("HomeFragment", "⚠️ ManagedBitmap 없음, 기존 bitmap 사용: frameId=${sensorData.frameId}")
 
-                        binding.imageView.post {
-                            try {
-                                if (!sensorData.bitmap.isRecycled) {
-                                    binding.imageView.setImageBitmap(sensorData.bitmap)
-                                    val previousManagedBitmap = currentManagedBitmap
-                                    currentManagedBitmap = null
-                                    previousManagedBitmap?.release()
-                                }
-                            } catch (e: Exception) {
-                                Log.e("HomeFragment", "❌ 폴백 비트맵 설정 실패: ${e.message}", e)
-                            }
+                        try {
+                            binding.imageView.setImageBitmap(sensorData.bitmap)
+                            val previousManagedBitmap = currentManagedBitmap
+                            currentManagedBitmap = null
+                            previousManagedBitmap?.release()
+
+                            Log.d("HomeFragment", "✅ 폴백 카메라 이미지 업데이트 성공")
+                        } catch (e: Exception) {
+                            Log.e("HomeFragment", "❌ 폴백 비트맵 설정 실패: ${e.message}", e)
                         }
                     }
                 } else {
-                    Log.w("HomeFragment", "⚠️ 무효한 프레임 수신 - 이전 프레임 유지")
+                    Log.w("HomeFragment", "⚠️ 무효한 프레임 수신")
                 }
             } catch (e: Exception) {
                 Log.e("HomeFragment", "❌ 프레임 Observer 처리 오류: ${e.message}", e)
@@ -382,20 +401,42 @@ class HomeFragment : Fragment() {
     }
 
     private fun setupSensorObservers() {
+        // 🎯 GPS 데이터 Observer 강화
         viewModel.gpsData.observe(viewLifecycleOwner) { data ->
-            binding.gpsLogText.text = data
-        }
-
-        viewModel.gnssData.observe(viewLifecycleOwner) { data ->
-            binding.gnssLogText.text = if (data == "GNSS: 대기 중") {
-                "GNSS 데이터가 수신되지 않습니다."
-            } else {
-                data
+            Log.d("HomeFragment", "🎯 GPS Observer 호출: $data")
+            try {
+                binding.gpsLogText.text = data
+                Log.d("HomeFragment", "✅ GPS UI 텍스트 업데이트 완료")
+            } catch (e: Exception) {
+                Log.e("HomeFragment", "❌ GPS UI 업데이트 실패: ${e.message}", e)
             }
         }
 
+        // 🎯 GNSS 데이터 Observer 강화
+        viewModel.gnssData.observe(viewLifecycleOwner) { data ->
+            Log.d("HomeFragment", "🎯 GNSS Observer 호출: $data")
+            try {
+                val displayText = if (data == "GNSS: 대기 중") {
+                    "GNSS 데이터가 수신되지 않습니다."
+                } else {
+                    data
+                }
+                binding.gnssLogText.text = displayText
+                Log.d("HomeFragment", "✅ GNSS UI 텍스트 업데이트 완료: $displayText")
+            } catch (e: Exception) {
+                Log.e("HomeFragment", "❌ GNSS UI 업데이트 실패: ${e.message}", e)
+            }
+        }
+
+        // 🎯 IMU 데이터 Observer 강화
         viewModel.imuData.observe(viewLifecycleOwner) { data ->
-            binding.imuLogText.text = data
+            Log.d("HomeFragment", "🎯 IMU Observer 호출: $data")
+            try {
+                binding.imuLogText.text = data
+                Log.d("HomeFragment", "✅ IMU UI 텍스트 업데이트 완료")
+            } catch (e: Exception) {
+                Log.e("HomeFragment", "❌ IMU UI 업데이트 실패: ${e.message}", e)
+            }
         }
     }
 
@@ -519,10 +560,30 @@ class HomeFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        Log.d("HomeFragment", "🎯 onResume - 센서 데이터 Observer 재활성화")
+
+        // 🎯 onResume에서 센서 재시작 (중요!)
         viewModel.startSensorStreaming()
         viewModel.updatePoolStatus()
-    }
 
+        // 🎯 UI 강제 새로고침
+        viewLifecycleOwner.lifecycleScope.launch {
+            delay(100)
+            // 현재 LiveData 값들을 강제로 다시 observe
+            viewModel.gpsData.value?.let {
+                binding.gpsLogText.text = it
+                Log.d("HomeFragment", "🎯 onResume GPS 강제 업데이트: $it")
+            }
+            viewModel.gnssData.value?.let {
+                binding.gnssLogText.text = it
+                Log.d("HomeFragment", "🎯 onResume GNSS 강제 업데이트: $it")
+            }
+            viewModel.imuData.value?.let {
+                binding.imuLogText.text = it
+                Log.d("HomeFragment", "🎯 onResume IMU 강제 업데이트: $it")
+            }
+        }
+    }
     override fun onDestroyView() {
         super.onDestroyView()
 
