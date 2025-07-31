@@ -14,7 +14,9 @@ import com.example.myapplication.model.SensorData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
 
 class HomeViewModel(
     private val sensorCollector: SensorCollector,
@@ -87,12 +89,14 @@ class HomeViewModel(
 
     // 🚀 강화된 Surface FPS 모니터링
     private var surfaceFpsMonitor: Choreographer.FrameCallback? = null
+    private val choreographerLock = ReentrantLock()
     private var lastFpsCheckTime = 0L
     private var frameCount = 0
     private var consecutiveLowFpsCount = 0
-    private val FPS_THRESHOLD = 8.0  // 8fps 이하면 풀 정리
-    private val LOW_FPS_TRIGGER_COUNT = 5  // 5회 연속 낮으면 트리거
+    private val FPS_THRESHOLD = 10.0  // 8→10fps로 완화
+    private val LOW_FPS_TRIGGER_COUNT = 3  // 5→3회로 더 빠른 대응
     private val isRecoveryInProgress = AtomicBoolean(false)
+    private val callbackRegistered = AtomicBoolean(false)
 
     fun setServerTransmissionEnabled(enabled: Boolean) {
         _isServerTransmissionEnabled.postValue(enabled)
@@ -431,7 +435,10 @@ class HomeViewModel(
 
     override fun onCleared() {
         super.onCleared()
-        Log.d("HomeViewModel", "🧹 ViewModel 정리 시작")
+        Log.d(TAG, "🧹 ViewModel 정리 시작")
+
+        // 🚨 안전한 정리 순서
+        stopSurfaceFpsMonitoring()  // 1. FPS 모니터링 먼저 중지
 
         isCameraStreamingJob?.cancel()
         homeRepository.stopCameraStreaming()
@@ -439,7 +446,7 @@ class HomeViewModel(
         sensorCollector.closeCamera()
         _isStreaming.value = false
 
-        Log.d("HomeViewModel", "✅ ViewModel 정리 완료")
+        Log.d(TAG, "✅ ViewModel 완전 정리 완료")
     }
 
     fun onNewInference(timeMs: Long) {
@@ -498,86 +505,167 @@ class HomeViewModel(
      * 🚀 완화된 Surface FPS 모니터링 시작
      */
     private fun startAdvancedSurfaceFpsMonitoring() {
-        lastFpsCheckTime = System.currentTimeMillis()
-        frameCount = 0
-        consecutiveLowFpsCount = 0
+        choreographerLock.lock()
+        try {
+            // 기존 콜백 완전 제거
+            stopSurfaceFpsMonitoring()
 
-        surfaceFpsMonitor = object : Choreographer.FrameCallback {
-            override fun doFrame(frameTimeNanos: Long) {
-                frameCount++
-                val currentTime = System.currentTimeMillis()
+            lastFpsCheckTime = System.currentTimeMillis()
+            frameCount = 0
+            consecutiveLowFpsCount = 0
 
-                // ✅ 4초마다 FPS 체크
-                if (currentTime - lastFpsCheckTime >= 4000) {
-                    val fps = frameCount * 1000.0 / (currentTime - lastFpsCheckTime)
+            surfaceFpsMonitor = object : Choreographer.FrameCallback {
+                override fun doFrame(frameTimeNanos: Long) {
+                    try {
+                        frameCount++
+                        val currentTime = System.currentTimeMillis()
 
-                    // ✅ FPS 임계값을 매우 관대하게 (8fps)
-                    if (fps < FPS_THRESHOLD) {
-                        consecutiveLowFpsCount++
-                        Log.w(TAG, "⚠️ Surface FPS 낮음: ${String.format("%.1f", fps)}fps (연속 ${consecutiveLowFpsCount}회)")
+                        // 🎯 3초마다 FPS 체크 (4초→3초)
+                        if (currentTime - lastFpsCheckTime >= 3000) {
+                            val fps = frameCount * 1000.0 / (currentTime - lastFpsCheckTime)
 
-                        // ✅ 연속 감지 임계값 (5회)
-                        if (consecutiveLowFpsCount >= LOW_FPS_TRIGGER_COUNT &&
-                            isRecoveryInProgress.compareAndSet(false, true)) {
+                            if (fps < FPS_THRESHOLD) {
+                                consecutiveLowFpsCount++
+                                Log.w(TAG, "⚠️ FPS 낮음: ${String.format("%.1f", fps)}fps (연속 ${consecutiveLowFpsCount}회)")
 
-                            Log.w(TAG, "🚨 FPS 드롭 감지 - 응급 복구 트리거: ${consecutiveLowFpsCount}회")
+                                // 🚨 더 빠른 응급 복구 트리거
+                                if (consecutiveLowFpsCount >= LOW_FPS_TRIGGER_COUNT &&
+                                    isRecoveryInProgress.compareAndSet(false, true)) {
 
-                            viewModelScope.launch(Dispatchers.IO) {
-                                try {
-                                    System.gc()
-                                    delay(500)
+                                    Log.w(TAG, "🚨 FPS 드롭 감지 - 즉시 응급 복구: ${consecutiveLowFpsCount}회")
 
-                                    forceCleanupBitmapPool()
-                                    delay(300)
+                                    viewModelScope.launch(Dispatchers.IO) {
+                                        try {
+                                            // 🎯 단계별 응급 복구
+                                            performStepByStepRecovery()
 
-                                    // UI Pool 복구 신호 발송
-                                    launch(Dispatchers.Main) {
-                                        _shouldRecoverUIPool.postValue(true)
+                                            delay(5000) // 5초 대기
+                                            consecutiveLowFpsCount = 0
+                                            isRecoveryInProgress.set(false)
+
+                                            launch(Dispatchers.Main) {
+                                                _shouldRecoverUIPool.postValue(false)
+                                            }
+                                            Log.d(TAG, "🔄 단계별 응급 복구 완료")
+
+                                        } catch (e: Exception) {
+                                            Log.e(TAG, "❌ 응급 복구 처리 예외: ${e.message}", e)
+                                            isRecoveryInProgress.set(false)
+                                        }
                                     }
-
-                                    delay(8000) // 8초 대기
-                                    consecutiveLowFpsCount = 0
-                                    isRecoveryInProgress.set(false)
-
-                                    launch(Dispatchers.Main) {
-                                        _shouldRecoverUIPool.postValue(false)
-                                    }
-                                    Log.d(TAG, "🔄 응급 복구 완료 - 모니터링 재시작")
-
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "❌ 응급 FPS 복구 처리 중 예외: ${e.message}", e)
-                                    isRecoveryInProgress.set(false)
                                 }
+                            } else {
+                                consecutiveLowFpsCount = 0
                             }
+
+                            lastFpsCheckTime = currentTime
+                            frameCount = 0
                         }
-                    } else {
-                        consecutiveLowFpsCount = 0
+
+                        // 🚨 안전한 재등록 - 상태 확인
+                        choreographerLock.lock()
+                        try {
+                            if (surfaceFpsMonitor != null && callbackRegistered.get()) {
+                                Choreographer.getInstance().postFrameCallback(this)
+                            }
+                        } finally {
+                            choreographerLock.unlock()
+                        }
+
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ FPS 모니터링 콜백 오류: ${e.message}", e)
+                        // 오류 발생 시 재등록 중단
+                        choreographerLock.lock()
+                        try {
+                            callbackRegistered.set(false)
+                        } finally {
+                            choreographerLock.unlock()
+                        }
                     }
-
-                    lastFpsCheckTime = currentTime
-                    frameCount = 0
-                }
-
-                if (surfaceFpsMonitor != null) {
-                    Choreographer.getInstance().postFrameCallback(this)
                 }
             }
-        }
 
-        Choreographer.getInstance().postFrameCallback(surfaceFpsMonitor!!)
-        Log.d(TAG, "🎯 완화된 Surface FPS 모니터링 시작 (임계값: ${FPS_THRESHOLD}fps, 연속감지: ${LOW_FPS_TRIGGER_COUNT}회)")
+            // 🎯 안전한 콜백 등록
+            callbackRegistered.set(true)
+            Choreographer.getInstance().postFrameCallback(surfaceFpsMonitor!!)
+            Log.d(TAG, "🎯 강화된 FPS 모니터링 시작 (임계값: ${FPS_THRESHOLD}fps)")
+
+        } finally {
+            choreographerLock.unlock()
+        }
     }
 
     /**
-     * Surface FPS 모니터링 중지
+     * 🎯 단계별 응급 복구 - 더 체계적인 접근
+     */
+    private suspend fun performStepByStepRecovery() = withContext(Dispatchers.IO) {
+        Log.w(TAG, "🔧 단계적 응급 복구 시작")
+
+        try {
+            // 1단계: UI 프레임 클리어 (Main 스레드)
+            launch(Dispatchers.Main) {
+                try {
+                    _shouldRecoverUIPool.postValue(true)
+                    Log.d(TAG, "1단계: UI 프레임 클리어 신호")
+                } catch (e: Exception) {
+                    Log.e(TAG, "1단계 실패: ${e.message}", e)
+                }
+            }
+            delay(300)
+
+            // 2단계: 강제 GC
+            System.gc()
+            delay(200)
+            System.runFinalization()
+            delay(200)
+            Log.d(TAG, "2단계: GC 완료")
+
+            // 3단계: BitmapPool 응급 정리
+            forceCleanupBitmapPool()
+            delay(300)
+            Log.d(TAG, "3단계: BitmapPool 정리 완료")
+
+            // 4단계: 추가 정리
+            launch(Dispatchers.Main) {
+                try {
+                    homeRepository.requestPoolCleanup()
+                    Log.d(TAG, "4단계: Repository 풀 정리 완료")
+                } catch (e: Exception) {
+                    Log.e(TAG, "4단계 실패: ${e.message}", e)
+                }
+            }
+            delay(500)
+
+            Log.w(TAG, "✅ 단계적 응급 복구 완료")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 단계적 복구 실패: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 🚨 안전한 FPS 모니터링 중지
      */
     private fun stopSurfaceFpsMonitoring() {
-        surfaceFpsMonitor?.let {
-            Choreographer.getInstance().removeFrameCallback(it)
+        choreographerLock.lock()
+        try {
+            callbackRegistered.set(false)
+
+            surfaceFpsMonitor?.let {
+                try {
+                    Choreographer.getInstance().removeFrameCallback(it)
+                    Log.d(TAG, "🛑 FPS 모니터링 콜백 제거")
+                } catch (e: Exception) {
+                    Log.w(TAG, "콜백 제거 실패: ${e.message}")
+                }
+            }
+
+            surfaceFpsMonitor = null
+            consecutiveLowFpsCount = 0
+            isRecoveryInProgress.set(false)
+
+        } finally {
+            choreographerLock.unlock()
         }
-        surfaceFpsMonitor = null
-        consecutiveLowFpsCount = 0
-        isRecoveryInProgress.set(false)
-        Log.d(TAG, "🛑 Surface FPS 모니터링 중지")
     }
 }

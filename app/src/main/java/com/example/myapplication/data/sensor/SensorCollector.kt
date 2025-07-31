@@ -1113,26 +1113,31 @@ class SensorCollector(
         // ✅ ManagedBitmap 유효성 재검증
         if (!managedBitmap.isValid() || managedBitmap.bitmap.isRecycled) {
             Log.w(TAG, "❌ 무효한 ManagedBitmap 감지 - 프레임 스킵: frameId=$frameId")
+            managedBitmap.release() // 즉시 해제
             coroutineScope.launch(Dispatchers.Main) { callback(null) }
             return
         }
 
         if (::dataSynchronizer.isInitialized) {
-            val sensorData = SensorData(
-                value = "TaggedFrame: $frameId",
-                bitmap = managedBitmap.bitmap,
-                managedBitmap = managedBitmap,
-                timestamp = systemTime,
-                monoTimestamp = System.nanoTime(),
-                frameId = frameId
-            )
-            LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+            try {
+                val sensorData = SensorData(
+                    value = "TaggedFrame: $frameId",
+                    bitmap = managedBitmap.bitmap,
+                    managedBitmap = managedBitmap,
+                    timestamp = systemTime,
+                    monoTimestamp = System.nanoTime(),
+                    frameId = frameId
+                )
+                LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ LoggerManager 처리 실패: ${e.message}", e)
+            }
         }
 
         // UI로 전달 - 추가 검증
-        coroutineScope.launch(Dispatchers.Main) {
+        //coroutineScope.launch(Dispatchers.Main.immediate) { // immediate 사용
+        coroutineScope.launch(Dispatchers.Main) { // immediate 사용
             try {
-                // 🔒 UI 스레드에서 재검증
                 if (managedBitmap.isValid() && !managedBitmap.bitmap.isRecycled) {
                     callback(
                         SensorData(
@@ -1144,13 +1149,14 @@ class SensorCollector(
                             frameId = frameId
                         )
                     )
-                    Log.d(TAG, "✅ Advanced Tagged frame delivered: frameId=$frameId")
+                    Log.d(TAG, "✅ Frame delivered: frameId=$frameId")
                 } else {
-                    Log.w(TAG, "⚠️ UI 스레드에서 ManagedBitmap 무효화 감지: frameId=$frameId")
+                    Log.w(TAG, "⚠️ UI 전달 시 비트맵 무효: frameId=$frameId")
                     callback(null)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Frame delivery error: ${e.message}", e)
+                managedBitmap.release() // 예외 시 해제
                 callback(null)
             }
         }

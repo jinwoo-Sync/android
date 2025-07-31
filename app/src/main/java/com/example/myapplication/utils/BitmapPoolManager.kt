@@ -24,9 +24,11 @@ class BitmapPoolManager private constructor(private val context: Context) {
 
     // 🎯 전역 싱글톤 BitmapPool
     val advancedTaggedBitmapPool = AdvancedTaggedBitmapPool(
-        poolSize = 50,  // 좀 더 여유롭게
+        poolSize = 60,  // 50→60으로 증가
         width = 840,
-        height = 840
+        height = 840,
+        autoCleanupIntervalMs = 800L,  // 2000→800ms로 단축
+        staleTimeoutMs = 2500L  // 5000→2500ms로 단축
     )
 
     // 🎯 전역 프로세서

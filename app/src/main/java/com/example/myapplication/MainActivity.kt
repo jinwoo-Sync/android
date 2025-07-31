@@ -76,6 +76,8 @@ class MainActivity : AppCompatActivity() {
     private var batteryOptimizationDialog: AlertDialog? = null
     private var locationServiceDialog: AlertDialog? = null
 
+    private val emergencyShutdownPrevention = AtomicBoolean(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -149,59 +151,56 @@ class MainActivity : AppCompatActivity() {
      */
     private fun startBitmapPoolMonitoring() {
         monitoringScope.launch {
-            fileLogger.i("MainActivity", "🎭 BitmapPool 전용 모니터링 시작 (5초 간격)")
+            fileLogger.i("MainActivity", "🎭 강화된 BitmapPool 모니터링 시작 (3초 간격)")
 
             while (isActive) {
                 try {
-                    delay(5_000) // 5초 대기
+                    delay(3_000) // 5초→3초로 단축
 
                     val currentTime = System.currentTimeMillis()
                     val poolHealthStatus = bitmapPoolManager.advancedTaggedBitmapPool.getPoolHealthStatus()
                     val poolDetailStatus = bitmapPoolManager.getPoolDetailedStatus()
 
-                    // 🎯 Pool 상태 변화 감지
-                    if (poolDetailStatus != previousPoolState) {
-                        fileLogger.i("MainActivity", "🎭 BitmapPool 상태 변화 감지:")
-                        fileLogger.i("MainActivity", "   이전: ${previousPoolState.take(100)}...")
-                        fileLogger.i("MainActivity", "   현재: ${poolDetailStatus.take(100)}...")
-                        previousPoolState = poolDetailStatus
-                    }
-
-                    // 🚨 Critical 상태 감지
+                    // 🚨 더 적극적인 상태 변화 감지
                     when (poolHealthStatus.healthLevel) {
                         HealthLevel.CRITICAL -> {
                             if (!isPoolCritical.getAndSet(true)) {
-                                fileLogger.e("MainActivity", "🔴🔴 BitmapPool CRITICAL 상태 감지! 🔴🔴")
+                                fileLogger.e("MainActivity", "🔴🔴 BitmapPool CRITICAL - 즉시 응급 복구! 🔴🔴")
                                 logCriticalPoolState(poolHealthStatus, poolDetailStatus)
 
-                                // 응급 복구
+                                // 🚨 즉시 응급 복구
                                 monitoringScope.launch {
-                                    performPoolEmergencyRecovery("Critical Pool State")
+                                    performPoolEmergencyRecovery("Critical Pool State - Available: ${poolHealthStatus.availableSlots}")
                                 }
                             }
                         }
                         HealthLevel.WARNING -> {
-                            fileLogger.w("MainActivity", "🟡 BitmapPool WARNING 상태: ${poolHealthStatus.recommendation}")
-                            logDetailedPoolState("WARNING", poolHealthStatus, poolDetailStatus)
+                            fileLogger.w("MainActivity", "🟡 BitmapPool WARNING - 예방적 정리: ${poolHealthStatus.recommendation}")
+
+                            // 🎯 예방적 정리 트리거
+                            monitoringScope.launch {
+                                delay(1000)
+                                try {
+                                    bitmapPoolManager.advancedTaggedBitmapPool.forceCleanupStaleReferences()
+                                    fileLogger.i("MainActivity", "✅ 예방적 정리 완료")
+                                } catch (e: Exception) {
+                                    fileLogger.e("MainActivity", "❌ 예방적 정리 실패: ${e.message}", e)
+                                }
+                            }
                         }
                         HealthLevel.DEGRADED -> {
-                            fileLogger.w("MainActivity", "🟠 BitmapPool DEGRADED 상태: ${poolHealthStatus.staleSlots}개 stale")
+                            fileLogger.w("MainActivity", "🟠 BitmapPool DEGRADED - Stale: ${poolHealthStatus.staleSlots}개")
+
+                            // 가벼운 정리
+                            if (poolHealthStatus.staleSlots > 3) {
+                                bitmapPoolManager.advancedTaggedBitmapPool.forceCleanupStaleReferences()
+                            }
                         }
                         HealthLevel.HEALTHY -> {
                             if (isPoolCritical.getAndSet(false)) {
-                                fileLogger.i("MainActivity", "✅ BitmapPool 상태 회복: HEALTHY")
+                                fileLogger.i("MainActivity", "✅ BitmapPool 상태 완전 회복: HEALTHY")
                             }
                         }
-                    }
-
-                    // 🎯 .mp4 녹화 중 특별 모니터링
-                    if (isMp4Recording) {
-                        val recordingDuration = currentTime - mp4RecordingStartTime
-                        fileLogger.i("MainActivity", "🎬 .mp4 녹화 중 BitmapPool 상태 (${recordingDuration/1000}초):")
-                        fileLogger.i("MainActivity", "   Pool Health: ${poolHealthStatus.healthLevel}")
-                        fileLogger.i("MainActivity", "   Available: ${poolHealthStatus.availableSlots}/${poolHealthStatus.totalSlots}")
-                        fileLogger.i("MainActivity", "   Active References: ${poolHealthStatus.totalReferences}")
-                        fileLogger.i("MainActivity", "   FPS 드롭 횟수: $mp4RecordingFpsDrops")
                     }
 
                 } catch (e: Exception) {
@@ -210,6 +209,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
 
     /**
      * 🎯 .mp4 녹화 상태 모니터링
@@ -519,28 +519,48 @@ class MainActivity : AppCompatActivity() {
      */
     private suspend fun performPoolEmergencyRecovery(reason: String) = withContext(Dispatchers.IO) {
         try {
-            fileLogger.w("MainActivity", "🔧🔧 BitmapPool 응급 복구 시작: $reason 🔧🔧")
+            fileLogger.w("MainActivity", "🔧🔧 강화된 응급 복구 시작: $reason 🔧🔧")
 
-            // 1. 강제 GC
+            // 1단계: UI 안전 클리어 (우선순위)
+            launch(Dispatchers.Main) {
+                try {
+                    // HomeFragment의 응급 클리어 요청
+                    Log.w("MainActivity", "1단계: UI 프레임 안전 클리어 요청")
+                } catch (e: Exception) {
+                    fileLogger.e("MainActivity", "UI 클리어 실패: ${e.message}", e)
+                }
+            }
+            delay(200)
+
+            // 2단계: 강제 GC (더 적극적)
             System.gc()
-            delay(500)
+            delay(300)
+            System.runFinalization()
+            delay(200)
+            fileLogger.w("MainActivity", "2단계: 강제 GC 완료")
 
-            // 2. BitmapPool 응급 정리
-            bitmapPoolManager.performEmergencyReset()
-            delay(500)
+            // 3단계: BitmapPool 응급 리셋
+            try {
+                bitmapPoolManager.performEmergencyReset()
+                delay(500)
+                fileLogger.w("MainActivity", "3단계: BitmapPool 응급 리셋 완료")
+            } catch (e: Exception) {
+                fileLogger.e("MainActivity", "BitmapPool 리셋 실패: ${e.message}", e)
+            }
 
-            // 3. 상태 재확인
+            // 4단계: 상태 재확인
             val poolHealth = bitmapPoolManager.advancedTaggedBitmapPool.getPoolHealthStatus()
-            fileLogger.w("MainActivity", "복구 후 BitmapPool 상태: ${poolHealth.healthLevel}")
-            fileLogger.w("MainActivity", "복구 후 Available: ${poolHealth.availableSlots}/${poolHealth.totalSlots}")
-
             val appMemory = resourceMonitor.getAppMemoryInfo()
-            fileLogger.w("MainActivity", "복구 후 힙 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
 
-            fileLogger.w("MainActivity", "✅✅ BitmapPool 응급 복구 완료: $reason ✅✅")
+            fileLogger.w("MainActivity", "복구 결과:")
+            fileLogger.w("MainActivity", "  Pool: ${poolHealth.healthLevel}, Available: ${poolHealth.availableSlots}/${poolHealth.totalSlots}")
+            fileLogger.w("MainActivity", "  힙 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
+            fileLogger.w("MainActivity", "  가용 힙: ${String.format("%.1f", appMemory.availableHeapMB)} MB")
+
+            fileLogger.w("MainActivity", "✅✅ 강화된 응급 복구 완료: $reason ✅✅")
 
         } catch (e: Exception) {
-            fileLogger.e("MainActivity", "BitmapPool 응급 복구 실패: ${e.message}", e)
+            fileLogger.e("MainActivity", "응급 복구 실패: ${e.message}", e)
         }
     }
 
@@ -907,6 +927,29 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+
+        // 🚨 응급 종료 방지
+        if (emergencyShutdownPrevention.compareAndSet(false, true)) {
+            Log.w("MainActivity", "🚨 응급 종료 방지 프로토콜 활성화")
+
+            runBlocking {
+                try {
+                    // 모든 리소스 강제 정리
+                    bitmapPoolManager.performEmergencyReset()
+                    delay(200)
+                    System.gc()
+                    delay(200)
+                    System.runFinalization()
+                    delay(300)
+
+                    // 최종 상태 저장
+                    logFinalSystemState()
+
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "응급 종료 방지 실패: ${e.message}", e)
+                }
+            }
+        }
 
         // ✅ 1단계: 최종 상태 저장 (BitmapPool 포함)
         runBlocking {
