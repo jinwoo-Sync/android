@@ -1,83 +1,208 @@
+// utils/TrueZeroCopyBitmapPool.kt
 package com.example.myapplication.utils
 
 import android.graphics.*
 import android.util.Log
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * 🎯 확장된 Zero-Copy 비트맵 풀 - 단순히 크기만 늘린 안전한 버전
+ * 🎯 완전히 재설계된 Zero-Copy 비트맵 풀
+ * - 인덱스 기반 참조 카운팅으로 메모리 누수 완전 차단
+ * - 철저한 상태 관리와 자동 복구 시스템
+ * - Native 메모리 과다 사용 방지
  */
 class TrueZeroCopyBitmapPool(
-    private val poolSize: Int = 20, // 기본 20개로 증가
+    private val poolSize: Int = 20,
     private val width: Int = 840,
     private val height: Int = 840
 ) {
     private val TAG = "TrueZeroCopyBitmapPool"
 
-    // 🚀 Simple Pool without complex state management
-    private val availableBitmaps = ConcurrentLinkedQueue<Bitmap>()
-    private val activeBitmaps = ConcurrentHashMap<Bitmap, AtomicInteger>()
+    // 🎯 인덱스 기반 참조 카운팅 시스템
+    private val bitmapPool = Array<Bitmap?>(poolSize) { null }
+    private val usageState = Array(poolSize) { false }
+    private val referenceCount = Array(poolSize) { AtomicInteger(0) }
+    private val lastAccessTime = Array(poolSize) { AtomicLong(0) }
+    private var currentIndex = 0
+    private val poolLock = Object()
+    private var isInitialized = false
 
-    // Canvas/Paint 재사용 (GC 방지)
+    // Canvas/Paint 재사용 풀
     private val canvasPool = ConcurrentLinkedQueue<Canvas>()
     private val paintPool = ConcurrentLinkedQueue<Paint>()
     private val matrixPool = ConcurrentLinkedQueue<Matrix>()
 
-    // 통계
+    // 통계 및 복구 관련
     private val totalCreated = AtomicInteger(0)
     private val totalReused = AtomicInteger(0)
+    private val totalRecycled = AtomicInteger(0)
+    private var consecutiveFailures = 0
+    private var lastSuccessTime = System.currentTimeMillis()
+    private var recoveryCount = 0
+    private val maxRecoveryAttempts = 3
+    private val isRecovering = AtomicBoolean(false)
+
+    // 🚨 긴급 복구 관련
+    private val STALE_TIMEOUT_MS = 30_000L  // 30초 동안 미사용시 stale
+    private val CRITICAL_AVAILABLE_THRESHOLD = 3
+    private val EMERGENCY_AVAILABLE_THRESHOLD = 1
 
     init {
-        // 🛠️ 풀 사전 초기화 - for문으로 변경 (break 에러 해결)
-        for (i in 0 until poolSize) {
-            try {
-                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                availableBitmaps.offer(bitmap)
-                totalCreated.incrementAndGet()
-            } catch (e: OutOfMemoryError) {
-                Log.w(TAG, "⚠️ 초기화 중 OOM: ${i + 1}/${poolSize}")
-                System.gc()
-                break // ✅ for문에서는 break 사용 가능
-            }
-        }
-
-        // Canvas/Paint 풀 초기화 - 풀 크기에 맞춰 증가
-        val helperPoolSize = (poolSize * 0.3).toInt().coerceAtLeast(4)
-        for (i in 0 until helperPoolSize) {
-            canvasPool.offer(Canvas())
-            paintPool.offer(Paint().apply {
-                isFilterBitmap = true
-                isAntiAlias = false
-            })
-            matrixPool.offer(Matrix())
-        }
-
-        Log.d(TAG, "🎯 확장된 Zero-Copy 풀 초기화 완료: ${availableBitmaps.size}/${poolSize} bitmaps")
+        initialize()
     }
 
     /**
-     * 🚀 단순하고 빠른 비트맵 획득
+     * 🛠️ 안전한 풀 초기화
+     */
+    private fun initialize(): Boolean {
+        return synchronized(poolLock) {
+            if (isInitialized) return true
+
+            Log.d(TAG, "🎯 Zero-Copy 비트맵 풀 초기화 시작 (크기: $poolSize)")
+
+            var successCount = 0
+            for (index in 0 until poolSize) {
+                try {
+                    // 점진적 초기화로 OOM 방지
+                    Thread.sleep(20)
+                    bitmapPool[index] = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                    usageState[index] = false
+                    referenceCount[index].set(0)
+                    lastAccessTime[index].set(System.currentTimeMillis())
+                    successCount++
+                    totalCreated.incrementAndGet()
+                } catch (e: OutOfMemoryError) {
+                    Log.w(TAG, "⚠️ 초기화 중 OOM: ${index + 1}/${poolSize}")
+                    bitmapPool[index] = null
+                    System.gc()
+                    Thread.sleep(100)
+                    break
+                }
+            }
+
+            // Canvas/Paint 풀 초기화
+            val helperPoolSize = (successCount * 0.3).toInt().coerceAtLeast(3)
+            repeat(helperPoolSize) {
+                canvasPool.offer(Canvas())
+                paintPool.offer(Paint().apply {
+                    isFilterBitmap = true
+                    isAntiAlias = false
+                })
+                matrixPool.offer(Matrix())
+            }
+
+            isInitialized = successCount >= (poolSize / 2)
+
+            Log.d(TAG, "✅ Zero-Copy 풀 초기화 완료: 성공=${successCount}/${poolSize}, 초기화=${isInitialized}")
+            return isInitialized
+        }
+    }
+
+    /**
+     * 🎯 SharedBitmap 래퍼 반환 - 인덱스 기반 참조 카운팅
      */
     fun acquireSharedBitmap(): SharedBitmap? {
-        val bitmap = availableBitmaps.poll() ?: createNewBitmap()
-        if (bitmap != null && !bitmap.isRecycled) {
-            activeBitmaps[bitmap] = AtomicInteger(1)
-            totalReused.incrementAndGet()
-            Log.d(TAG, "📥 Bitmap acquired: @${bitmap.hashCode().toString(16)}, available=${availableBitmaps.size}")
-            return SharedBitmap(bitmap, this)
+        synchronized(poolLock) {
+            if (!isInitialized && !autoRecover()) return null
+
+            // 🚨 응급 상황 감지 및 즉시 복구
+            val availableCount = usageState.count { !it }
+
+            if (availableCount <= EMERGENCY_AVAILABLE_THRESHOLD) {
+                Log.w(TAG, "🚨 응급상황: 사용가능=$availableCount/$poolSize - 즉시 복구 실행")
+                performEmergencyRecovery()
+            } else if (availableCount <= CRITICAL_AVAILABLE_THRESHOLD) {
+                Log.w(TAG, "⚠️ 임계상황: 사용가능=$availableCount/$poolSize - 예방적 정리")
+                performPreventiveCleanup()
+            }
+
+            val bitmap = findAvailableBitmap() ?: handleAcquisitionFailure()
+            if (bitmap != null) {
+                val index = bitmapPool.indexOf(bitmap)
+                if (index != -1) {
+                    referenceCount[index].set(1)
+                    lastAccessTime[index].set(System.currentTimeMillis())
+                    totalReused.incrementAndGet()
+                    Log.d(TAG, "📥 Bitmap acquired: index=$index, @${bitmap.hashCode().toString(16)}")
+                    return SharedBitmap(bitmap, this, index)
+                }
+            }
+            return null
+        }
+    }
+
+    /**
+     * 🎯 사용 가능한 비트맵 찾기 - Round Robin 방식
+     */
+    private fun findAvailableBitmap(): Bitmap? {
+        val currentTime = System.currentTimeMillis()
+
+        repeat(poolSize) { offset ->
+            val index = (currentIndex + offset) % poolSize
+            val bitmap = bitmapPool[index]
+
+            if (bitmap != null &&
+                !usageState[index] &&
+                !bitmap.isRecycled &&
+                isValidBitmap(bitmap) &&
+                referenceCount[index].get() == 0) {
+
+                usageState[index] = true
+                currentIndex = (index + 1) % poolSize
+                lastSuccessTime = currentTime
+                consecutiveFailures = 0
+                return bitmap
+            }
         }
         return null
     }
 
+    /**
+     * 🎯 획득 실패 처리 - 단계별 복구
+     */
+    private fun handleAcquisitionFailure(): Bitmap? {
+        consecutiveFailures++
+        Log.w(TAG, "⚠️ 비트맵 획득 실패: $consecutiveFailures 회")
+
+        when {
+            consecutiveFailures >= 5 && recoveryCount < maxRecoveryAttempts -> {
+                Log.w(TAG, "🔧 연속 실패 감지 - 자동 복구 시도: $recoveryCount")
+                return if (autoRecover()) findAvailableBitmap() else createNewBitmap()
+            }
+            consecutiveFailures >= 10 -> {
+                Log.e(TAG, "🚨 심각한 상황 - 새 비트맵 생성 시도")
+                return createNewBitmap()
+            }
+            else -> {
+                return null
+            }
+        }
+    }
+
+    /**
+     * 🆕 새 비트맵 생성 (풀 확장)
+     */
     private fun createNewBitmap(): Bitmap? {
         return try {
             val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             totalCreated.incrementAndGet()
             Log.d(TAG, "🆕 새 비트맵 생성: @${bitmap.hashCode().toString(16)}, total=${totalCreated.get()}")
+
+            // 새 비트맵을 풀에 추가 시도
+            synchronized(poolLock) {
+                val emptyIndex = bitmapPool.indexOfFirst { it == null }
+                if (emptyIndex != -1) {
+                    bitmapPool[emptyIndex] = bitmap
+                    usageState[emptyIndex] = true
+                    referenceCount[emptyIndex].set(1)
+                    lastAccessTime[emptyIndex].set(System.currentTimeMillis())
+                    Log.d(TAG, "🔄 새 비트맵을 풀 슬롯에 추가: index=$emptyIndex")
+                    return bitmap
+                }
+            }
             bitmap
         } catch (e: OutOfMemoryError) {
             Log.e(TAG, "❌ OOM: 비트맵 생성 실패", e)
@@ -87,151 +212,312 @@ class TrueZeroCopyBitmapPool(
     }
 
     /**
-     * 🎯 내부 참조 증가 (Thread-Safe)
+     * 🎯 내부 참조 증가 (SharedBitmap에서 호출)
      */
-    internal fun addReference(bitmap: Bitmap): Boolean {
-        val refCount = activeBitmaps[bitmap]
-        return if (refCount != null) {
-            val newCount = refCount.incrementAndGet()
-            Log.d(TAG, "📈 Reference increased: @${bitmap.hashCode().toString(16)} -> $newCount")
-            true
-        } else {
+    internal fun addReference(bitmap: Bitmap): Pair<Boolean, Int> {
+        synchronized(poolLock) {
+            val index = bitmapPool.indexOf(bitmap)
+            if (index != -1 && usageState[index]) {
+                val newCount = referenceCount[index].incrementAndGet()
+                lastAccessTime[index].set(System.currentTimeMillis())
+                Log.d(TAG, "📈 Reference increased: index=$index, count=$newCount")
+                return Pair(true, index)
+            }
             Log.w(TAG, "⚠️ Cannot add reference to inactive bitmap: @${bitmap.hashCode().toString(16)}")
+            return Pair(false, -1)
+        }
+    }
+
+    /**
+     * 🎯 내부 참조 해제 (SharedBitmap에서 호출)
+     */
+    internal fun releaseReference(bitmap: Bitmap, bitmapIndex: Int) {
+        synchronized(poolLock) {
+            if (bitmapIndex in 0 until poolSize && bitmapPool[bitmapIndex] == bitmap) {
+                val newCount = referenceCount[bitmapIndex].decrementAndGet()
+                Log.d(TAG, "📉 Reference decreased: index=$bitmapIndex, count=$newCount")
+
+                if (newCount <= 0) {
+                    // 참조가 0이 되면 풀로 반환
+                    usageState[bitmapIndex] = false
+                    referenceCount[bitmapIndex].set(0)
+                    lastAccessTime[bitmapIndex].set(System.currentTimeMillis())
+                    consecutiveFailures = 0
+                    lastSuccessTime = System.currentTimeMillis()
+                    Log.d(TAG, "✅ 비트맵 풀 반환: index=$bitmapIndex")
+                }
+            } else {
+                Log.w(TAG, "⚠️ 참조 해제 실패: index=$bitmapIndex, bitmap mismatch")
+                // 알 수 없는 비트맵 안전 처리
+                safeRecycleBitmap(bitmap)
+            }
+        }
+    }
+
+    /**
+     * 🛡️ 안전한 비트맵 재활용
+     */
+    private fun safeRecycleBitmap(bitmap: Bitmap) {
+        try {
+            if (!bitmap.isRecycled) {
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    try {
+                        if (!bitmap.isRecycled) {
+                            bitmap.recycle()
+                            totalRecycled.incrementAndGet()
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "⚠️ 지연 재활용 실패: ${e.message}")
+                    }
+                }, 100)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ 안전 재활용 실패: ${e.message}")
+        }
+    }
+
+    /**
+     * 🚨 응급 복구: 강제로 모든 참조 정리
+     */
+    private fun performEmergencyRecovery() {
+        if (!isRecovering.compareAndSet(false, true)) {
+            Log.d(TAG, "⚠️ 이미 복구 진행 중")
+            return
+        }
+
+        try {
+            Log.w(TAG, "🚨 응급 복구 시작 - 모든 참조 강제 해제")
+
+            var forcedReleaseCount = 0
+            var recreatedCount = 0
+
+            // 1. 모든 참조 카운트 강제 리셋
+            for (index in 0 until poolSize) {
+                val currentRef = referenceCount[index].get()
+                if (currentRef > 0) {
+                    Log.w(TAG, "🔧 강제 해제: index=$index, refs=$currentRef")
+                    referenceCount[index].set(0)
+                    usageState[index] = false
+                    forcedReleaseCount++
+                }
+            }
+
+            // 2. 손상된 비트맵 교체
+            for (index in 0 until poolSize) {
+                val bitmap = bitmapPool[index]
+                if (bitmap?.isRecycled == true || !isValidBitmap(bitmap)) {
+                    try {
+                        bitmap?.recycle()
+                        bitmapPool[index] = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        usageState[index] = false
+                        referenceCount[index].set(0)
+                        lastAccessTime[index].set(System.currentTimeMillis())
+                        recreatedCount++
+                        totalCreated.incrementAndGet()
+                    } catch (e: OutOfMemoryError) {
+                        Log.e(TAG, "응급 복구 중 OOM: index=$index")
+                        bitmapPool[index] = null
+                    }
+                }
+            }
+
+            val finalAvailable = usageState.count { !it }
+            Log.w(TAG, "🚨 응급 복구 완료: 강제해제=$forcedReleaseCount, 재생성=$recreatedCount, 최종사용가능=$finalAvailable/$poolSize")
+
+            // 3. 시스템 레벨 정리
+            System.gc()
+            Runtime.getRuntime().runFinalization()
+
+        } finally {
+            isRecovering.set(false)
+        }
+    }
+
+    /**
+     * ⚠️ 예방적 정리: Stale 참조 해제
+     */
+    private fun performPreventiveCleanup() {
+        val currentTime = System.currentTimeMillis()
+        var cleanedCount = 0
+
+        for (index in 0 until poolSize) {
+            // Stale 참조 감지 (30초 이상 미사용 + 사용중으로 표시)
+            if (usageState[index] &&
+                referenceCount[index].get() == 0 &&
+                (currentTime - lastAccessTime[index].get()) > STALE_TIMEOUT_MS) {
+
+                usageState[index] = false
+                cleanedCount++
+                Log.d(TAG, "🧹 Stale 참조 정리: index=$index")
+            }
+        }
+
+        if (cleanedCount > 0) {
+            Log.d(TAG, "🧹 예방적 정리 완료: $cleanedCount 슬롯 정리")
+        }
+    }
+
+    /**
+     * 🔧 자동 복구
+     */
+    private fun autoRecover(): Boolean {
+        return executeWithErrorHandling("자동 복구") { performAdvancedRecovery() }
+    }
+
+    /**
+     * 🔧 고급 자동 복구
+     */
+    private fun performAdvancedRecovery(): Boolean {
+        recoveryCount++
+        Log.w(TAG, "🔧 고급 자동 복구 시작 ($recoveryCount/$maxRecoveryAttempts)")
+
+        try {
+            // 1. Stale 비트맵 정리
+            var recycledCount = 0
+            for (index in 0 until poolSize) {
+                val bitmap = bitmapPool[index]
+                if (bitmap?.isRecycled == true || !isValidBitmap(bitmap)) {
+                    bitmapPool[index] = null
+                    usageState[index] = false
+                    referenceCount[index].set(0)
+                    recycledCount++
+                }
+            }
+
+            // 2. 누락된 비트맵 재생성
+            var recreatedCount = 0
+            for (index in 0 until poolSize) {
+                if (bitmapPool[index] == null) {
+                    try {
+                        bitmapPool[index] = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        usageState[index] = false
+                        referenceCount[index].set(0)
+                        lastAccessTime[index].set(System.currentTimeMillis())
+                        recreatedCount++
+                        totalCreated.incrementAndGet()
+                    } catch (e: OutOfMemoryError) {
+                        Log.e(TAG, "❌ 복구 중 OOM: index=$index", e)
+                        System.gc()
+                        Thread.sleep(100)
+                        break
+                    }
+                }
+            }
+
+            consecutiveFailures = 0
+            currentIndex = 0
+
+            val availableCount = usageState.count { !it }
+            Log.w(TAG, "✅ 고급 복구 완료: recycled=$recycledCount, recreated=$recreatedCount, available=$availableCount")
+
+            return availableCount > 0
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 고급 복구 실패", e)
+            return false
+        }
+    }
+
+    /**
+     * 🛡️ 비트맵 유효성 검증
+     */
+    private fun isValidBitmap(bitmap: Bitmap?): Boolean {
+        return try {
+            bitmap != null &&
+                    !bitmap.isRecycled &&
+                    bitmap.width > 0 &&
+                    bitmap.height > 0 &&
+                    bitmap.config != null
+        } catch (e: Exception) {
             false
         }
     }
 
     /**
-     * 🎯 개선된 참조 해제 - 더 안전한 정리
-     */
-    internal fun releaseReference(bitmap: Bitmap) {
-        val refCount = activeBitmaps[bitmap]
-        if (refCount != null) {
-            val newCount = refCount.decrementAndGet()
-            Log.d(TAG, "📉 Reference decreased: @${bitmap.hashCode().toString(16)} -> $newCount")
-
-            if (newCount <= 0) {
-                // ✅ 안전한 제거
-                synchronized(activeBitmaps) {
-                    activeBitmaps.remove(bitmap)
-                }
-                // ✅ 무조건 반환 시도 (조건 실패 시에도 안전 처리)
-                returnToPool(bitmap)
-            }
-        } else {
-            Log.w(TAG, "⚠️ Unknown bitmap release attempt: @${bitmap.hashCode().toString(16)}")
-            // ✅ 알 수 없는 비트맵도 안전하게 처리
-            if (!bitmap.isRecycled) {
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    if (!bitmap.isRecycled) {
-                        bitmap.recycle()
-                    }
-                }, 100)
-            }
-        }
-    }
-
-    /**
-     * 🎯 비트맵 풀 반환 - 클리어하지 않고 다음 프레임에서 덮어씌우기
-     */
-    private fun returnToPool(bitmap: Bitmap) {
-        try {
-            // ✅ 1차 검증: 기본적인 비트맵 상태
-            if (bitmap.isRecycled) {
-                Log.w(TAG, "⚠️ 이미 재활용된 비트맵 반환 시도")
-                return
-            }
-
-            // ✅ 2차 검증: 크기 및 설정
-            if (bitmap.width <= 0 || bitmap.height <= 0 || bitmap.config == null) {
-                Log.w(TAG, "⚠️ 무효한 비트맵 감지 - 안전하게 재활용: ${bitmap.width}x${bitmap.height}")
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    if (!bitmap.isRecycled) {
-                        bitmap.recycle()
-                    }
-                }, 50)
-                return
-            }
-
-            // ✅ 3차 검증: 풀 용량 및 상태
-            if (availableBitmaps.size >= poolSize) {
-                Log.d(TAG, "📦 풀이 가득참 - 비트맵 재활용: ${availableBitmaps.size}/${poolSize}")
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    if (!bitmap.isRecycled) {
-                        bitmap.recycle()
-                    }
-                }, 100)
-                return
-            }
-
-            // ✅ 안전한 풀 반환
-            availableBitmaps.offer(bitmap)
-            Log.d(TAG, "✅ 비트맵 풀 반환 성공: available=${availableBitmaps.size}/${poolSize}")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ 비트맵 반환 중 예외: ${e.message}", e)
-            // 예외 발생 시에도 안전하게 재활용
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                try {
-                    if (!bitmap.isRecycled) {
-                        bitmap.recycle()
-                    }
-                } catch (recycleException: Exception) {
-                    Log.e(TAG, "❌ 비트맵 재활용 실패: ${recycleException.message}")
-                }
-            }, 200)
-        }
-    }
-
-    /**
-     * 🎯 강제 비트맵 상태 정리 (메모리 누수 방지)
+     * 🧹 강제 비트맵 상태 정리 (메모리 누수 방지)
      */
     fun forceCleanupStaleReferences() {
-        val staleBitmaps = mutableListOf<Bitmap>()
+        synchronized(poolLock) {
+            val currentTime = System.currentTimeMillis()
+            val staleBitmaps = mutableListOf<Int>()
 
-        activeBitmaps.forEach { (bitmap, refCount) ->
-            if (bitmap.isRecycled || refCount.get() <= 0) {
-                staleBitmaps.add(bitmap)
-                Log.w(TAG, "🧹 발견된 stale bitmap: @${bitmap.hashCode().toString(16)}, recycled=${bitmap.isRecycled}, refCount=${refCount.get()}")
+            bitmapPool.forEachIndexed { index, bitmap ->
+                val timeSinceAccess = currentTime - lastAccessTime[index].get()
+                val refCount = referenceCount[index].get()
+
+                // Stale 조건: 재활용됨 OR 음수 참조 OR 30초 이상 미사용
+                if (bitmap?.isRecycled == true ||
+                    refCount < 0 ||
+                    (usageState[index] && refCount == 0 && timeSinceAccess > STALE_TIMEOUT_MS)) {
+
+                    staleBitmaps.add(index)
+                    Log.w(TAG, "🧹 발견된 stale bitmap: index=$index, recycled=${bitmap?.isRecycled}, refCount=$refCount, unused=${timeSinceAccess}ms")
+                }
             }
-        }
 
-        staleBitmaps.forEach { bitmap ->
-            activeBitmaps.remove(bitmap)
-            if (!bitmap.isRecycled) {
-                returnToPool(bitmap)
+            staleBitmaps.forEach { index ->
+                val bitmap = bitmapPool[index]
+                if (bitmap != null) {
+                    safeRecycleBitmap(bitmap)
+                }
+                bitmapPool[index] = null
+                usageState[index] = false
+                referenceCount[index].set(0)
             }
-        }
 
-        Log.d(TAG, "🧹 Stale cleanup: removed=${staleBitmaps.size}, current available=${availableBitmaps.size}")
-    }
-
-    /**
-     * 🎯 상세 풀 상태 진단
-     */
-    fun getDetailedStatus(): String {
-        val activeDetails = activeBitmaps.entries.joinToString(", ") { (bitmap, refCount) ->
-            "Bitmap@${bitmap.hashCode().toString(16)}:ref=${refCount.get()}"
-        }
-
-        return buildString {
-            appendLine("=== 확장된 비트맵 풀 상태 ===")
-            appendLine("Pool Size: $poolSize")
-            appendLine("Available: ${availableBitmaps.size}/${poolSize}")
-            appendLine("Active: ${activeBitmaps.size}")
-            appendLine("Created: ${totalCreated.get()}")
-            appendLine("Reused: ${totalReused.get()}")
-            appendLine("Active Details: [$activeDetails]")
-
-            // 추가 진단 정보
-            val availableHashes = availableBitmaps.map { "@${it.hashCode().toString(16)}" }
-            appendLine("Available Bitmaps: [${availableHashes.joinToString(", ")}]")
+            Log.d(TAG, "🧹 Stale cleanup: removed=${staleBitmaps.size}")
         }
     }
 
     /**
-     * 🎯 재사용 가능한 Canvas 획득
+     * 🚨 응급 리셋
      */
+    fun performEmergencyReset(): Boolean {
+        return synchronized(poolLock) {
+            try {
+                Log.w(TAG, "🚨 UI Pool 응급 리셋 시작")
+
+                // 1. 모든 참조 카운트 강제 0
+                for (index in 0 until poolSize) {
+                    referenceCount[index].set(0)
+                    usageState[index] = false
+                }
+
+                // 2. 모든 비트맵 재생성
+                var resetCount = 0
+                bitmapPool.forEachIndexed { index, bitmap ->
+                    try {
+                        bitmap?.takeIf { !it.isRecycled }?.recycle()
+                        bitmapPool[index] = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        lastAccessTime[index].set(System.currentTimeMillis())
+                        resetCount++
+                    } catch (e: OutOfMemoryError) {
+                        bitmapPool[index] = null
+                        Log.e(TAG, "응급 리셋 중 OOM: index=$index")
+                    }
+                }
+
+                // 3. 통계 리셋
+                totalCreated.set(resetCount)
+                totalReused.set(0)
+                totalRecycled.set(0)
+                consecutiveFailures = 0
+                recoveryCount = 0
+                currentIndex = 0
+
+                val validCount = bitmapPool.count { it != null && !it.isRecycled }
+                Log.w(TAG, "🚨 UI Pool 응급 리셋 완료: $validCount/$poolSize")
+
+                validCount > (poolSize / 2)
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ UI Pool 응급 리셋 실패: ${e.message}", e)
+                false
+            }
+        }
+    }
+
+    // 재사용 객체 관리
     fun getReusableCanvas(): Canvas = canvasPool.poll() ?: Canvas()
     fun returnReusableCanvas(canvas: Canvas) {
         val maxCanvasPoolSize = (poolSize * 0.3).toInt().coerceAtLeast(4)
@@ -259,66 +545,169 @@ class TrueZeroCopyBitmapPool(
         }
     }
 
+    /**
+     * 🎯 상세 풀 상태 진단
+     */
+    fun getDetailedStatus(): String {
+        synchronized(poolLock) {
+            val currentTime = System.currentTimeMillis()
+            val activeDetails = buildString {
+                bitmapPool.forEachIndexed { index, bitmap ->
+                    if (bitmap != null && usageState[index]) {
+                        val timeSinceAccess = currentTime - lastAccessTime[index].get()
+                        append("[$index:ref=${referenceCount[index].get()},age=${timeSinceAccess}ms] ")
+                    }
+                }
+            }
+
+            return buildString {
+                appendLine("=== Zero-Copy 비트맵 상태 ===")
+                appendLine("Pool Size: $poolSize")
+                appendLine("Available: ${usageState.count { !it }}/${poolSize}")
+                appendLine("Active: ${usageState.count { it }}")
+                appendLine("Total References: ${referenceCount.sumOf { it.get() }}")
+                appendLine("Created: ${totalCreated.get()}")
+                appendLine("Reused: ${totalReused.get()}")
+                appendLine("Recycled: ${totalRecycled.get()}")
+                appendLine("Recovery Count: $recoveryCount")
+                appendLine("Active Details: $activeDetails")
+
+                val validCount = bitmapPool.count { isValidBitmap(it) }
+                val recycledCount = bitmapPool.count { it?.isRecycled == true }
+                appendLine("Valid Bitmaps: $validCount")
+                appendLine("Recycled Bitmaps: $recycledCount")
+
+                // 건강성 평가
+                val healthStatus = when {
+                    validCount < poolSize / 2 -> "🔴 위험"
+                    usageState.count { !it } < 3 -> "🟡 주의"
+                    else -> "🟢 정상"
+                }
+                appendLine("건강성: $healthStatus")
+            }
+        }
+    }
+
     fun getStatus(): String {
-        return "ZeroCopyPool: Available=${availableBitmaps.size}/${poolSize}, " +
-                "Active=${activeBitmaps.size}, Created=${totalCreated.get()}, " +
-                "Reused=${totalReused.get()}"
+        synchronized(poolLock) {
+            val available = usageState.count { !it }
+            val active = usageState.count { it }
+            val totalRefs = referenceCount.sumOf { it.get() }
+
+            return "ZeroCopyPool: Available=$available/$poolSize, " +
+                    "Active=$active, References=$totalRefs, Created=${totalCreated.get()}, " +
+                    "Reused=${totalReused.get()}, Recycled=${totalRecycled.get()}"
+        }
     }
 
     fun cleanup() {
+        synchronized(poolLock) {
+            executeWithErrorHandling("정리") { performCleanup() }
+        }
+    }
+
+    private fun performCleanup(): Boolean {
         Log.d(TAG, "🗑️ Starting pool cleanup...")
 
-        // 모든 활성 비트맵 강제 해제
-        activeBitmaps.keys.forEach { bitmap ->
-            if (!bitmap.isRecycled) {
-                bitmap.recycle()
-                Log.d(TAG, "♻️ Force recycled active bitmap: @${bitmap.hashCode().toString(16)}")
-            }
-        }
-        activeBitmaps.clear()
-
-        // 사용 가능한 비트맵들 해제
-        var recycledCount = 0
-        while (availableBitmaps.isNotEmpty()) {
-            val bitmap = availableBitmaps.poll()
-            if (bitmap != null && !bitmap.isRecycled) {
-                bitmap.recycle()
-                recycledCount++
-            }
+        bitmapPool.forEachIndexed { index, bitmap ->
+            bitmap?.takeIf { !it.isRecycled }?.recycle()
+            bitmapPool[index] = null
+            usageState[index] = false
+            referenceCount[index].set(0)
         }
 
         canvasPool.clear()
         paintPool.clear()
         matrixPool.clear()
 
-        Log.d(TAG, "🗑️ Zero-Copy 풀 정리 완료: recycled=$recycledCount bitmaps")
+        isInitialized = false
+        consecutiveFailures = 0
+        recoveryCount = 0
+
+        Log.d(TAG, "🗑️ Zero-Copy 풀 정리 완료")
+        return true
+    }
+
+    private fun executeWithErrorHandling(operationName: String, operation: () -> Boolean): Boolean {
+        return try {
+            operation()
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ $operationName 실패: ${e.message}", e)
+            if (operationName == "정리") {
+                isInitialized = false
+                consecutiveFailures = 0
+                recoveryCount = 0
+            }
+            false
+        }
+    }
+
+    fun isReady(): Boolean = synchronized(poolLock) {
+        isInitialized && usageState.count { !it } > 0
+    }
+
+    /**
+     * 📊 위험도 평가
+     */
+    fun getPoolHealthStatus(): PoolHealthStatus {
+        synchronized(poolLock) {
+            val available = usageState.count { !it }
+            val totalRefs = referenceCount.sumOf { it.get() }
+            val activeWithZeroRefs = (0 until poolSize).count {
+                usageState[it] && referenceCount[it].get() == 0
+            }
+
+            val healthLevel = when {
+                available <= EMERGENCY_AVAILABLE_THRESHOLD -> HealthLevel.CRITICAL
+                available <= CRITICAL_AVAILABLE_THRESHOLD -> HealthLevel.WARNING
+                activeWithZeroRefs > 5 -> HealthLevel.DEGRADED
+                else -> HealthLevel.HEALTHY
+            }
+
+            return PoolHealthStatus(
+                healthLevel = healthLevel,
+                availableSlots = available,
+                totalSlots = poolSize,
+                totalReferences = totalRefs,
+                staleSlots = activeWithZeroRefs,
+                recommendation = getRecommendation(healthLevel)
+            )
+        }
+    }
+
+    private fun getRecommendation(level: HealthLevel): String = when (level) {
+        HealthLevel.CRITICAL -> "즉시 응급 복구 필요"
+        HealthLevel.WARNING -> "예방적 정리 권장"
+        HealthLevel.DEGRADED -> "stale 참조 정리 권장"
+        HealthLevel.HEALTHY -> "정상 상태"
     }
 }
 
 /**
- * 🎯 공유 비트맵 래퍼 - 단순한 참조 카운팅 + 개선된 로깅
+ * 🎯 참조 카운팅 기반 SharedBitmap - 완전한 안전성 보장
  */
 class SharedBitmap(
     val bitmap: Bitmap,
-    private val pool: TrueZeroCopyBitmapPool
+    private val pool: TrueZeroCopyBitmapPool,
+    private val bitmapIndex: Int
 ) {
     private val TAG = "SharedBitmap"
     private val bitmapHash = bitmap.hashCode().toString(16)
-    private val isReleased = AtomicBoolean(false)  // 🎯 추가
+    private val isReleased = AtomicBoolean(false)
 
     /**
-     * 🛡️ 안전한 참조 추가 - Double-Check Locking
+     * 🎯 안전한 참조 추가 - 인덱스 기반
      */
     fun addRef(): SharedBitmap? {
-        // 이미 해제된 경우 즉시 실패
         if (isReleased.get() || bitmap.isRecycled) {
             Log.w(TAG, "⚠️ 이미 해제된 비트맵 참조 시도: @$bitmapHash")
             return null
         }
 
-        return if (pool.addReference(bitmap)) {
-            Log.d(TAG, "📈 참조 추가 성공: @$bitmapHash")
-            SharedBitmap(bitmap, pool)
+        val (success, index) = pool.addReference(bitmap)
+        return if (success) {
+            Log.d(TAG, "📈 참조 추가 성공: @$bitmapHash, index=$index")
+            SharedBitmap(bitmap, this.pool, index)
         } else {
             Log.w(TAG, "⚠️ 참조 추가 실패: @$bitmapHash")
             null
@@ -326,12 +715,19 @@ class SharedBitmap(
     }
 
     /**
-     * 🛡️ 안전한 참조 해제 - 중복 해제 방지
+     * 🎯 안전한 참조 해제 - 중복 해제 방지 강화
      */
     fun release() {
         if (isReleased.compareAndSet(false, true)) {
-            pool.releaseReference(bitmap)
-            Log.d(TAG, "📉 참조 해제: @$bitmapHash")
+            pool.releaseReference(bitmap, bitmapIndex)
+            Log.d(TAG, "📉 참조 해제: @$bitmapHash, index=$bitmapIndex")
+
+            // 참조 해제 후 풀 건강성 자동 체크
+            val health = pool.getPoolHealthStatus()
+            if (health.healthLevel == HealthLevel.WARNING || health.healthLevel == HealthLevel.DEGRADED) {
+                Log.d(TAG, "🧹 참조 해제 후 예방적 정리 트리거")
+                pool.forceCleanupStaleReferences()
+            }
         } else {
             Log.w(TAG, "⚠️ 중복 해제 시도 방지: @$bitmapHash")
         }
@@ -348,7 +744,7 @@ class SharedBitmap(
     }
 
     /**
-     * 🎯 UI 안전 비트맵 획득 - Canvas 크래시 방지
+     * 🎯 UI 안전 비트맵 획득
      */
     fun getSafeBitmapForUI(): Bitmap? {
         return if (isValid()) {
@@ -359,6 +755,18 @@ class SharedBitmap(
         }
     }
 }
+
+// 건강성 평가 관련 클래스들
+enum class HealthLevel { HEALTHY, DEGRADED, WARNING, CRITICAL }
+
+data class PoolHealthStatus(
+    val healthLevel: HealthLevel,
+    val availableSlots: Int,
+    val totalSlots: Int,
+    val totalReferences: Int,
+    val staleSlots: Int,
+    val recommendation: String
+)
 
 /**
  * 🚀 고속 Zero-Copy 프레임 프로세서 - 크래시 방지 강화
