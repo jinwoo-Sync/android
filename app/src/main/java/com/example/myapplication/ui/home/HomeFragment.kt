@@ -163,38 +163,40 @@ class HomeFragment : Fragment() {
      */
     private fun displayManagedBitmapDirectly(sensorData: com.example.myapplication.model.SensorData) {
         try {
-            // ✅ ManagedBitmap 우선 확인
+            // ✅ 새로운 ManagedBitmap 유효성 확인
             val newManagedBitmap = sensorData.managedBitmap
             if (newManagedBitmap == null || !newManagedBitmap.isValid()) {
                 Log.w("HomeFragment", "⚠️ 무효한 ManagedBitmap: frameId=${sensorData.frameId}")
-                clearCurrentDisplay()
+                // ❌ 무효한 프레임이라고 이전 프레임을 지우지 않음!
                 return
             }
 
             Log.d("HomeFragment", "🎯 ManagedBitmap 직접 표시: frameId=${sensorData.frameId}, size=${newManagedBitmap.bitmap.width}x${newManagedBitmap.bitmap.height}")
 
-            // ✅ 이전 ManagedBitmap release (풀 반납)
-            currentManagedBitmap?.release()
-
-            // ✅ 새로운 ManagedBitmap 소유권 이전
-            currentManagedBitmap = newManagedBitmap
-
             // UI 스레드에서 안전하게 업데이트
             binding.imageView.post {
                 try {
-                    if (currentManagedBitmap?.isValid() == true) {
-                        // ✅ 원본 비트맵을 직접 ImageView에 설정 (zero-copy!)
-                        binding.imageView.setImageBitmap(currentManagedBitmap!!.bitmap)
+                    // ✅ 새로운 프레임이 UI에 완전히 적용된 후에만 이전 프레임 해제
+                    if (newManagedBitmap.isValid()) {
+                        // 🎯 1단계: 새로운 비트맵을 UI에 먼저 설정
+                        binding.imageView.setImageBitmap(newManagedBitmap.bitmap)
+
+                        // 🎯 2단계: UI 업데이트가 성공한 후에만 이전 프레임 해제
+                        val previousManagedBitmap = currentManagedBitmap
+                        currentManagedBitmap = newManagedBitmap
 
                         // ✅ 사용 시간 업데이트 (Stale 방지)
                         currentManagedBitmap!!.updateLastAccess()
 
+                        // 🎯 3단계: 이전 프레임을 안전하게 해제 (깜빡임 없음!)
+                        previousManagedBitmap?.release()
+
                         successfulFrameCount++
                         frameSkipCount = 0
 
-                        Log.d("HomeFragment", "✅ UI 업데이트 성공: frameId=${sensorData.frameId}")
+                        Log.d("HomeFragment", "✅ UI 업데이트 성공: frameId=${sensorData.frameId} (이전 프레임 안전 해제)")
                     } else {
-                        Log.e("HomeFragment", "❌ UI 스레드에서 ManagedBitmap 무효화: frameId=${sensorData.frameId}")
+                        Log.e("HomeFragment", "❌ UI 스레드에서 새로운 ManagedBitmap 무효화: frameId=${sensorData.frameId}")
                         handleUIUpdateFailure()
                     }
                 } catch (e: Exception) {
@@ -205,27 +207,27 @@ class HomeFragment : Fragment() {
 
         } catch (e: Exception) {
             Log.e("HomeFragment", "❌ ManagedBitmap 처리 실패: ${e.message}", e)
-            clearCurrentDisplay()
+            // ❌ 예외 상황에서도 이전 프레임을 지우지 않음 (깜빡임 방지)
         }
     }
 
     private fun clearCurrentDisplay() {
-        // ✅ ManagedBitmap을 풀에 반납
         currentManagedBitmap?.release()
         currentManagedBitmap = null
-
         binding.imageView.setImageBitmap(null)
-        Log.d("HomeFragment", "🧹 UI 디스플레이 클리어 및 풀 반납 완료")
+        Log.d("HomeFragment", "🧹 UI 디스플레이 명시적 클리어 및 풀 반납 완료")
     }
 
-    private fun handleUIUpdateFailure() {
-        binding.imageView.setImageBitmap(null)
-        frameSkipCount++
 
+    private fun handleUIUpdateFailure() {
+        frameSkipCount++
         if (frameSkipCount > 30) {
             Log.w("HomeFragment", "🚨 지속적인 UI 업데이트 실패 - 전역 풀 복구 요청")
             requestPoolRecovery()
         }
+
+        // 🎯 이전 프레임을 그대로 유지하여 깜빡임 방지
+        Log.w("HomeFragment", "⚠️ UI 업데이트 실패 - 이전 프레임 유지 (스킵 카운트: $frameSkipCount)")
     }
 
     // 권한 관련 메서드들
@@ -286,15 +288,21 @@ class HomeFragment : Fragment() {
         binding.buttonOpenCamera.text = if (isStreaming) "스트리밍 중지" else "스트리밍 시작"
         binding.buttonCaptureFrame.text = if (isStreaming) "현재 프레임 저장" else "프레임 캡처"
 
+        // ✅ 스트리밍 중지 시에도 마지막 프레임 유지 (검은 화면 방지)
         if (!isStreaming) {
-            clearStreamingState()
+            // clearStreamingState() 호출하지 않음 - 마지막 프레임 유지!
+            binding.overlayView.clear() // 바운딩박스만 클리어
+            binding.inferenceTime.text = "Inference: 0ms"
+            Log.d("HomeFragment", "🎯 스트리밍 중지 - 마지막 프레임 유지")
         }
     }
 
+
     private fun clearStreamingState() {
+        // ✅ 이 함수는 완전한 종료시에만 호출 (Fragment 종료 등)
         binding.overlayView.clear()
         binding.inferenceTime.text = "Inference: 0ms"
-        clearCurrentDisplay()
+        clearCurrentDisplay() // 여기서만 실제 클리어
     }
 
     private fun resetSensorDisplays() {
@@ -334,20 +342,28 @@ class HomeFragment : Fragment() {
                 if (sensorData?.managedBitmap?.isValid() == true) {
                     Log.d("HomeFragment", "✅ 유효한 ManagedBitmap 수신: frameId=${sensorData.frameId}")
 
-                    // ✅ ManagedBitmap을 직접 UI에 표시 (zero-copy)
+                    // ✅ 깜빡임 방지 - 다음 프레임 준비 후 이전 프레임 해제
                     displayManagedBitmapDirectly(sensorData)
 
                 } else if (sensorData?.bitmap != null && !sensorData.bitmap.isRecycled) {
-                    // 폴백: 기존 bitmap 방식 (하위 호환성)
+                    // 폴백: 기존 bitmap 방식 (하위 호환성) - 여기서도 깜빡임 방지
                     Log.w("HomeFragment", "⚠️ ManagedBitmap 없음, 기존 bitmap 사용: frameId=${sensorData.frameId}")
-                    binding.imageView.setImageBitmap(sensorData.bitmap)
+
+                    binding.imageView.post {
+                        binding.imageView.setImageBitmap(sensorData.bitmap)
+                        // 🎯 폴백에서도 이전 ManagedBitmap만 해제하고 UI는 유지
+                        val previousManagedBitmap = currentManagedBitmap
+                        currentManagedBitmap = null
+                        previousManagedBitmap?.release()
+                    }
                 } else {
-                    Log.w("HomeFragment", "⚠️ 무효한 프레임 수신 - UI 클리어")
-                    clearCurrentDisplay()
+                    // ❌ null이나 무효한 프레임이어도 이전 프레임을 지우지 않음!
+                    Log.w("HomeFragment", "⚠️ 무효한 프레임 수신 - 이전 프레임 유지 (깜빡임 방지)")
+                    // clearCurrentDisplay() 호출하지 않음!
                 }
             } catch (e: Exception) {
                 Log.e("HomeFragment", "❌ 프레임 Observer 처리 오류: ${e.message}", e)
-                clearCurrentDisplay()
+                // ❌ 예외 상황에서도 이전 프레임 유지
             }
         }
     }
@@ -497,9 +513,8 @@ class HomeFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
 
-        // ✅ UI 종료 시 마지막 ManagedBitmap 반납
-        currentManagedBitmap?.release()
-        currentManagedBitmap = null
+        // ✅ Fragment 종료 시에만 마지막 ManagedBitmap 반납
+        clearCurrentDisplay() // 완전 종료이므로 클리어 수행
 
         // 성능 통계
         val total = frameSkipCount + successfulFrameCount
@@ -507,14 +522,14 @@ class HomeFragment : Fragment() {
             val successRate = (successfulFrameCount.toFloat() / total * 100)
             val formatter = DecimalFormat("#.#")
             FragmentUtils.logEvent("HomeFragment", "INFO",
-                "UI가 관리한 ManagedBitmap 성공률: ${formatter.format(successRate)}% (성공: $successfulFrameCount, 스킵: $frameSkipCount)")
+                "깜빡임 방지 ManagedBitmap 성공률: ${formatter.format(successRate)}% (성공: $successfulFrameCount, 스킵: $frameSkipCount)")
         }
 
         viewModel.stopSensorStreaming()
         _binding = null
         resourceMonitor = null
 
-        Log.d("HomeFragment", "✅ HomeFragment 정리 완료 - ManagedBitmap 반납됨")
+        Log.d("HomeFragment", "✅ HomeFragment 정리 완료 - 깜빡임 방지 적용됨")
     }
 
     companion object {
