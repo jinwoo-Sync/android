@@ -547,7 +547,7 @@ class ManagedBitmap internal constructor(
     fun release() {
         val callCount = releaseCallCount.incrementAndGet()
         if (callCount > 1) {
-            Log.w(TAG, "⚠️ 중복 release 호출 감지: $tag (호출 ${callCount}회)")
+            Log.w(TAG, "⚠️ 중복 release 호출 무시: $tag (호출 ${callCount}회)")
             return
         }
 
@@ -555,19 +555,23 @@ class ManagedBitmap internal constructor(
             lock.lock()
             try {
                 if (isReleased) {
-                    Log.w(TAG, "⚠️ 이미 반납된 비트맵: $tag (idx: $poolIndex)")
+                    Log.w(TAG, "⚠️ 이미 반납된 비트맵 무시: $tag (idx: $poolIndex)")
                     return
                 }
 
                 isReleased = true
                 pool.release(this)
                 Log.d(TAG, "✅ ManagedBitmap 반납: $tag (idx: $poolIndex, age: ${getAgeMillis()}ms)")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ ManagedBitmap 반납 실패: $tag, ${e.message}", e)
+                // 실패해도 isReleased는 true로 유지 (중복 시도 방지)
             } finally {
                 lock.unlock()
             }
         }
     }
 
+    // ✅ 안전한 UI 복사본 생성
     fun createSafeCopyForUI(): Bitmap? {
         return accessLock.readLock().let { lock ->
             lock.lock()
@@ -579,7 +583,6 @@ class ManagedBitmap internal constructor(
 
                 updateLastAccess()
 
-                // 🎯 더 안전한 복사 - 설정 확인
                 val config = bitmap.config ?: Bitmap.Config.ARGB_8888
                 bitmap.copy(config, false)
             } catch (e: OutOfMemoryError) {

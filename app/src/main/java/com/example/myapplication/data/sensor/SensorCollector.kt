@@ -1152,6 +1152,7 @@ class SensorCollector(
                     Log.d(TAG, "✅ Frame delivered: frameId=$frameId")
                 } else {
                     Log.w(TAG, "⚠️ UI 전달 시 비트맵 무효: frameId=$frameId")
+                    managedBitmap.release() // UI 전달 실패 시 해제
                     callback(null)
                 }
             } catch (e: Exception) {

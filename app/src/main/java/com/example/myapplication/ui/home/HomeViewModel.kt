@@ -112,43 +112,44 @@ class HomeViewModel(
                 sensorData.bitmap.width > 0 &&
                 sensorData.bitmap.height > 0) {
 
-                // ✅ ManagedBitmap 추가 검증
+                // ✅ ManagedBitmap 검증 강화
                 if (sensorData.managedBitmap != null) {
                     if (!sensorData.managedBitmap!!.isValid()) {
-                        Log.w(TAG, "⚠️ 무효한 ManagedBitmap 필터링: frameId=${sensorData.frameId}")
+                        Log.w(TAG, "⚠️ 무효한 ManagedBitmap 필터링 - 해제: frameId=${sensorData.frameId}")
+                        sensorData.managedBitmap!!.release() // 즉시 해제
                         _cameraFrame.postValue(null)
                         return
                     }
                 }
 
-                // 🎯 UI 스레드에서 즉시 업데이트 (Main.immediate 사용)
+                // UI 스레드에서 즉시 업데이트
                 viewModelScope.launch(Dispatchers.Main.immediate) {
                     try {
-                        // 재검증
                         if (!sensorData.bitmap.isRecycled &&
                             sensorData.bitmap.width > 0 &&
                             sensorData.bitmap.height > 0) {
 
-                            _cameraFrame.value = sensorData  // postValue 대신 value 사용
+                            _cameraFrame.value = sensorData
                             Log.d(TAG, "✅ Camera Frame UI 업데이트: frameId=${sensorData.frameId}")
                         } else {
-                            Log.w(TAG, "⚠️ UI 스레드에서 비트맵 상태 변경 감지: frameId=${sensorData.frameId}")
+                            Log.w(TAG, "⚠️ UI 스레드에서 비트맵 상태 변경 감지 - 해제: frameId=${sensorData.frameId}")
+                            sensorData.managedBitmap?.release() // 예외 시 해제
                             _cameraFrame.value = null
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "❌ UI Camera frame update error: ${e.message}", e)
+                        Log.e(TAG, "❌ UI Camera frame update error - 해제: ${e.message}", e)
+                        sensorData.managedBitmap?.release() // 예외 시 해제
                         _cameraFrame.value = null
                     }
                 }
             } else {
-                // 🎯 null도 즉시 업데이트
                 viewModelScope.launch(Dispatchers.Main.immediate) {
                     _cameraFrame.value = null
-                    Log.d(TAG, "🧹 Camera UI frame cleared")
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Camera frame 업데이트 오류: ${e.message}", e)
+            Log.e(TAG, "❌ Camera frame 업데이트 오류 - 해제: ${e.message}", e)
+            sensorData?.managedBitmap?.release() // 예외 시 해제
             viewModelScope.launch(Dispatchers.Main.immediate) {
                 _cameraFrame.value = null
             }

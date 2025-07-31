@@ -224,6 +224,7 @@ class HomeFragment : Fragment() {
     private fun clearCurrentDisplay() {
         // ✅ UI 복사본은 recycle, ManagedBitmap은 release
         binding.imageView.setImageBitmap(null)
+        currentManagedBitmap?.release()
         currentManagedBitmap = null
         Log.d("HomeFragment", "🧹 UI 디스플레이 안전 클리어 완료")
     }
@@ -347,49 +348,36 @@ class HomeFragment : Fragment() {
     private fun setupCameraFrameObserver() {
         viewModel.cameraFrame.observe(viewLifecycleOwner) { sensorData ->
             try {
-                Log.d("HomeFragment", "📱 Camera Frame Observer 호출: sensorData=${sensorData != null}")
-
                 if (sensorData?.managedBitmap?.isValid() == true) {
-                    // ✅ 안전한 UI 복사본 사용
+                    // ✅ 이전 프레임 먼저 해제
+                    currentManagedBitmap?.release()
+                    currentManagedBitmap = null
+
+                    // ✅ 안전한 UI 복사본 생성
                     val safeBitmapCopy = sensorData.managedBitmap!!.createSafeCopyForUI()
 
                     if (safeBitmapCopy != null && !safeBitmapCopy.isRecycled) {
-                        Log.d("HomeFragment", "✅ 안전한 복사본 생성 성공: frameId=${sensorData.frameId}")
+                        // UI 업데이트
+                        binding.imageView.setImageBitmap(safeBitmapCopy)
 
-                        try {
-                            // 🔒 이전 프레임 정리
-                            val previousManagedBitmap = currentManagedBitmap
-                            currentManagedBitmap = null // 먼저 null로 설정
+                        successfulFrameCount++
+                        frameSkipCount = 0
 
-                            // UI 업데이트
-                            binding.imageView.setImageBitmap(safeBitmapCopy)
-
-                            // 이전 프레임 해제 (이건 실제로는 없음 - 복사본이므로)
-                            // previousManagedBitmap는 null이어야 함
-
-                            successfulFrameCount++
-                            frameSkipCount = 0
-
-                            Log.d("HomeFragment", "✅ 안전한 UI 업데이트 성공: frameId=${sensorData.frameId}")
-                        } catch (e: Exception) {
-                            Log.e("HomeFragment", "❌ UI 업데이트 실패: ${e.message}", e)
-                            safeBitmapCopy.recycle() // 실패 시 복사본 해제
-                            handleUIUpdateFailure()
-                        }
+                        Log.d("HomeFragment", "✅ 안전한 UI 업데이트: frameId=${sensorData.frameId}")
                     } else {
-                        Log.w("HomeFragment", "⚠️ 안전한 복사본 생성 실패")
                         handleUIUpdateFailure()
                     }
 
-                    // ✅ 원본 ManagedBitmap 즉시 해제
+                    // ✅ 원본 ManagedBitmap 즉시 해제 (핵심!)
                     sensorData.managedBitmap!!.release()
 
                 } else {
-                    Log.w("HomeFragment", "⚠️ 무효한 프레임 수신")
                     handleUIUpdateFailure()
                 }
             } catch (e: Exception) {
                 Log.e("HomeFragment", "❌ 프레임 Observer 처리 오류: ${e.message}", e)
+                // 예외 발생 시에도 반드시 해제
+                sensorData?.managedBitmap?.release()
             }
         }
     }
