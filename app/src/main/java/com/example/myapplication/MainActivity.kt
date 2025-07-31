@@ -25,12 +25,14 @@ import android.location.LocationManager
 import android.net.Uri
 import android.provider.Settings
 import android.os.PowerManager
+import com.example.myapplication.utils.BitmapPoolManager
 
 class MainActivity : AppCompatActivity() {
     private val PERMISSION_REQUEST_CODE = 100
     private lateinit var binding: ActivityMainBinding
     lateinit var sensorCollector: SensorCollector
     lateinit var homeRepository: HomeRepository
+    private lateinit var bitmapPoolManager: BitmapPoolManager
     private var isCameraPermissionGranted = false
     private var isLocationPermissionGranted = false
     private var isBackgroundLocationPermissionGranted = false
@@ -42,9 +44,13 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        sensorCollector = SensorCollector(this)
+        // ✅ 전역 BitmapPoolManager 초기화 (최우선)
+        bitmapPoolManager = BitmapPoolManager.getInstance(this)
+
+        // 다른 컴포넌트들에게 BitmapPoolManager 주입
+        sensorCollector = SensorCollector(this, bitmapPoolManager)
         val dataSynchronizer = DataSynchronizer()
-        homeRepository = HomeRepository(this, sensorCollector, dataSynchronizer)
+        homeRepository = HomeRepository(this, sensorCollector, dataSynchronizer, bitmapPoolManager)
 
         // SensorCollector에 DataSynchronizer 설정
         sensorCollector.setDataSynchronizer(dataSynchronizer)
@@ -58,7 +64,7 @@ class MainActivity : AppCompatActivity() {
 
         setupNavigation()
 
-        Log.d("MainActivity", "Initialization completed: SensorCollector and HomeRepository set up")
+        Log.d("MainActivity", "✅ BitmapPoolManager와 함께 초기화 완료")
     }
 
     private fun setupNavigation() {
@@ -213,6 +219,7 @@ class MainActivity : AppCompatActivity() {
         intent.data = uri
         startActivity(intent)
     }
+
     // ✅ 액티비티 종료 시 리소스 정리
     override fun onDestroy() {
         super.onDestroy()
@@ -227,6 +234,11 @@ class MainActivity : AppCompatActivity() {
         if (::sensorCollector.isInitialized) {
             sensorCollector.stopSensorStreaming()
             sensorCollector.closeCamera()
+        }
+
+        // ✅ 앱 종료시에만 BitmapPoolManager 정리
+        if (isFinishing) {
+            bitmapPoolManager.shutdown()
         }
 
         Log.d("MainActivity", "Activity destroyed and resources cleaned up")

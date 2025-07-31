@@ -52,7 +52,7 @@ class HomeViewModel(
     }
     val imuData: LiveData<String> = _imuData
 
-    // 🚀 UI 풀 복구 신호 강화
+    // 🚀 UI 풀 복구 신호
     private val _shouldRecoverUIPool = MutableLiveData<Boolean>()
     val shouldRecoverUIPool: LiveData<Boolean> = _shouldRecoverUIPool
 
@@ -65,7 +65,6 @@ class HomeViewModel(
     private var lastGnssUpdateTime = 0L
     private var lastImuUpdateTime = 0L
     private val IMU_UPDATE_INTERVAL_MS = 1000L
-    private val boundingBoxMap = mutableMapOf<Long, Pair<List<BoundingBox>, Long>>()
 
     private val inferenceTimes = ArrayDeque<Long>(30)
     private var currentSkipInterval = 2
@@ -79,7 +78,7 @@ class HomeViewModel(
     private val _syncStatus = MutableLiveData<String>()
     val syncStatus: LiveData<String> = _syncStatus
 
-    // 풀 상태 정보를 UI에 노출
+    // ✅ Advanced Tagged Pool 상태 정보를 UI에 노출
     private val _poolStatus = MutableLiveData<String>()
     val poolStatus: LiveData<String> = _poolStatus
 
@@ -91,8 +90,8 @@ class HomeViewModel(
     private var lastFpsCheckTime = 0L
     private var frameCount = 0
     private var consecutiveLowFpsCount = 0
-    private val FPS_THRESHOLD = 12.0  // 12fps 이하면 풀 정리
-    private val LOW_FPS_TRIGGER_COUNT = 3  // 3회 연속 낮으면 트리거
+    private val FPS_THRESHOLD = 8.0  // 8fps 이하면 풀 정리
+    private val LOW_FPS_TRIGGER_COUNT = 5  // 5회 연속 낮으면 트리거
     private val isRecoveryInProgress = AtomicBoolean(false)
 
     fun setServerTransmissionEnabled(enabled: Boolean) {
@@ -100,7 +99,7 @@ class HomeViewModel(
     }
 
     /**
-     * 단순화된 카메라 프레임 업데이트 (SensorData 전체 전달)
+     * ✅ Advanced Tagged Pool에서 온 프레임을 UI로 전달
      */
     private fun updateCameraFrame(sensorData: SensorData?) {
         try {
@@ -114,7 +113,7 @@ class HomeViewModel(
                     try {
                         if (!sensorData.bitmap.isRecycled) {
                             _cameraFrame.value = sensorData
-                            Log.d(TAG, "✅ Safe UI frame update: frameId=${sensorData.frameId}")
+                            Log.d(TAG, "✅ Advanced Tagged frame update: frameId=${sensorData.frameId}")
                         } else {
                             Log.w(TAG, "⚠️ Recycled bitmap filtered out: frameId=${sensorData.frameId}")
                             _cameraFrame.value = null
@@ -135,20 +134,20 @@ class HomeViewModel(
     }
 
     /**
-     * 비트맵 풀 강제 정리 (UI 제어)
+     * 🧹 Advanced Tagged Pool 강제 정리 (UI 제어) - BitmapPoolManager 위임
      */
     fun forceCleanupBitmapPool() {
         try {
-            Log.d(TAG, "🧹 전체 비트맵 풀 강제 정리 시작")
+            Log.d(TAG, "🧹 전체 비트맵 풀 강제 정리 시작 (BitmapPoolManager 위임)")
 
-            // 1. HomeRepository를 통한 SensorCollector 풀 정리
+            // ✅ HomeRepository를 통한 BitmapPoolManager 풀 정리
             homeRepository.requestPoolCleanup()
 
             // 3. 풀 상태 업데이트
             updatePoolStatus()
 
-            _text.postValue("전체 비트맵 풀 강제 정리 완료")
-            Log.d(TAG, "✅ 전체 비트맵 풀 강제 정리 완료")
+            _text.postValue("전체 비트맵 풀 강제 정리 완료 (BitmapPoolManager)")
+            Log.d(TAG, "✅ 전체 비트맵 풀 강제 정리 완료 (BitmapPoolManager)")
 
         } catch (e: Exception) {
             _text.postValue("풀 정리 실패: ${e.message}")
@@ -157,14 +156,14 @@ class HomeViewModel(
     }
 
     /**
-     * 풀 상태 업데이트
+     * 📊 Advanced Tagged Pool 상태 업데이트 - BitmapPoolManager 위임
      */
     fun updatePoolStatus() {
         try {
-            // HomeRepository를 통해 풀 상태 조회
+            // ✅ HomeRepository를 통해 BitmapPoolManager 풀 상태 조회
             val status = homeRepository.getPoolDetailedStatus()
             _poolStatus.postValue(status)
-            Log.d(TAG, "📊 풀 상태 업데이트 완료")
+            Log.d(TAG, "📊 Advanced Tagged Pool 상태 업데이트 완료 (BitmapPoolManager)")
         } catch (e: Exception) {
             _poolStatus.postValue("풀 상태 조회 실패: ${e.message}")
             Log.e(TAG, "❌ 풀 상태 업데이트 실패: ${e.message}", e)
@@ -221,16 +220,16 @@ class HomeViewModel(
                 Log.d(TAG, "🎯 ViewModel Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
 
                 if (boundingBoxes.isNotEmpty()) {
-                    Log.d(TAG, " ViewModel에서 처리할 객체들: ${boundingBoxes.map { "${it.clsName}(conf=${it.cnf})" }}")
+                    Log.d(TAG, "🎯 ViewModel에서 처리할 객체들: ${boundingBoxes.map { "${it.clsName}(conf=${it.cnf})" }}")
                 }
 
                 viewModelScope.launch(Dispatchers.Main.immediate) {
                     try {
                         _boundingBoxes.value = boundingBoxes
                         _inferenceTime.value = "${inferenceTime}ms"
-                        Log.d(TAG, "UI 업데이트 완료: ${boundingBoxes.size}개 바운딩박스, ${inferenceTime}ms")
+                        Log.d(TAG, "🎯 UI 업데이트 완료: ${boundingBoxes.size}개 바운딩박스, ${inferenceTime}ms")
                     } catch (e: Exception) {
-                        Log.e(TAG, "UI 업데이트 실패: ${e.message}", e)
+                        Log.e(TAG, "🎯 UI 업데이트 실패: ${e.message}", e)
                     }
                 }
 
@@ -259,14 +258,13 @@ class HomeViewModel(
         _imuData.postValue("IMU: 대기 중")
         _syncStatus.postValue("동기화 중지됨")
 
-        synchronized(boundingBoxMap) { boundingBoxMap.clear() }
         lastGnssUpdateTime = 0L
         lastImuUpdateTime = 0L
         Log.d("HomeViewModel", "✅ 센서 스트리밍 중지 완료")
     }
 
     /**
-     *  카메라 스트리밍 시작
+     * ✅ 카메라 스트리밍 시작 - Advanced Tagged Pool 사용
      */
     private fun startCameraStreaming() {
         if (_isStreaming.value == true) {
@@ -274,10 +272,10 @@ class HomeViewModel(
             return
         }
 
-        Log.d(TAG, " 카메라 스트리밍 시작")
-        _text.value = "카메라 스트리밍 중..."
+        Log.d(TAG, "🎯 Advanced Tagged Pool 카메라 스트리밍 시작")
+        _text.value = "Advanced Tagged Pool 카메라 스트리밍 중..."
 
-        // 🚀 강화된 Surface FPS 모니터링 시작
+        // 🚀 Surface FPS 모니터링 시작
         startAdvancedSurfaceFpsMonitoring()
 
         homeRepository.detectionCallback = { boundingBoxes, inferenceTime, frameId ->
@@ -305,20 +303,20 @@ class HomeViewModel(
         isCameraStreamingJob?.cancel()
 
         isCameraStreamingJob = viewModelScope.launch {
-            Log.d(TAG, "✅ Camera Flow 구독 시작...")
+            Log.d(TAG, "✅ Advanced Tagged Camera Flow 구독 시작...")
             try {
                 homeRepository.cameraStreamFlow.collect { sensorData ->
                     if (sensorData != null) {
                         updateCameraFrame(sensorData)
-                        Log.d(TAG, "✅ Valid frame pushed: frameId=${sensorData.frameId}, size=${sensorData.bitmap?.width}x${sensorData.bitmap?.height}")
+                        Log.d(TAG, "✅ Advanced Tagged frame pushed: frameId=${sensorData.frameId}, size=${sensorData.bitmap?.width}x${sensorData.bitmap?.height}")
                     } else {
-                        Log.w(TAG, "⚠️ Received null sensor data from camera flow")
+                        Log.w(TAG, "⚠️ Received null sensor data from Advanced Tagged camera flow")
                         updateCameraFrame(null)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Camera Flow 구독 오류: ${e.message}", e)
-                _text.postValue("카메라 스트리밍 오류: ${e.message}")
+                Log.e(TAG, "❌ Advanced Tagged Camera Flow 구독 오류: ${e.message}", e)
+                _text.postValue("Advanced Tagged 카메라 스트리밍 오류: ${e.message}")
                 updateCameraFrame(null)
             }
         }
@@ -333,7 +331,7 @@ class HomeViewModel(
             return
         }
 
-        Log.d("HomeViewModel", "📹 카메라 스트리밍 중지")
+        Log.d("HomeViewModel", "📹 Advanced Tagged 카메라 스트리밍 중지")
 
         isCameraStreamingJob?.cancel()
         isCameraStreamingJob = null
@@ -341,13 +339,11 @@ class HomeViewModel(
         stopSurfaceFpsMonitoring()
 
         homeRepository.stopCameraStreaming()
-        _text.value = "카메라 스트리밍 중지됨"
+        _text.value = "Advanced Tagged 카메라 스트리밍 중지됨"
 
         updateCameraFrame(null)
         _boundingBoxes.postValue(emptyList())
         _inferenceTime.postValue("0ms")
-
-        synchronized(boundingBoxMap) { boundingBoxMap.clear() }
     }
 
     /**
@@ -358,11 +354,11 @@ class HomeViewModel(
             stopCameraStreaming()
             _isStreaming.value = false
             setServerStreamingEnabled(context, false)
-            Log.d("HomeViewModel", "Camera streaming stopped")
+            Log.d("HomeViewModel", "Advanced Tagged Camera streaming stopped")
         } else {
             startCameraStreaming()
             _isStreaming.value = true
-            Log.d("HomeViewModel", "Camera streaming started")
+            Log.d("HomeViewModel", "Advanced Tagged Camera streaming started")
         }
     }
 
@@ -371,9 +367,9 @@ class HomeViewModel(
      */
     suspend fun fetchCameraData() {
         if (_isStreaming.value == true) {
-            _text.postValue("프레임 저장 중...")
+            _text.postValue("Advanced Tagged 프레임 저장 중...")
         } else {
-            _text.postValue("프레임 캡처 중...")
+            _text.postValue("Advanced Tagged 프레임 캡처 중...")
         }
 
         val sensorData = homeRepository.collectNewSensorData()
@@ -381,15 +377,15 @@ class HomeViewModel(
 
         if (sensorData != null) {
             if (_isStreaming.value == true) {
-                _text.postValue("프레임 저장 성공: ${sensorData.value}")
+                _text.postValue("Advanced Tagged 프레임 저장 성공: ${sensorData.value}")
             } else {
-                _text.postValue("프레임 캡처 성공")
+                _text.postValue("Advanced Tagged 프레임 캡처 성공")
             }
         } else {
             if (_isStreaming.value == true) {
-                _text.postValue("프레임 저장 실패")
+                _text.postValue("Advanced Tagged 프레임 저장 실패")
             } else {
-                _text.postValue("프레임 캡처 실패")
+                _text.postValue("Advanced Tagged 프레임 캡처 실패")
             }
         }
     }
@@ -494,7 +490,7 @@ class HomeViewModel(
     }
 
     /**
-     * 🚀 강화된 Surface FPS 모니터링 시작 - 더 정교한 감지
+     * 🚀 완화된 Surface FPS 모니터링 시작
      */
     private fun startAdvancedSurfaceFpsMonitoring() {
         lastFpsCheckTime = System.currentTimeMillis()
@@ -506,25 +502,23 @@ class HomeViewModel(
                 frameCount++
                 val currentTime = System.currentTimeMillis()
 
-                // ✅ 3초마다 FPS 체크 (더 여유롭게)
-                if (currentTime - lastFpsCheckTime >= 3000) {
+                // ✅ 4초마다 FPS 체크
+                if (currentTime - lastFpsCheckTime >= 4000) {
                     val fps = frameCount * 1000.0 / (currentTime - lastFpsCheckTime)
 
-                    // ✅ FPS 임계값을 매우 관대하게 (5fps)
-                    if (fps < 5.0) {
+                    // ✅ FPS 임계값을 매우 관대하게 (8fps)
+                    if (fps < FPS_THRESHOLD) {
                         consecutiveLowFpsCount++
-                        Log.w(TAG, "⚠️ Surface FPS 매우 낮음: ${String.format("%.1f", fps)}fps (연속 ${consecutiveLowFpsCount}회)")
+                        Log.w(TAG, "⚠️ Surface FPS 낮음: ${String.format("%.1f", fps)}fps (연속 ${consecutiveLowFpsCount}회)")
 
-                        // ✅ 연속 감지 임계값을 매우 높게 (10회)
-                        if (consecutiveLowFpsCount >= 10 &&
+                        // ✅ 연속 감지 임계값 (5회)
+                        if (consecutiveLowFpsCount >= LOW_FPS_TRIGGER_COUNT &&
                             isRecoveryInProgress.compareAndSet(false, true)) {
 
-                            Log.w(TAG, "🚨 극심한 FPS 드롭 감지 - 응급 복구 트리거: ${consecutiveLowFpsCount}회")
+                            Log.w(TAG, "🚨 FPS 드롭 감지 - 응급 복구 트리거: ${consecutiveLowFpsCount}회")
 
-                            // ✅ 더 긴 복구 시간
                             viewModelScope.launch(Dispatchers.IO) {
                                 try {
-                                    // 강력한 메모리 정리
                                     System.gc()
                                     delay(500)
 
@@ -536,8 +530,7 @@ class HomeViewModel(
                                         _shouldRecoverUIPool.postValue(true)
                                     }
 
-                                    // 복구 완료까지 더 오래 대기
-                                    delay(10000) // 10초
+                                    delay(8000) // 8초 대기
                                     consecutiveLowFpsCount = 0
                                     isRecoveryInProgress.set(false)
 
@@ -553,16 +546,13 @@ class HomeViewModel(
                             }
                         }
                     } else {
-                        // FPS가 정상이면 카운터 리셋
                         consecutiveLowFpsCount = 0
                     }
 
-                    // 리셋
                     lastFpsCheckTime = currentTime
                     frameCount = 0
                 }
 
-                // 다음 프레임 등록
                 if (surfaceFpsMonitor != null) {
                     Choreographer.getInstance().postFrameCallback(this)
                 }
@@ -570,7 +560,7 @@ class HomeViewModel(
         }
 
         Choreographer.getInstance().postFrameCallback(surfaceFpsMonitor!!)
-        Log.d(TAG, "🎯 완화된 Surface FPS 모니터링 시작 (임계값: 5fps, 연속감지: 10회)")
+        Log.d(TAG, "🎯 완화된 Surface FPS 모니터링 시작 (임계값: ${FPS_THRESHOLD}fps, 연속감지: ${LOW_FPS_TRIGGER_COUNT}회)")
     }
 
     /**

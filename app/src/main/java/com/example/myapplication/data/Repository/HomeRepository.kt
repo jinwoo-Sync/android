@@ -11,11 +11,13 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import com.example.myapplication.learning.yolo.BoundingBox
 import com.example.myapplication.data.logging.LoggerManager
+import com.example.myapplication.utils.BitmapPoolManager
 
 class HomeRepository(
     private val context: Context,
     private val sensorCollector: SensorCollector,
     private val dataSynchronizer: DataSynchronizer,
+    private val bitmapPoolManager: BitmapPoolManager  // ✅ BitmapPoolManager 주입
 ) {
     private val TAG = "HomeRepository"
 
@@ -54,15 +56,17 @@ class HomeRepository(
     }
 
     /**
-     * 🎯 비트맵 풀 강제 정리 (UI 요청)
+     * 🎯 비트맵 풀 강제 정리 (UI 요청) - BitmapPoolManager 사용
      */
     fun requestPoolCleanup() {
         try {
-            // 1. Detection 상태 복구 -> 5분 내에 쓰레드 풀이 차는거랑 관련 없을 것으로 파악되서 우선 주석처리
-            //sensorCollector.forceResetDetectionState()
+            // ✅ BitmapPoolManager를 통한 풀 정리
+            bitmapPoolManager.requestPoolCleanup()
 
+            // ✅ SensorCollector의 개별 정리도 수행
             sensorCollector.requestPoolCleanup()
-            Log.d(TAG, "🧹 Repository: 비트맵 풀 정리 요청 완료")
+
+            Log.d(TAG, "🧹 Repository: 전체 비트맵 풀 정리 요청 완료")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Repository: 비트맵 풀 정리 실패: ${e.message}", e)
             throw e
@@ -70,16 +74,37 @@ class HomeRepository(
     }
 
     /**
-     * 🎯 풀 상세 상태 조회 (UI 요청)
+     * 🎯 풀 상세 상태 조회 (UI 요청) - BitmapPoolManager 사용
      */
     fun getPoolDetailedStatus(): String {
         return try {
-            val status = sensorCollector.getPoolDetailedStatus()
-            Log.d(TAG, "📊 Repository: 풀 상태 조회 완료")
-            status
+            val managerStatus = bitmapPoolManager.getPoolDetailedStatus()
+            val sensorCollectorStatus = sensorCollector.getPoolDetailedStatus()
+
+            buildString {
+                appendLine("=== 전체 비트맵 풀 상태 ===")
+                appendLine(managerStatus)
+                appendLine()
+                appendLine("=== SensorCollector 추가 상태 ===")
+                appendLine(sensorCollectorStatus)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Repository: 풀 상태 조회 실패: ${e.message}", e)
             "풀 상태 조회 실패: ${e.message}"
+        }
+    }
+
+    /**
+     * 🚨 응급 복구 (심각한 상황용)
+     */
+    fun performEmergencyPoolReset() {
+        try {
+            Log.w(TAG, "🚨 Repository: 응급 풀 복구 시작")
+            bitmapPoolManager.performEmergencyReset()
+            Log.w(TAG, "✅ Repository: 응급 풀 복구 완료")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Repository: 응급 풀 복구 실패: ${e.message}", e)
+            throw e
         }
     }
 
@@ -93,7 +118,7 @@ class HomeRepository(
         }
 
         isStreamingActive = true
-        Log.d(TAG, "Starting camera streaming with Raw → UI Pool separation")
+        Log.d(TAG, "Starting camera streaming with Advanced Tagged Pool separation")
 
         sensorCollector.startCameraStreaming(
             callback = { sensorData ->
@@ -213,6 +238,9 @@ class HomeRepository(
             appendLine(getSyncStatus())
             appendLine()
             appendLine(getVideoStatus())
+            appendLine()
+            appendLine("=== BitmapPool 상태 ===")
+            appendLine(getPoolDetailedStatus())
             appendLine()
 
             try {
