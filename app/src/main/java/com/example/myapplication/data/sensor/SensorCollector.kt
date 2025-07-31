@@ -999,6 +999,7 @@ class SensorCollector(
             val sensorData = SensorData(
                 value = "TaggedFrame: $frameId",
                 bitmap = managedBitmap.bitmap,
+                managedBitmap = managedBitmap,      // ✅ ManagedBitmap 전달
                 timestamp = systemTime,
                 monoTimestamp = System.nanoTime(),
                 frameId = frameId
@@ -1013,6 +1014,7 @@ class SensorCollector(
                         SensorData(
                         value = "Advanced Tagged Frame: $frameId",
                         bitmap = managedBitmap.bitmap,
+                            managedBitmap = managedBitmap,      // ✅ ManagedBitmap 전달
                             timestamp = systemTime,
                             monoTimestamp = System.nanoTime(),
                             frameId = frameId
@@ -1025,8 +1027,6 @@ class SensorCollector(
         }
 
         handleSelectiveDetection(managedBitmap, frameId)
-
-        managedBitmap.release()
 
         if (frameCount % 90 == 0) {
             Log.i(TAG, "📊 ${taggedBitmapPool.getStatus()}")

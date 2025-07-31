@@ -11,10 +11,12 @@ import android.location.LocationManager
 import android.util.Range
 import android.util.Size
 import android.view.Surface
+import com.example.myapplication.utils.ManagedBitmap
 
 data class SensorData(
     val value: String? = null,
     val bitmap: Bitmap? = null,
+    val managedBitmap: ManagedBitmap? = null,
     val timestamp: Long,
     val monoTimestamp: Long,
     val frameId: Long = -1L

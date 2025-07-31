@@ -12,6 +12,10 @@ import kotlin.coroutines.resume
 import com.example.myapplication.learning.yolo.BoundingBox
 import com.example.myapplication.data.logging.LoggerManager
 import com.example.myapplication.utils.BitmapPoolManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class HomeRepository(
     private val context: Context,
@@ -23,6 +27,21 @@ class HomeRepository(
 
     private val _cameraStreamFlow = MutableStateFlow<SensorData?>(null)
     val cameraStreamFlow: StateFlow<SensorData?> = _cameraStreamFlow
+
+    init {
+        // 10초마다 백업 정리
+        CoroutineScope(Dispatchers.IO).launch {
+            while (true) {
+                delay(10000)
+                try {
+                    bitmapPoolManager.requestPoolCleanup()
+                    Log.d(TAG, "🧹 Repository 백업 풀 정리 완료")
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Repository 백업 풀 정리 실패: ${e.message}", e)
+                }
+            }
+        }
+    }
 
     private var isStreamingActive = false
 

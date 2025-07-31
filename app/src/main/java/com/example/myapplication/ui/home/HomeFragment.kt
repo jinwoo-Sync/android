@@ -163,35 +163,38 @@ class HomeFragment : Fragment() {
      */
     private fun displayManagedBitmapDirectly(sensorData: com.example.myapplication.model.SensorData) {
         try {
-            // ✅ 1단계: 유효성 검증
-            if (sensorData.bitmap == null || sensorData.bitmap.isRecycled) {
-                Log.w("HomeFragment", "⚠️ 무효한 비트맵: frameId=${sensorData.frameId}")
+            // ✅ ManagedBitmap 우선 확인
+            val newManagedBitmap = sensorData.managedBitmap
+            if (newManagedBitmap == null || !newManagedBitmap.isValid()) {
+                Log.w("HomeFragment", "⚠️ 무효한 ManagedBitmap: frameId=${sensorData.frameId}")
                 clearCurrentDisplay()
                 return
             }
 
-            Log.d("HomeFragment", "🎯 ManagedBitmap 직접 표시: frameId=${sensorData.frameId}, size=${sensorData.bitmap.width}x${sensorData.bitmap.height}")
+            Log.d("HomeFragment", "🎯 ManagedBitmap 직접 표시: frameId=${sensorData.frameId}, size=${newManagedBitmap.bitmap.width}x${newManagedBitmap.bitmap.height}")
 
-            // ✅ 2단계: 이전 참조 해제 (ManagedBitmap의 참조 카운팅 활용)
+            // ✅ 이전 ManagedBitmap release (풀 반납)
             currentManagedBitmap?.release()
 
-            // ✅ 3단계: 새로운 ManagedBitmap 참조 (Advanced Tagged Pool의 원본)
-            // 여기서는 SensorData의 bitmap이 이미 ManagedBitmap.bitmap이므로 직접 사용
-            // 실제로는 ManagedBitmap 객체 자체를 받아야 하지만, 현재 구조상 bitmap만 전달됨
+            // ✅ 새로운 ManagedBitmap 소유권 이전
+            currentManagedBitmap = newManagedBitmap
 
             // UI 스레드에서 안전하게 업데이트
             binding.imageView.post {
                 try {
-                    if (!sensorData.bitmap.isRecycled) {
-                        // ✅ 원본 비트맵을 직접 ImageView에 설정 (복사 없음)
-                        binding.imageView.setImageBitmap(sensorData.bitmap)
+                    if (currentManagedBitmap?.isValid() == true) {
+                        // ✅ 원본 비트맵을 직접 ImageView에 설정 (zero-copy!)
+                        binding.imageView.setImageBitmap(currentManagedBitmap!!.bitmap)
+
+                        // ✅ 사용 시간 업데이트 (Stale 방지)
+                        currentManagedBitmap!!.updateLastAccess()
 
                         successfulFrameCount++
                         frameSkipCount = 0
 
-                        Log.d("HomeFragment", "✅ 직접 UI 업데이트 성공: frameId=${sensorData.frameId}")
+                        Log.d("HomeFragment", "✅ UI 업데이트 성공: frameId=${sensorData.frameId}")
                     } else {
-                        Log.e("HomeFragment", "❌ UI 스레드에서 비트맵 재검증 실패: frameId=${sensorData.frameId}")
+                        Log.e("HomeFragment", "❌ UI 스레드에서 ManagedBitmap 무효화: frameId=${sensorData.frameId}")
                         handleUIUpdateFailure()
                     }
                 } catch (e: Exception) {
@@ -201,18 +204,18 @@ class HomeFragment : Fragment() {
             }
 
         } catch (e: Exception) {
-            Log.e("HomeFragment", "❌ ManagedBitmap 직접 표시 실패: ${e.message}", e)
+            Log.e("HomeFragment", "❌ ManagedBitmap 처리 실패: ${e.message}", e)
             clearCurrentDisplay()
         }
     }
 
     private fun clearCurrentDisplay() {
-        // ✅ ManagedBitmap 참조 해제 (복사본이 아니므로 pool 반납은 하지 않음)
+        // ✅ ManagedBitmap을 풀에 반납
         currentManagedBitmap?.release()
         currentManagedBitmap = null
 
         binding.imageView.setImageBitmap(null)
-        Log.d("HomeFragment", "🧹 UI 디스플레이 클리어 완료")
+        Log.d("HomeFragment", "🧹 UI 디스플레이 클리어 및 풀 반납 완료")
     }
 
     private fun handleUIUpdateFailure() {
@@ -328,12 +331,16 @@ class HomeFragment : Fragment() {
             try {
                 Log.d("HomeFragment", "📱 Camera Frame Observer: sensorData=${sensorData != null}")
 
-                if (sensorData?.bitmap != null && !sensorData.bitmap.isRecycled) {
-                    Log.d("HomeFragment", "✅ 유효한 프레임 수신: frameId=${sensorData.frameId}")
+                if (sensorData?.managedBitmap?.isValid() == true) {
+                    Log.d("HomeFragment", "✅ 유효한 ManagedBitmap 수신: frameId=${sensorData.frameId}")
 
-                    // ✅ ManagedBitmap을 직접 UI에 표시 (복사 없음)
+                    // ✅ ManagedBitmap을 직접 UI에 표시 (zero-copy)
                     displayManagedBitmapDirectly(sensorData)
 
+                } else if (sensorData?.bitmap != null && !sensorData.bitmap.isRecycled) {
+                    // 폴백: 기존 bitmap 방식 (하위 호환성)
+                    Log.w("HomeFragment", "⚠️ ManagedBitmap 없음, 기존 bitmap 사용: frameId=${sensorData.frameId}")
+                    binding.imageView.setImageBitmap(sensorData.bitmap)
                 } else {
                     Log.w("HomeFragment", "⚠️ 무효한 프레임 수신 - UI 클리어")
                     clearCurrentDisplay()
@@ -490,7 +497,7 @@ class HomeFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
 
-        // ✅ ManagedBitmap 참조 해제 (전역 풀은 MainActivity에서 관리)
+        // ✅ UI 종료 시 마지막 ManagedBitmap 반납
         currentManagedBitmap?.release()
         currentManagedBitmap = null
 
@@ -500,14 +507,14 @@ class HomeFragment : Fragment() {
             val successRate = (successfulFrameCount.toFloat() / total * 100)
             val formatter = DecimalFormat("#.#")
             FragmentUtils.logEvent("HomeFragment", "INFO",
-                "전역 풀 직접 사용 성공률: ${formatter.format(successRate)}% (성공: $successfulFrameCount, 스킵: $frameSkipCount)")
+                "UI가 관리한 ManagedBitmap 성공률: ${formatter.format(successRate)}% (성공: $successfulFrameCount, 스킵: $frameSkipCount)")
         }
 
         viewModel.stopSensorStreaming()
         _binding = null
         resourceMonitor = null
 
-        Log.d("HomeFragment", "✅ HomeFragment 정리 완료 (전역 풀 유지)")
+        Log.d("HomeFragment", "✅ HomeFragment 정리 완료 - ManagedBitmap 반납됨")
     }
 
     companion object {

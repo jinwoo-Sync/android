@@ -41,7 +41,7 @@ data class PoolHealthStatus(
  * @param staleTimeoutMs 비트맵이 반납되지 않고 버텨주는 최대 시간(ms). 이 시간이 지나면 강제 회수.
  */
 class AdvancedTaggedBitmapPool(
-    private val poolSize: Int = 12,
+    private val poolSize: Int = 50,
     private val width: Int = 840,
     private val height: Int = 840,
     private val autoCleanupIntervalMs: Long = 2000L,
