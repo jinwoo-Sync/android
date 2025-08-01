@@ -19,7 +19,7 @@ class CrashHandler private constructor(
             val crashHandler = CrashHandler(context, fileLogger, resourceMonitor)
 
             Thread.setDefaultUncaughtExceptionHandler(crashHandler)
-            Log.d(TAG, "🛡️ 크래시 핸들러 설정 완료")
+            Log.d(TAG, " 크래시 핸들러 설정 완료")
         }
     }
 
@@ -27,7 +27,7 @@ class CrashHandler private constructor(
 
     override fun uncaughtException(thread: Thread, throwable: Throwable) {
         try {
-            // 🚨 크래시 직전 긴급 상태 저장
+            //  크래시 직전 긴급 상태 저장
             saveCrashReport(thread, throwable)
 
             // 기본 핸들러 호출 (시스템 크래시 다이얼로그 등)

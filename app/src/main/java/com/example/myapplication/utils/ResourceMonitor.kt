@@ -28,7 +28,7 @@ class ResourceMonitor private constructor(private val context: Context) {
     private val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
 
     /**
-     * 🎯 앱 전용 메모리 정보 (가장 중요!) - 순환 호출 해결
+     *  앱 전용 메모리 정보 (가장 중요!) - 순환 호출 해결
      */
     fun getAppMemoryInfo(): AppMemoryInfo {
         val runtime = Runtime.getRuntime()
@@ -77,7 +77,7 @@ class ResourceMonitor private constructor(private val context: Context) {
     }
 
     /**
-     * 🌐 시스템 전체 메모리 정보 (참고용)
+     *  시스템 전체 메모리 정보 (참고용)
      */
     fun getSystemMemoryInfo(): SystemMemoryInfo {
         val memoryInfo = ActivityManager.MemoryInfo()
@@ -94,7 +94,7 @@ class ResourceMonitor private constructor(private val context: Context) {
     }
 
     /**
-     * 🎯 앱 메모리 위험도 분석 - 순환 호출 방지를 위해 별도 계산
+     *  앱 메모리 위험도 분석 - 순환 호출 방지를 위해 별도 계산
      */
     fun isAppMemoryLow(): Boolean {
         val runtime = Runtime.getRuntime()
@@ -125,7 +125,7 @@ class ResourceMonitor private constructor(private val context: Context) {
     }
 
     /**
-     * 📊 앱 중심 리소스 상태 로깅
+     *  앱 중심 리소스 상태 로깅
      */
     fun logAppResourceStatus(tag: String = "ResourceMonitor", context: String = "") {
         try {
@@ -135,12 +135,12 @@ class ResourceMonitor private constructor(private val context: Context) {
             val thread = getThreadInfo()
 
             val report = buildString {
-                appendLine("📱 ==================== 앱 리소스 모니터링 ====================")
-                appendLine("🎯 컨텍스트: $context")
-                appendLine("⏰ 시간: ${System.currentTimeMillis()}")
+                appendLine(" ==================== 앱 리소스 모니터링 ====================")
+                appendLine(" 컨텍스트: $context")
+                appendLine(" 시간: ${System.currentTimeMillis()}")
                 appendLine()
 
-                appendLine("🧠 앱 힙 메모리 (GC 관리 영역):")
+                appendLine(" 앱 힙 메모리 (GC 관리 영역):")
                 appendLine("   최대 할당량: ${formatter.format(appMemory.maxHeapMB)} MB")
                 appendLine("   현재 사용량: ${formatter.format(appMemory.usedHeapMB)} MB (${formatter.format(appMemory.heapUsagePercent)}%)")
                 appendLine("   사용 가능: ${formatter.format(appMemory.availableHeapMB)} MB")
@@ -155,7 +155,7 @@ class ResourceMonitor private constructor(private val context: Context) {
                 appendLine("   압박 수준: $pressureIcon ${appMemory.memoryPressureLevel}")
                 appendLine()
 
-                appendLine("🔧 앱 프로세스 메모리 (OS 레벨):")
+                appendLine(" 앱 프로세스 메모리 (OS 레벨):")
                 appendLine("   Dalvik(Java): ${formatter.format(appMemory.dalvikHeapMB)} MB")
                 appendLine("   Native(C++): ${formatter.format(appMemory.nativeHeapMB)} MB")
                 appendLine("   기타: ${formatter.format(appMemory.otherMemoryMB)} MB")
@@ -163,20 +163,20 @@ class ResourceMonitor private constructor(private val context: Context) {
                 appendLine("   공유 포함 총합: ${formatter.format(appMemory.totalPssMB)} MB")
                 appendLine()
 
-                appendLine("🌐 시스템 전체 메모리 (참고용):")
+                appendLine(" 시스템 전체 메모리 (참고용):")
                 appendLine("   전체 RAM: ${formatter.format(systemMemory.totalSystemMB)} MB")
                 appendLine("   시스템 사용가능: ${formatter.format(systemMemory.availableSystemMB)} MB")
                 appendLine("   시스템 사용률: ${formatter.format(systemMemory.systemMemoryPressure)}%")
-                appendLine("   시스템 메모리 부족: ${if (systemMemory.systemMemoryLow) "⚠️ 예" else "✅ 아니오"}")
+                appendLine("   시스템 메모리 부족: ${if (systemMemory.systemMemoryLow) "️ 예" else "✅ 아니오"}")
                 appendLine()
 
-                appendLine("⚡ CPU & 스레드:")
+                appendLine(" CPU & 스레드:")
                 appendLine("   CPU 사용률: ${formatter.format(cpu.usagePercent)}% (${cpu.coreCount}코어)")
                 appendLine("   앱 활성 스레드: ${thread.activeThreadCount}개")
                 appendLine("   현재 스레드: ${thread.currentThreadName}")
                 appendLine()
 
-                // 🚨 경고 및 권장사항
+                //  경고 및 권장사항
                 val warnings = mutableListOf<String>()
                 if (appMemory.heapUsagePercent > 85) {
                     warnings.add("앱 힙 메모리 사용률 위험: ${formatter.format(appMemory.heapUsagePercent)}%")
@@ -192,12 +192,12 @@ class ResourceMonitor private constructor(private val context: Context) {
                 }
 
                 if (warnings.isNotEmpty()) {
-                    appendLine("⚠️ 메모리 경고:")
-                    warnings.forEach { appendLine("   🚨 $it") }
+                    appendLine(" 메모리 경고:")
+                    warnings.forEach { appendLine("    $it") }
                     appendLine()
 
                     // 권장사항
-                    appendLine("💡 권장사항:")
+                    appendLine(" 권장사항:")
                     if (appMemory.heapUsagePercent > 85) {
                         appendLine("   • 불필요한 객체 참조 해제")
                         appendLine("   • System.gc() 호출 고려")
@@ -219,7 +219,7 @@ class ResourceMonitor private constructor(private val context: Context) {
     }
 
     /**
-     * 🎯 앱 메모리 경고 확인 (앱 중심)
+     *  앱 메모리 경고 확인 (앱 중심)
      */
     fun checkAppMemoryWarnings(): List<String> {
         val warnings = mutableListOf<String>()
@@ -230,30 +230,30 @@ class ResourceMonitor private constructor(private val context: Context) {
 
             // 앱 힙 메모리 경고
             if (appMemory.heapUsagePercent > 90) {
-                warnings.add("🔴 앱 힙 메모리 위험: ${formatter.format(appMemory.heapUsagePercent)}%")
+                warnings.add(" 앱 힙 메모리 위험: ${formatter.format(appMemory.heapUsagePercent)}%")
             } else if (appMemory.heapUsagePercent > 80) {
-                warnings.add("🟡 앱 힙 메모리 주의: ${formatter.format(appMemory.heapUsagePercent)}%")
+                warnings.add(" 앱 힙 메모리 주의: ${formatter.format(appMemory.heapUsagePercent)}%")
             }
 
             if (appMemory.availableHeapMB < 10) {
-                warnings.add("🔴 앱 힙 여유공간 위험: ${formatter.format(appMemory.availableHeapMB)} MB")
+                warnings.add(" 앱 힙 여유공간 위험: ${formatter.format(appMemory.availableHeapMB)} MB")
             } else if (appMemory.availableHeapMB < 30) {
-                warnings.add("🟡 앱 힙 여유공간 주의: ${formatter.format(appMemory.availableHeapMB)} MB")
+                warnings.add(" 앱 힙 여유공간 주의: ${formatter.format(appMemory.availableHeapMB)} MB")
             }
 
             // Native 메모리 경고 (비트맵 등)
             if (appMemory.nativeHeapMB > 200) {
-                warnings.add("🔴 Native 메모리 과다: ${formatter.format(appMemory.nativeHeapMB)} MB")
+                warnings.add(" Native 메모리 과다: ${formatter.format(appMemory.nativeHeapMB)} MB")
             } else if (appMemory.nativeHeapMB > 100) {
-                warnings.add("🟡 Native 메모리 주의: ${formatter.format(appMemory.nativeHeapMB)} MB")
+                warnings.add(" Native 메모리 주의: ${formatter.format(appMemory.nativeHeapMB)} MB")
             }
 
             // 시스템 메모리 참고 경고
             if (systemMemory.systemMemoryLow) {
-                warnings.add("⚠️ 시스템 전체 메모리 부족 (앱 종료 위험)")
+                warnings.add("⚠ 시스템 전체 메모리 부족 (앱 종료 위험)")
             }
         } catch (e: Exception) {
-            warnings.add("❌ 메모리 상태 확인 중 오류: ${e.message}")
+            warnings.add(" 메모리 상태 확인 중 오류: ${e.message}")
             Log.e(TAG, "메모리 경고 확인 중 오류: ${e.message}", e)
         }
 
@@ -261,7 +261,7 @@ class ResourceMonitor private constructor(private val context: Context) {
     }
 
     /**
-     * 🎯 비트맵 메모리 정보 (Native 영역에 할당됨)
+     *  비트맵 메모리 정보 (Native 영역에 할당됨)
      */
     fun getBitmapMemoryUsage(bitmap: Bitmap?): BitmapMemoryInfo {
         return try {

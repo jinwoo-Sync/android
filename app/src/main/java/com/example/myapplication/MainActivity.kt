@@ -43,29 +43,29 @@ class MainActivity : AppCompatActivity() {
     lateinit var homeRepository: HomeRepository
     private lateinit var bitmapPoolManager: BitmapPoolManager
 
-    // ✅ 모니터링 시스템
+    //  모니터링 시스템
     private lateinit var fileLogger: FileLogger
     private lateinit var resourceMonitor: ResourceMonitor
     private val monitoringScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // ✅ FPS 모니터링
+    // FPS 모니터링
     private var fpsMonitor: Choreographer.FrameCallback? = null
     private var lastFpsTime = 0L
     private var frameCount = 0
     private val currentFps = AtomicLong(60)
     private val isLowFpsDetected = AtomicBoolean(false)
 
-    // ✅ BitmapPool 모니터링 추가
+    //  BitmapPool 모니터링 추가
     private var lastPoolHealthCheck = 0L
     private var previousPoolState: String = ""
     private val isPoolCritical = AtomicBoolean(false)
 
-    // ✅ .mp4 저장 상태 추적
+    //  .mp4 저장 상태 추적
     private var isMp4Recording = false
     private var mp4RecordingStartTime = 0L
     private var mp4RecordingFpsDrops = 0
 
-    // ✅ 상태 추적
+    //  상태 추적
     private val appStartTime = System.currentTimeMillis()
     private var sessionId: String = ""
 
@@ -81,10 +81,10 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ✅ 1단계: 모니터링 시스템 초기화 (최우선!)
+        //  1단계: 모니터링 시스템 초기화 (최우선!)
         initializeMonitoringSystem()
 
-        // ✅ 2단계: 기존 초기화
+        //  2단계: 기존 초기화
         val dataSynchronizer = DataSynchronizer()
         bitmapPoolManager = BitmapPoolManager.getInstance(this)
         sensorCollector = SensorCollector(this, bitmapPoolManager)
@@ -94,7 +94,7 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // ✅ 3단계: 완전한 모니터링 시작
+        //  3단계: 완전한 모니터링 시작
         startComprehensiveMonitoring()
 
         checkPermissions()
@@ -107,7 +107,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎯 모니터링 시스템 초기화
+     *  모니터링 시스템 초기화
      */
     private fun initializeMonitoringSystem() {
         try {
@@ -118,8 +118,8 @@ class MainActivity : AppCompatActivity() {
             resourceMonitor = ResourceMonitor.getInstance(this)
             CrashHandler.setup(this)
 
-            fileLogger.i("MainActivity", "🚀 완전한 모니터링 시스템 초기화 완료 - 세션: $sessionId")
-            fileLogger.i("MainActivity", "📁 로그 저장 위치: ${fileLogger.getLogDirectoryPath()}")
+            fileLogger.i("MainActivity", " 완전한 모니터링 시스템 초기화 완료 - 세션: $sessionId")
+            fileLogger.i("MainActivity", " 로그 저장 위치: ${fileLogger.getLogDirectoryPath()}")
 
         } catch (e: Exception) {
             Log.e("MainActivity", "❌ 모니터링 시스템 초기화 실패: ${e.message}", e)
@@ -127,7 +127,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎯 완전한 모니터링 시작 (BitmapPool 포함)
+     * 완전한 모니터링 시작 (BitmapPool 포함)
      */
     private fun startComprehensiveMonitoring() {
         // ✅ 1. 30초마다 정기 상태 저장
@@ -147,11 +147,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎯 BitmapPool 전용 모니터링 (5초마다)
+     *  BitmapPool 전용 모니터링 (5초마다)
      */
     private fun startBitmapPoolMonitoring() {
         monitoringScope.launch {
-            fileLogger.i("MainActivity", "🎭 강화된 BitmapPool 모니터링 시작 (3초 간격)")
+            fileLogger.i("MainActivity", " 강화된 BitmapPool 모니터링 시작 (3초 간격)")
 
             while (isActive) {
                 try {
@@ -161,35 +161,35 @@ class MainActivity : AppCompatActivity() {
                     val poolHealthStatus = bitmapPoolManager.advancedTaggedBitmapPool.getPoolHealthStatus()
                     val poolDetailStatus = bitmapPoolManager.getPoolDetailedStatus()
 
-                    // 🚨 더 적극적인 상태 변화 감지
+                    //  더 적극적인 상태 변화 감지
                     when (poolHealthStatus.healthLevel) {
                         HealthLevel.CRITICAL -> {
                             if (!isPoolCritical.getAndSet(true)) {
-                                fileLogger.e("MainActivity", "🔴🔴 BitmapPool CRITICAL - 즉시 응급 복구! 🔴🔴")
+                                fileLogger.e("MainActivity", " BitmapPool CRITICAL - 즉시 응급 복구! ")
                                 logCriticalPoolState(poolHealthStatus, poolDetailStatus)
 
-                                // 🚨 즉시 응급 복구
+                                //  즉시 응급 복구
                                 monitoringScope.launch {
                                     performPoolEmergencyRecovery("Critical Pool State - Available: ${poolHealthStatus.availableSlots}")
                                 }
                             }
                         }
                         HealthLevel.WARNING -> {
-                            fileLogger.w("MainActivity", "🟡 BitmapPool WARNING - 예방적 정리: ${poolHealthStatus.recommendation}")
+                            fileLogger.w("MainActivity", " BitmapPool WARNING - 예방적 정리: ${poolHealthStatus.recommendation}")
 
-                            // 🎯 예방적 정리 트리거
+                            //  예방적 정리 트리거
                             monitoringScope.launch {
                                 delay(1000)
                                 try {
                                     bitmapPoolManager.advancedTaggedBitmapPool.forceCleanupStaleReferences()
-                                    fileLogger.i("MainActivity", "✅ 예방적 정리 완료")
+                                    fileLogger.i("MainActivity", " 예방적 정리 완료")
                                 } catch (e: Exception) {
-                                    fileLogger.e("MainActivity", "❌ 예방적 정리 실패: ${e.message}", e)
+                                    fileLogger.e("MainActivity", " 예방적 정리 실패: ${e.message}", e)
                                 }
                             }
                         }
                         HealthLevel.DEGRADED -> {
-                            fileLogger.w("MainActivity", "🟠 BitmapPool DEGRADED - Stale: ${poolHealthStatus.staleSlots}개")
+                            fileLogger.w("MainActivity", " BitmapPool DEGRADED - Stale: ${poolHealthStatus.staleSlots}개")
 
                             // 가벼운 정리
                             if (poolHealthStatus.staleSlots > 3) {
@@ -212,7 +212,7 @@ class MainActivity : AppCompatActivity() {
 
 
     /**
-     * 🎯 .mp4 녹화 상태 모니터링
+     *  .mp4 녹화 상태 모니터링
      */
     private fun startMp4RecordingMonitoring() {
         monitoringScope.launch {
@@ -220,7 +220,7 @@ class MainActivity : AppCompatActivity() {
                 try {
                     delay(1_000) // 1초마다 체크
 
-                    // 🎯 HomeRepository를 통한 정확한 상태 확인
+                    //  HomeRepository를 통한 정확한 상태 확인
                     val isCurrentlyRecording = checkIfMp4Recording()
                     val currentSessionId = if (::homeRepository.isInitialized) {
                         homeRepository.getCurrentVideoSessionId()
@@ -233,7 +233,7 @@ class MainActivity : AppCompatActivity() {
                             mp4RecordingStartTime = System.currentTimeMillis()
                             mp4RecordingFpsDrops = 0
 
-                            fileLogger.i("MainActivity", "🎬🎬 .mp4 녹화 시작 🎬🎬")
+                            fileLogger.i("MainActivity", " .mp4 녹화 시작 ")
                             fileLogger.i("MainActivity", "세션 ID: $currentSessionId")
                             logMp4RecordingStart()
 
@@ -241,7 +241,7 @@ class MainActivity : AppCompatActivity() {
                             // 녹화 종료
                             if (isMp4Recording) {
                                 val recordingDuration = System.currentTimeMillis() - mp4RecordingStartTime
-                                fileLogger.i("MainActivity", "🎬🎬 .mp4 녹화 종료 🎬🎬")
+                                fileLogger.i("MainActivity", " .mp4 녹화 종료 ")
                                 fileLogger.i("MainActivity", "세션 ID: $currentSessionId")
                                 logMp4RecordingEnd(recordingDuration)
                             }
@@ -249,7 +249,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    // 🎯 세션 변화 감지
+                    //  세션 변화 감지
                     if (isMp4Recording && currentSessionId != null) {
                         // 현재 추적 중인 세션과 다르면 세션 변화 로깅
                         // (구현 필요시 추가)
@@ -263,7 +263,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎯 .mp4 녹화 상태 확인 (HomeRepository를 통해)
+     *  .mp4 녹화 상태 확인 (HomeRepository를 통해)
      */
     private fun checkIfMp4Recording(): Boolean {
         return try {
@@ -282,7 +282,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎯 실시간 FPS 모니터링 (.mp4 녹화 특별 추적 포함)
+     *  실시간 FPS 모니터링 (.mp4 녹화 특별 추적 포함)
      */
     private fun startRealTimeFpsMonitoring() {
         lastFpsTime = System.currentTimeMillis()
@@ -299,10 +299,10 @@ class MainActivity : AppCompatActivity() {
                         val fps = frameCount * 1000.0 / (currentTime - lastFpsTime)
                         currentFps.set(fps.toLong())
 
-                        // 🎯 .mp4 녹화 중 FPS 드롭 특별 추적
+                        // .mp4 녹화 중 FPS 드롭 특별 추적
                         if (isMp4Recording && fps <= 10.0) {
                             mp4RecordingFpsDrops++
-                            fileLogger.w("MainActivity", "🎬📉 .mp4 녹화 중 FPS 드롭: ${String.format("%.1f", fps)}fps (총 ${mp4RecordingFpsDrops}회)")
+                            fileLogger.w("MainActivity", " .mp4 녹화 중 FPS 드롭: ${String.format("%.1f", fps)}fps (총 ${mp4RecordingFpsDrops}회)")
 
                             // 녹화 중 FPS 드롭 시 BitmapPool 상태 즉시 체크
                             monitoringScope.launch {
@@ -310,11 +310,11 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
 
-                        // 🚨 일반 위험 상황 감지
+                        //  일반 위험 상황 감지
                         when {
                             fps <= 5.0 -> {
                                 val context = if (isMp4Recording) "치명적_FPS_드롭_MP4녹화중" else "치명적_FPS_드롭"
-                                fileLogger.e("MainActivity", "🔴🔴 치명적 FPS 드롭 감지: ${String.format("%.1f", fps)}fps 🔴🔴")
+                                fileLogger.e("MainActivity", " 치명적 FPS 드롭 감지: ${String.format("%.1f", fps)}fps ")
                                 logCriticalSystemState(context + "_${String.format("%.1f", fps)}")
 
                                 monitoringScope.launch {
@@ -324,7 +324,7 @@ class MainActivity : AppCompatActivity() {
                             fps <= 8.0 -> {
                                 if (!isLowFpsDetected.getAndSet(true)) {
                                     val context = if (isMp4Recording) "위험_FPS_드롭_MP4녹화중" else "위험_FPS_드롭"
-                                    fileLogger.w("MainActivity", "🟡🟡 위험 FPS 드롭 감지: ${String.format("%.1f", fps)}fps 🟡🟡")
+                                    fileLogger.w("MainActivity", " 위험 FPS 드롭 감지: ${String.format("%.1f", fps)}fps ")
                                     logDetailedSystemState(context + "_${String.format("%.1f", fps)}")
 
                                     // 5초 후 플래그 리셋
@@ -354,15 +354,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         Choreographer.getInstance().postFrameCallback(fpsMonitor!!)
-        fileLogger.i("MainActivity", "🎯 실시간 FPS 모니터링 시작 (.mp4 녹화 추적 포함)")
+        fileLogger.i("MainActivity", " 실시간 FPS 모니터링 시작 (.mp4 녹화 추적 포함)")
     }
 
     /**
-     * 🎬 .mp4 녹화 시작 시 상태 로깅
+     *  .mp4 녹화 시작 시 상태 로깅
      */
     private fun logMp4RecordingStart() {
         try {
-            fileLogger.i("MainActivity", "🎬 ==================== .mp4 녹화 시작 상태 ====================")
+            fileLogger.i("MainActivity", "==================== .mp4 녹화 시작 상태 ====================")
             fileLogger.i("MainActivity", "녹화 시작 시간: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}")
 
             // BitmapPool 상태
@@ -382,7 +382,7 @@ class MainActivity : AppCompatActivity() {
             fileLogger.i("MainActivity", "   가용 힙: ${String.format("%.1f", appMemory.availableHeapMB)} MB")
 
             fileLogger.i("MainActivity", "현재 FPS: ${currentFps.get()}fps")
-            fileLogger.i("MainActivity", "🎬 ========================================================")
+            fileLogger.i("MainActivity", " ========================================================")
 
         } catch (e: Exception) {
             fileLogger.e("MainActivity", ".mp4 녹화 시작 로깅 실패: ${e.message}", e)
@@ -390,11 +390,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎬 .mp4 녹화 종료 시 상태 로깅
+     *  .mp4 녹화 종료 시 상태 로깅
      */
     private fun logMp4RecordingEnd(duration: Long) {
         try {
-            fileLogger.i("MainActivity", "🎬 ==================== .mp4 녹화 종료 상태 ====================")
+            fileLogger.i("MainActivity", " ==================== .mp4 녹화 종료 상태 ====================")
             fileLogger.i("MainActivity", "녹화 종료 시간: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}")
             fileLogger.i("MainActivity", "총 녹화 시간: ${duration / 1000}초 (${duration / 60000}분)")
             fileLogger.i("MainActivity", "녹화 중 FPS 드롭 횟수: $mp4RecordingFpsDrops")
@@ -417,17 +417,17 @@ class MainActivity : AppCompatActivity() {
 
             fileLogger.i("MainActivity", "최종 FPS: ${currentFps.get()}fps")
 
-            // 🎯 분석 및 권장사항
+            //  분석 및 권장사항
             if (mp4RecordingFpsDrops > 5) {
-                fileLogger.w("MainActivity", "⚠️ 녹화 중 잦은 FPS 드롭 감지 (${mp4RecordingFpsDrops}회)")
+                fileLogger.w("MainActivity", " 녹화 중 잦은 FPS 드롭 감지 (${mp4RecordingFpsDrops}회)")
                 fileLogger.w("MainActivity", "권장사항: BitmapPool 크기 증가 또는 프레임 스킵 간격 조정")
             }
 
             if (poolHealth.healthLevel != HealthLevel.HEALTHY) {
-                fileLogger.w("MainActivity", "⚠️ 녹화 종료 시 BitmapPool 상태 불량: ${poolHealth.healthLevel}")
+                fileLogger.w("MainActivity", " 녹화 종료 시 BitmapPool 상태 불량: ${poolHealth.healthLevel}")
             }
 
-            fileLogger.i("MainActivity", "🎬 ========================================================")
+            fileLogger.i("MainActivity", " ========================================================")
 
         } catch (e: Exception) {
             fileLogger.e("MainActivity", ".mp4 녹화 종료 로깅 실패: ${e.message}", e)
@@ -435,13 +435,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎬 .mp4 녹화 중 FPS 드롭 시 상태 로깅
+     *  .mp4 녹화 중 FPS 드롭 시 상태 로깅
      */
     private suspend fun logMp4FpsDropState(fps: Double) = withContext(Dispatchers.IO) {
         try {
             val recordingDuration = System.currentTimeMillis() - mp4RecordingStartTime
 
-            fileLogger.w("MainActivity", "🎬📉 .mp4 녹화 중 FPS 드롭 상세 분석 📉🎬")
+            fileLogger.w("MainActivity", " .mp4 녹화 중 FPS 드롭 상세 분석 ")
             fileLogger.w("MainActivity", "드롭 발생 시간: ${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}")
             fileLogger.w("MainActivity", "녹화 경과 시간: ${recordingDuration / 1000}초")
             fileLogger.w("MainActivity", "현재 FPS: ${String.format("%.1f", fps)}fps")
@@ -468,11 +468,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🚨 BitmapPool Critical 상태 로깅
+     *  BitmapPool Critical 상태 로깅
      */
     private fun logCriticalPoolState(healthStatus: PoolHealthStatus, detailStatus: String) {
         try {
-            fileLogger.e("MainActivity", "🚨🚨🚨 BitmapPool CRITICAL 상태 🚨🚨🚨")
+            fileLogger.e("MainActivity", " BitmapPool CRITICAL 상태 ")
             fileLogger.e("MainActivity", "Health Level: ${healthStatus.healthLevel}")
             fileLogger.e("MainActivity", "Available Slots: ${healthStatus.availableSlots}/${healthStatus.totalSlots}")
             fileLogger.e("MainActivity", "Total References: ${healthStatus.totalReferences}")
@@ -496,7 +496,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎯 상세한 Pool 상태 로깅
+     *  상세한 Pool 상태 로깅
      */
     private fun logDetailedPoolState(level: String, healthStatus: PoolHealthStatus, detailStatus: String) {
         try {
@@ -515,7 +515,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🚨 Pool 응급 복구
+     *  Pool 응급 복구
      */
     private suspend fun performPoolEmergencyRecovery(reason: String) = withContext(Dispatchers.IO) {
         try {
@@ -565,7 +565,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎯 30초마다 정기 모니터링 (BitmapPool 상태 포함)
+     *  30초마다 정기 모니터링 (BitmapPool 상태 포함)
      */
     private fun startPeriodicMonitoring() {
         monitoringScope.launch {
@@ -586,7 +586,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🚨 치명적 시스템 상태 로깅
+     * 치명적 시스템 상태 로깅
      */
     private fun logCriticalSystemState(context: String) {
         try {
@@ -594,7 +594,7 @@ class MainActivity : AppCompatActivity() {
             val uptime = currentTime - appStartTime
             val currentFpsValue = currentFps.get()
 
-            fileLogger.e("MainActivity", "🚨🚨🚨 치명적 시스템 상태 - $context 🚨🚨🚨")
+            fileLogger.e("MainActivity", " 치명적 시스템 상태 - $context ")
             fileLogger.e("MainActivity", "타임스탬프: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(currentTime))}")
             fileLogger.e("MainActivity", "앱 실행 시간: ${uptime / 1000}초")
             fileLogger.e("MainActivity", "현재 FPS: ${currentFpsValue}fps")
@@ -606,7 +606,7 @@ class MainActivity : AppCompatActivity() {
                 fileLogger.e("MainActivity", ".mp4 FPS 드롭: ${mp4RecordingFpsDrops}회")
             }
 
-            // 🚨 치명적 상태 - 더 상세한 정보 로깅
+            //  치명적 상태 - 더 상세한 정보 로깅
             resourceMonitor.logAppResourceStatus("MainActivity", "치명적_상태_$context")
 
             // BitmapPool 치명적 상태
@@ -626,7 +626,7 @@ class MainActivity : AppCompatActivity() {
             fileLogger.e("MainActivity", "가용 힙: ${String.format("%.1f", appMemory.availableHeapMB)} MB")
             fileLogger.e("MainActivity", "메모리 압박: ${appMemory.memoryPressureLevel}")
 
-            fileLogger.e("MainActivity", "🚨🚨🚨 치명적 상태 로깅 완료 - $context 🚨🚨🚨")
+            fileLogger.e("MainActivity", " 치명적 상태 로깅 완료 - $context ")
             fileLogger.e("MainActivity", "")
 
         } catch (e: Exception) {
@@ -635,7 +635,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🚨 응급 복구 (일반적인 응급 상황용)
+     *  응급 복구 (일반적인 응급 상황용)
      */
     private suspend fun performEmergencyRecovery(reason: String) = withContext(Dispatchers.IO) {
         try {
@@ -680,7 +680,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎯 상세한 시스템 상태 로깅 (BitmapPool 상태 포함)
+     *  상세한 시스템 상태 로깅 (BitmapPool 상태 포함)
      */
     private fun logDetailedSystemState(context: String) {
         try {
@@ -688,7 +688,7 @@ class MainActivity : AppCompatActivity() {
             val uptime = currentTime - appStartTime
             val currentFpsValue = currentFps.get()
 
-            fileLogger.i("MainActivity", "📊📊📊 상세 시스템 상태 - $context 📊📊📊")
+            fileLogger.i("MainActivity", " 상세 시스템 상태 - $context ")
             fileLogger.i("MainActivity", "타임스탬프: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(currentTime))}")
             fileLogger.i("MainActivity", "앱 실행 시간: ${uptime / 1000}초")
             fileLogger.i("MainActivity", "현재 FPS: ${currentFpsValue}fps")
@@ -702,7 +702,7 @@ class MainActivity : AppCompatActivity() {
             // ResourceMonitor를 통한 완전한 상태 로깅
             resourceMonitor.logAppResourceStatus("MainActivity", context)
 
-            // 🎯 BitmapPool 상세 상태 (가장 중요!)
+            //  BitmapPool 상세 상태 (가장 중요!)
             fileLogger.i("MainActivity", "=== BitmapPool 완전한 상태 ===")
             val poolHealth = bitmapPoolManager.advancedTaggedBitmapPool.getPoolHealthStatus()
             val poolDetail = bitmapPoolManager.getPoolDetailedStatus()
@@ -718,13 +718,13 @@ class MainActivity : AppCompatActivity() {
             // 메모리 경고 확인
             val warnings = resourceMonitor.checkAppMemoryWarnings()
             if (warnings.isNotEmpty()) {
-                fileLogger.w("MainActivity", "⚠️⚠️ 메모리 경고 감지 ⚠️⚠️")
+                fileLogger.w("MainActivity", " 메모리 경고 감지 ")
                 warnings.forEach { warning ->
                     fileLogger.w("MainActivity", "   $warning")
                 }
             }
 
-            fileLogger.i("MainActivity", "📊📊📊 상태 로깅 완료 - $context 📊📊📊")
+            fileLogger.i("MainActivity", " 상태 로깅 완료 - $context ")
             fileLogger.i("MainActivity", "")
 
         } catch (e: Exception) {
@@ -733,7 +733,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎯 초기 시스템 상태 저장
+     * 초기 시스템 상태 저장
      */
     private fun logInitialSystemState() {
         monitoringScope.launch {
@@ -755,7 +755,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 🎯 앱 종료 시 최종 상태 저장
+     * 앱 종료 시 최종 상태 저장
      */
     private fun logFinalSystemState() {
         try {
@@ -928,9 +928,9 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
 
-        // 🚨 응급 종료 방지
+        // 응급 종료 방지
         if (emergencyShutdownPrevention.compareAndSet(false, true)) {
-            Log.w("MainActivity", "🚨 응급 종료 방지 프로토콜 활성화")
+            Log.w("MainActivity", " 응급 종료 방지 프로토콜 활성화")
 
             runBlocking {
                 try {

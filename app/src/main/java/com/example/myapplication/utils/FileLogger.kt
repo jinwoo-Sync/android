@@ -103,7 +103,7 @@ class FileLogger private constructor(private val context: Context) {
         Log.d(TAG, "📝 파일 로깅 중지")
     }
 
-    // 🎯 메인 로깅 함수들
+    //  메인 로깅 함수들
     fun d(tag: String, message: String) {
         addLog("DEBUG", tag, message)
         Log.d(tag, message)
@@ -124,7 +124,7 @@ class FileLogger private constructor(private val context: Context) {
         Log.e(tag, message, throwable)
     }
 
-    // 🎯 중요한 크래시 전 상태 저장
+    //  중요한 크래시 전 상태 저장
     fun emergencyLog(tag: String, message: String) {
         val entry = LogEntry(
             timestamp = System.currentTimeMillis(),
