@@ -10,6 +10,7 @@ import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.util.Log
 import com.example.myapplication.DataStructure.CircularQueue
+import kotlinx.coroutines.Dispatchers
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -235,23 +236,18 @@ class AdvancedTaggedBitmapPool(
         if (activeTags.isEmpty() || isShutdown.get()) return
 
         val currentTime = System.currentTimeMillis()
+
+        //  더 짧은 타임아웃으로 변경 (3초→1.5초)
         val staleEntries = activeTags.filter { (_, tagInfo) ->
-            currentTime - tagInfo.lastAccessTime.get() > staleTimeoutMs
+            currentTime - tagInfo.lastAccessTime.get() > 1500L
         }
 
         if (staleEntries.isNotEmpty()) {
-            Log.w(TAG, "${staleEntries.size}개 Stale 비트맵 강제 회수")
+            Log.w(TAG, " 적극적 Stale 정리: ${staleEntries.size}개")
             staleEntries.forEach { (index, tagInfo) ->
-                val age = currentTime - tagInfo.acquireTime
-                Log.w(TAG, "  Stale: idx=$index, tag=${tagInfo.tag}, age=${age}ms")
                 tagInfo.managedBitmap.forceRelease()
                 forceCleanupCounter.incrementAndGet()
             }
-        }
-
-        val healthStatus = getPoolHealthStatus()
-        if (healthStatus.healthLevel != HealthLevel.HEALTHY) {
-            Log.w(TAG, "풀 상태: ${healthStatus.healthLevel}, available=${healthStatus.availableSlots}/${healthStatus.totalSlots}")
         }
     }
 
@@ -527,6 +523,25 @@ class ManagedBitmap internal constructor(
     private val accessLock = ReentrantReadWriteLock()
     private val releaseCallCount = AtomicLong(0)
 
+    // 논블로킹 업데이트를 위한 별도 스레드풀 (companion object에서 관리)
+    companion object {
+        private val accessTimeUpdateExecutor = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "AccessTimeUpdater").apply { isDaemon = true }
+        }
+    }
+
+    fun updateLastAccess() {
+        // 현재 구조에 맞는 논블로킹 업데이트
+        accessTimeUpdateExecutor.execute {
+            try {
+                pool.activeTags[poolIndex]?.lastAccessTime?.set(System.currentTimeMillis())
+            } catch (e: Exception) {
+                // Access time 업데이트 실패는 치명적이지 않으므로 무시
+                Log.v(TAG, "Access time 업데이트 무시: ${e.message}")
+            }
+        }
+    }
+
     fun isValid(): Boolean {
         return accessLock.readLock().let { lock ->
             lock.lock()
@@ -615,15 +630,6 @@ class ManagedBitmap internal constructor(
     }
 
     fun isReleased(): Boolean = isReleased
-
-    fun updateLastAccess() {
-        try {
-            pool.activeTags[poolIndex]?.lastAccessTime?.set(System.currentTimeMillis())
-        } catch (e: Exception) {
-            Log.w(TAG, "Access time 업데이트 실패: ${e.message}")
-        }
-    }
-
     fun getAgeMillis(): Long = System.currentTimeMillis() - creationTime
 }
 

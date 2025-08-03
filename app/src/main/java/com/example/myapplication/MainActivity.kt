@@ -639,43 +639,35 @@ class MainActivity : AppCompatActivity() {
      */
     private suspend fun performEmergencyRecovery(reason: String) = withContext(Dispatchers.IO) {
         try {
-            fileLogger.w("MainActivity", "🔧🔧 응급 복구 시작: $reason 🔧🔧")
+            fileLogger.w("MainActivity", " 긴급 UI 블로킹 해제: $reason")
 
-            // ✅ 1. UI 프레임 먼저 안전하게 클리어
-            launch(Dispatchers.Main) {
+            //  1단계: UI 스레드 즉시 해제
+            launch(Dispatchers.Main.immediate) {
                 try {
-                    // HomeFragment에 안전한 클리어 신호 전송
-                    // TODO: HomeViewModel을 통해 안전한 UI 클리어 요청
-                    fileLogger.w("MainActivity", "UI 프레임 안전 클리어 요청")
+                    // HomeFragment의 현재 프레임 강제 해제
+                    Log.w("MainActivity", "UI 프레임 강제 클리어")
                 } catch (e: Exception) {
-                    fileLogger.e("MainActivity", "UI 프레임 클리어 실패: ${e.message}", e)
+                    Log.e("MainActivity", "UI 클리어 실패: ${e.message}")
                 }
             }
+            delay(100) // 매우 짧은 대기
 
-            delay(500) // UI 정리 완료 대기
-
-            // ✅ 2. BitmapPool 정리 (ThreadPoolExecutor 종료 방지)
+            //  2단계: BitmapPool 적극적 정리
             try {
-                bitmapPoolManager.requestPoolCleanup() // 응급 리셋 대신 정리만
-                delay(300)
+                bitmapPoolManager.advancedTaggedBitmapPool.forceCleanupStaleReferences()
+                delay(200)
             } catch (e: Exception) {
-                fileLogger.e("MainActivity", "BitmapPool 정리 실패: ${e.message}", e)
-                // ThreadPoolExecutor 재생성 시도
-                try {
-                    bitmapPoolManager.performEmergencyReset()
-                } catch (resetError: Exception) {
-                    fileLogger.e("MainActivity", "응급 리셋도 실패: ${resetError.message}", resetError)
-                }
+                Log.e("MainActivity", "풀 정리 실패: ${e.message}")
             }
 
-            // ✅ 3. 강제 GC (마지막에)
+            //  3단계: 메모리 정리 (마지막)
             System.gc()
-            delay(200)
+            delay(100)
 
-            fileLogger.w("MainActivity", "✅✅ 응급 복구 완료: $reason ✅✅")
+            fileLogger.w("MainActivity", " 긴급 UI 블로킹 해제 완료")
 
         } catch (e: Exception) {
-            fileLogger.e("MainActivity", "응급 복구 실패: ${e.message}", e)
+            Log.e("MainActivity", "긴급 복구 실패: ${e.message}", e)
         }
     }
 

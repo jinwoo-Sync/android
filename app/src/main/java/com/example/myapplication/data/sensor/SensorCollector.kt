@@ -1110,33 +1110,35 @@ class SensorCollector(
 
         frameProcessingStats.incrementAndGet()
 
-        // ✅ ManagedBitmap 유효성 재검증
+        //  ManagedBitmap 유효성 재검증
         if (!managedBitmap.isValid() || managedBitmap.bitmap.isRecycled) {
-            Log.w(TAG, "❌ 무효한 ManagedBitmap 감지 - 프레임 스킵: frameId=$frameId")
+            Log.w(TAG, " 무효한 ManagedBitmap 감지 - 프레임 스킵: frameId=$frameId")
             managedBitmap.release() // 즉시 해제
             coroutineScope.launch(Dispatchers.Main) { callback(null) }
             return
         }
 
+        //  LoggerManager 처리는 백그라운드에서 (기존 coroutineScope 사용)
         if (::dataSynchronizer.isInitialized) {
-            try {
-                val sensorData = SensorData(
-                    value = "TaggedFrame: $frameId",
-                    bitmap = managedBitmap.bitmap,
-                    managedBitmap = managedBitmap,
-                    timestamp = systemTime,
-                    monoTimestamp = System.nanoTime(),
-                    frameId = frameId
-                )
-                LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ LoggerManager 처리 실패: ${e.message}", e)
+            coroutineScope.launch(Dispatchers.IO) {
+                try {
+                    val sensorData = SensorData(
+                        value = "TaggedFrame: $frameId",
+                        bitmap = managedBitmap.bitmap,
+                        managedBitmap = managedBitmap,
+                        timestamp = systemTime,
+                        monoTimestamp = System.nanoTime(),
+                        frameId = frameId
+                    )
+                    LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+                } catch (e: Exception) {
+                    Log.e(TAG, " 백그라운드 LoggerManager 처리 실패: ${e.message}", e)
+                }
             }
         }
 
-        // UI로 전달 - 추가 검증
-        //coroutineScope.launch(Dispatchers.Main.immediate) { // immediate 사용
-        coroutineScope.launch(Dispatchers.Main) { // immediate 사용
+        // UI로 즉시 전달 (블로킹 최소화)
+        coroutineScope.launch(Dispatchers.Main) {
             try {
                 if (managedBitmap.isValid() && !managedBitmap.bitmap.isRecycled) {
                     callback(
@@ -1149,14 +1151,14 @@ class SensorCollector(
                             frameId = frameId
                         )
                     )
-                    Log.d(TAG, "✅ Frame delivered: frameId=$frameId")
+                    Log.d(TAG, " Frame delivered: frameId=$frameId")
                 } else {
                     Log.w(TAG, "⚠️ UI 전달 시 비트맵 무효: frameId=$frameId")
                     managedBitmap.release() // UI 전달 실패 시 해제
                     callback(null)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Frame delivery error: ${e.message}", e)
+                Log.e(TAG, " Frame delivery error: ${e.message}", e)
                 managedBitmap.release() // 예외 시 해제
                 callback(null)
             }
@@ -1165,9 +1167,9 @@ class SensorCollector(
         handleSelectiveDetection(managedBitmap, frameId)
 
         if (frameCount % 90 == 0) {
-            Log.i(TAG, "📊 ${taggedBitmapPool.getStatus()}")
-            Log.i(TAG, "📊 ${highSpeedProcessor.getStatus()}")
-            Log.i(TAG, "🎯 딥러닝 전략: ${currentDetectionStrategy}")
+            Log.i(TAG, " ${taggedBitmapPool.getStatus()}")
+            Log.i(TAG, " ${highSpeedProcessor.getStatus()}")
+            Log.i(TAG, " 딥러닝 전략: ${currentDetectionStrategy}")
         }
     }
 
@@ -1193,10 +1195,10 @@ class SensorCollector(
                                 val actualInferenceTime = inferenceEndTime - inferenceStartTime
                                 updateLastInferenceTime(actualInferenceTime)
 
-                                Log.d(TAG, "🔍 Detection 완료: frameId=$frameId, 추론시간=${actualInferenceTime}ms")
+                                Log.d(TAG, " Detection 완료: frameId=$frameId, 추론시간=${actualInferenceTime}ms")
                             }
                             } catch (e: Exception) {
-                                Log.e(TAG, "❌ Detection 오류: ${e.message}", e)
+                                Log.e(TAG, " Detection 오류: ${e.message}", e)
                             } finally {
                                 isDetecting.set(false)
                             }
@@ -1208,16 +1210,16 @@ class SensorCollector(
 
     fun forceResetDetectionState() {
         try {
-            Log.w(TAG, "🔧 Detection 상태 강제 복구 시작")
+            Log.w(TAG, " Detection 상태 강제 복구 시작")
             isDetecting.set(false)
             if (detectorExecutor.isShutdown || detectorExecutor.isTerminated) {
                 detectorExecutor = Executors.newSingleThreadExecutor()
                 initializeDetector()
             }
             inferenceFrameSkipCount = 0
-            Log.w(TAG, "✅ Detection 상태 강제 복구 완료")
+            Log.w(TAG, " Detection 상태 강제 복구 완료")
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Detection 상태 복구 실패: ${e.message}", e)
+            Log.e(TAG, " Detection 상태 복구 실패: ${e.message}", e)
         }
     }
 

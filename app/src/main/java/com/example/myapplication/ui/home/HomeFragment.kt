@@ -29,9 +29,11 @@ import com.example.myapplication.utils.HealthLevel
 import com.example.myapplication.utils.ManagedBitmap
 import com.example.myapplication.utils.PoolHealthStatus
 import com.example.myapplication.utils.ResourceMonitor
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.DecimalFormat
 
 /**
@@ -348,55 +350,53 @@ class HomeFragment : Fragment() {
     private fun setupCameraFrameObserver() {
         viewModel.cameraFrame.observe(viewLifecycleOwner) { sensorData ->
             try {
+                //  즉시 이전 프레임 해제 (UI 스레드 블로킹 방지)
+                currentManagedBitmap?.release()
+                currentManagedBitmap = null
+
                 if (sensorData?.managedBitmap?.isValid() == true) {
-                    // ✅ 이전 프레임 먼저 해제
-                    currentManagedBitmap?.release()
-                    currentManagedBitmap = null
+                    //  비동기 UI 복사 (메인 스레드 블로킹 방지)
+                    lifecycleScope.launch(Dispatchers.Default) {
+                        val safeCopy = sensorData.managedBitmap!!.createSafeCopyForUI()
 
-                    // ✅ 안전한 UI 복사본 생성
-                    val safeBitmapCopy = sensorData.managedBitmap!!.createSafeCopyForUI()
+                        // 원본 즉시 해제 (핵심!)
+                        sensorData.managedBitmap!!.release()
 
-                    if (safeBitmapCopy != null && !safeBitmapCopy.isRecycled) {
-                        // UI 업데이트
-                        binding.imageView.setImageBitmap(safeBitmapCopy)
-
-                        successfulFrameCount++
-                        frameSkipCount = 0
-
-                        Log.d("HomeFragment", "✅ 안전한 UI 업데이트: frameId=${sensorData.frameId}")
-                    } else {
-                        handleUIUpdateFailure()
+                        // UI 업데이트는 짧게
+                        withContext(Dispatchers.Main) {
+                            if (safeCopy?.isRecycled == false) {
+                                binding.imageView.setImageBitmap(safeCopy)
+                                successfulFrameCount++
+                            }
+                        }
                     }
-
-                    // ✅ 원본 ManagedBitmap 즉시 해제 (핵심!)
-                    sensorData.managedBitmap!!.release()
-
                 } else {
+                    // 실패한 ManagedBitmap도 즉시 해제
+                    sensorData?.managedBitmap?.release()
                     handleUIUpdateFailure()
                 }
             } catch (e: Exception) {
-                Log.e("HomeFragment", "❌ 프레임 Observer 처리 오류: ${e.message}", e)
-                // 예외 발생 시에도 반드시 해제
-                sensorData?.managedBitmap?.release()
+                Log.e("HomeFragment", " 프레임 Observer 처리 오류: ${e.message}", e)
+                sensorData?.managedBitmap?.release() // 예외 시에도 반드시 해제
             }
         }
     }
 
     private fun setupSensorObservers() {
-        // 🎯 GPS 데이터 Observer 강화
+        //  GPS 데이터 Observer 강화
         viewModel.gpsData.observe(viewLifecycleOwner) { data ->
-            Log.d("HomeFragment", "🎯 GPS Observer 호출: $data")
+            Log.d("HomeFragment", " GPS Observer 호출: $data")
             try {
                 binding.gpsLogText.text = data
-                Log.d("HomeFragment", "✅ GPS UI 텍스트 업데이트 완료")
+                Log.d("HomeFragment", " GPS UI 텍스트 업데이트 완료")
             } catch (e: Exception) {
-                Log.e("HomeFragment", "❌ GPS UI 업데이트 실패: ${e.message}", e)
+                Log.e("HomeFragment", " GPS UI 업데이트 실패: ${e.message}", e)
             }
         }
 
-        // 🎯 GNSS 데이터 Observer 강화
+        //  GNSS 데이터 Observer 강화
         viewModel.gnssData.observe(viewLifecycleOwner) { data ->
-            Log.d("HomeFragment", "🎯 GNSS Observer 호출: $data")
+            Log.d("HomeFragment", " GNSS Observer 호출: $data")
             try {
                 val displayText = if (data == "GNSS: 대기 중") {
                     "GNSS 데이터가 수신되지 않습니다."
@@ -404,26 +404,26 @@ class HomeFragment : Fragment() {
                     data
                 }
                 binding.gnssLogText.text = displayText
-                Log.d("HomeFragment", "✅ GNSS UI 텍스트 업데이트 완료: $displayText")
+                Log.d("HomeFragment", " GNSS UI 텍스트 업데이트 완료: $displayText")
             } catch (e: Exception) {
-                Log.e("HomeFragment", "❌ GNSS UI 업데이트 실패: ${e.message}", e)
+                Log.e("HomeFragment", " GNSS UI 업데이트 실패: ${e.message}", e)
             }
         }
 
-        // 🎯 IMU 데이터 Observer 강화
+        //  IMU 데이터 Observer 강화
         viewModel.imuData.observe(viewLifecycleOwner) { data ->
-            Log.d("HomeFragment", "🎯 IMU Observer 호출: $data")
+            Log.d("HomeFragment", " IMU Observer 호출: $data")
             try {
                 binding.imuLogText.text = data
-                Log.d("HomeFragment", "✅ IMU UI 텍스트 업데이트 완료")
+                Log.d("HomeFragment", " IMU UI 텍스트 업데이트 완료")
             } catch (e: Exception) {
-                Log.e("HomeFragment", "❌ IMU UI 업데이트 실패: ${e.message}", e)
+                Log.e("HomeFragment", " IMU UI 업데이트 실패: ${e.message}", e)
             }
         }
     }
 
     private fun setupStatusObservers() {
-        // ✅ 전역 Advanced Tagged Pool 상태 표시
+        //  전역 Advanced Tagged Pool 상태 표시
         viewModel.poolStatus.observe(viewLifecycleOwner) { poolStatus ->
             binding.poolStatusText.text = poolStatus
         }
