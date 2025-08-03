@@ -43,13 +43,13 @@ private data class IndexedBitmap(
 )
 
 /**
-* CircularQueue와 Tagged 소유권 시스템, 그래픽 객체 풀을 결합한 고성능 비트맵 풀.
-*
-* @param poolSize 풀이 관리할 총 비트맵 개수
-* @param width, height 생성될 비트맵의 크기
-* @param autoCleanupIntervalMs 자동 정리 스레드의 실행 간격(ms)
-* @param staleTimeoutMs 비트맵이 반납되지 않고 버텨주는 최대 시간(ms). 이 시간이 지나면 강제 회수.
-*/
+ * CircularQueue와 Tagged 소유권 시스템, 그래픽 객체 풀을 결합한 고성능 비트맵 풀.
+ *
+ * @param poolSize 풀이 관리할 총 비트맵 개수
+ * @param width, height 생성될 비트맵의 크기
+ * @param autoCleanupIntervalMs 자동 정리 스레드의 실행 간격(ms)
+ * @param staleTimeoutMs 비트맵이 반납되지 않고 버텨주는 최대 시간(ms). 이 시간이 지나면 강제 회수.
+ */
 class AdvancedTaggedBitmapPool(
     private val poolSize: Int = 50,
     private val width: Int = 840,
@@ -120,6 +120,76 @@ class AdvancedTaggedBitmapPool(
         }
 
         Log.d(TAG, " 원형큐 기반 풀 초기화 완료: $successCount/$poolSize")
+    }
+
+    /**
+     * UI 전용: 가장 최신 ManagedBitmap만 가져오기 (중간 프레임 스킵)
+     */
+    fun acquireLatestForUI(tag: String): ManagedBitmap? = poolLock.read {
+        if (isShutdown.get()) {
+            Log.w(TAG, "풀이 종료된 상태에서 acquireLatest 시도")
+            return null
+        }
+
+        // 가장 최근 비트맵만 가져오기 (나머지는 스킵)
+        var latestBitmap = bitmapPool.removeLast()
+
+        // 중간 프레임들은 모두 스킵하고 풀에 다시 반납
+        while (bitmapPool.isNotEmpty()) {
+            val skipFrame = bitmapPool.removeLast()
+            if (skipFrame != null) {
+                bitmapPool.push(skipFrame) // 즉시 재사용을 위해 앞쪽에 추가
+            }
+        }
+
+        if (latestBitmap == null) {
+            Log.w(TAG, " UI용 최신 프레임 없음 - 응급 정리 시도")
+            performEmergencyStaleCleanup()
+            latestBitmap = bitmapPool.removeLast()
+
+            if (latestBitmap == null) {
+                Log.e(TAG, " 응급 정리 후에도 최신 프레임 없음")
+                return null
+            }
+        }
+
+        // 비트맵 유효성 검사 및 ManagedBitmap 생성 (기존과 동일)
+        if (latestBitmap.bitmap.isRecycled) {
+            Log.w(TAG, "손상된 최신 비트맵 감지 - 재생성: idx=${latestBitmap.index}")
+            try {
+                val newBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                latestBitmap = IndexedBitmap(newBitmap, latestBitmap.index)
+                recycleCounter.incrementAndGet()
+            } catch (e: OutOfMemoryError) {
+                Log.e(TAG, "최신 비트맵 재생성 실패 (OOM)", e)
+                bitmapPool.push(latestBitmap)
+                return null
+            }
+        }
+
+        val managedBitmap = ManagedBitmap(latestBitmap.bitmap, tag, this, latestBitmap.index)
+        val tagInfo = TagInfo(tag, managedBitmap, threadName = Thread.currentThread().name)
+        activeTags[latestBitmap.index] = tagInfo
+
+        acquisitionCounter.incrementAndGet()
+
+        Log.d(TAG, " [ACQUIRE_LATEST] UI용 최신 프레임: tag=$tag, idx=${latestBitmap.index}")
+
+        return managedBitmap
+    }
+
+    /**
+     *  현재 풀에 있는 모든 중간 프레임 스킵 (UI 성능 최적화)
+     */
+    fun skipIntermediateFrames(): Int {
+        return poolLock.write {
+            val skippedCount = bitmapPool.size() - 1 // 최신 1개만 남기고 나머지 카운트
+
+            // 최신 1개만 남기고 나머지는 그대로 풀에 유지 (재사용을 위해)
+            Log.d(TAG, " 중간 프레임 스킵: ${skippedCount}개 (최신 1개만 유지)")
+
+            skippedCount.coerceAtLeast(0)
+        }
     }
 
     fun acquire(tag: String): ManagedBitmap? = poolLock.read {
@@ -531,7 +601,7 @@ class ManagedBitmap internal constructor(
     }
 
     fun updateLastAccess() {
-        // 현재 구조에 맞는 논블로킹 업데이트
+        //  현재 구조에 맞는 논블로킹 업데이트
         accessTimeUpdateExecutor.execute {
             try {
                 pool.activeTags[poolIndex]?.lastAccessTime?.set(System.currentTimeMillis())
@@ -652,7 +722,101 @@ class HighSpeedZeroCopyProcessor(
         return processHighQualityZeroCopy(imageBytes, rotationDegrees, purpose)
     }
 
-    // 목적별 비트맵 획득 (간단하게)
+    /**
+     *  UI 전용: 최신 프레임만 처리 (Surface 병목 우회)
+     */
+    fun processLatestForUI(
+        imageBytes: ByteArray,
+        rotationDegrees: Int
+    ): ManagedBitmap? {
+        val uiTag = "UI_LATEST_${System.currentTimeMillis()}"
+
+        //  중간 프레임들 모두 스킵
+        val skippedCount = bitmapPool.skipIntermediateFrames()
+        if (skippedCount > 0) {
+            Log.d(TAG, " UI 최적화: ${skippedCount}개 중간 프레임 스킵")
+        }
+
+        //  최신 비트맵만 획득
+        val managedBitmap = bitmapPool.acquireLatestForUI(uiTag)
+        if (managedBitmap == null) {
+            Log.w(TAG, " UI용 최신 비트맵 획득 실패")
+            return null
+        }
+
+        // 기존 고속 처리 로직과 동일하게 처리
+        return processWithExistingLogic(managedBitmap, imageBytes, rotationDegrees, uiTag)
+    }
+
+    private fun processWithExistingLogic(
+        managedBitmap: ManagedBitmap,
+        imageBytes: ByteArray,
+        rotationDegrees: Int,
+        tag: String
+    ): ManagedBitmap? {
+        // 기존 processHighQualityZeroCopy 로직과 동일
+        val bitmap = managedBitmap.bitmap
+
+        if (!isValidBitmap(bitmap)) {
+            managedBitmap.release()
+            return null
+        }
+
+        val canvas = bitmapPool.getReusableCanvas()
+        val paint = bitmapPool.getReusablePaint()
+        val matrix = bitmapPool.getReusableMatrix()
+
+        try {
+            if (!safeSetCanvasBitmap(canvas, bitmap)) {
+                managedBitmap.release()
+                return null
+            }
+
+            val sourceBitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+            if (sourceBitmap == null || sourceBitmap.isRecycled) {
+                managedBitmap.release()
+                return null
+            }
+
+            // 스케일링 및 회전 처리
+            matrix.reset()
+            val scaleX = targetWidth.toFloat() / sourceBitmap.width
+            val scaleY = targetHeight.toFloat() / sourceBitmap.height
+            matrix.setScale(scaleX, scaleY)
+
+            if (rotationDegrees != 0) {
+                matrix.postRotate(rotationDegrees.toFloat(), targetWidth / 2f, targetHeight / 2f)
+            }
+
+            paint.isFilterBitmap = true
+            paint.isAntiAlias = true
+            paint.isDither = true
+
+            try {
+                canvas.drawBitmap(sourceBitmap, matrix, paint)
+                managedBitmap.updateLastAccess()
+            } catch (e: Exception) {
+                sourceBitmap.recycle()
+                managedBitmap.release()
+                return null
+            }
+
+            sourceBitmap.recycle()
+
+            Log.d(TAG, " UI 최신 프레임 처리 완료: $tag")
+            return managedBitmap
+
+        } catch (e: Exception) {
+            managedBitmap.release()
+            return null
+        } finally {
+            bitmapPool.returnReusableCanvas(canvas)
+            bitmapPool.returnReusablePaint(paint)
+            bitmapPool.returnReusableMatrix(matrix)
+        }
+    }
+
+    // 목적별 비트맵 획득
     fun acquireOptimized(tag: String, purpose: BitmapPurpose): ManagedBitmap? {
         val callerClass = Thread.currentThread().stackTrace[3].className.substringAfterLast('.')
         val callerMethod = Thread.currentThread().stackTrace[3].methodName

@@ -107,28 +107,48 @@ class HomeViewModel(
      */
     private fun updateCameraFrame(sensorData: SensorData?) {
         try {
-            if (sensorData?.managedBitmap?.isValid() == true) {
-                //  UI 스레드 블로킹 방지를 위한 즉시 전달
+            if (sensorData?.bitmap != null &&
+                !sensorData.bitmap.isRecycled &&
+                sensorData.bitmap.width > 0 &&
+                sensorData.bitmap.height > 0) {
+
+                if (sensorData.managedBitmap != null) {
+                    if (!sensorData.managedBitmap!!.isValid()) {
+                        Log.w(TAG, " 무효한 ManagedBitmap 스킵: frameId=${sensorData.frameId}")
+                        sensorData.managedBitmap!!.release()
+                        return
+                    }
+                }
+
+                //  이전 프레임 무시하고 최신것만 즉시 UI에 전달
                 viewModelScope.launch(Dispatchers.Main.immediate) {
                     try {
-                        //  마지막 검증 후 즉시 전달
-                        if (sensorData.managedBitmap!!.isValid()) {
+                        if (!sensorData.bitmap.isRecycled && sensorData.bitmap.width > 0) {
+                            //  항상 최신 데이터로 덮어쓰기 (큐잉 없음)
                             _cameraFrame.value = sensorData
-                            Log.d(TAG, " 즉시 UI 전달: frameId=${sensorData.frameId}")
+                            Log.d(TAG, " 최신 프레임 즉시 UI 전달: frameId=${sensorData.frameId}")
                         } else {
-                            sensorData.managedBitmap!!.release()
+                            sensorData.managedBitmap?.release()
                             _cameraFrame.value = null
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, " UI 전달 실패 - 즉시 해제: ${e.message}")
+                        Log.e(TAG, " 최신 프레임 UI 업데이트 실패: ${e.message}", e)
                         sensorData.managedBitmap?.release()
                         _cameraFrame.value = null
                     }
                 }
+            } else {
+                // null 데이터도 즉시 전달
+                viewModelScope.launch(Dispatchers.Main.immediate) {
+                    _cameraFrame.value = null
+                }
             }
         } catch (e: Exception) {
-            Log.e(TAG, " updateCameraFrame 실패: ${e.message}", e)
+            Log.e(TAG, " 최신 프레임 처리 실패: ${e.message}", e)
             sensorData?.managedBitmap?.release()
+            viewModelScope.launch(Dispatchers.Main.immediate) {
+                _cameraFrame.value = null
+            }
         }
     }
 

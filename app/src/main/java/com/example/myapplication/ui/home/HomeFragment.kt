@@ -23,6 +23,7 @@ import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
 import com.example.myapplication.MainActivity
 import com.example.myapplication.databinding.FragmentHomeBinding
+import com.example.myapplication.model.SensorData
 import com.example.myapplication.utils.AdvancedTaggedBitmapPool
 import com.example.myapplication.utils.BitmapPoolManager
 import com.example.myapplication.utils.HealthLevel
@@ -350,35 +351,76 @@ class HomeFragment : Fragment() {
     private fun setupCameraFrameObserver() {
         viewModel.cameraFrame.observe(viewLifecycleOwner) { sensorData ->
             try {
-                //  즉시 이전 프레임 해제 (UI 스레드 블로킹 방지)
+                //  기존 프레임 즉시 해제 - 최신것만 처리
                 currentManagedBitmap?.release()
                 currentManagedBitmap = null
 
                 if (sensorData?.managedBitmap?.isValid() == true) {
-                    //  비동기 UI 복사 (메인 스레드 블로킹 방지)
-                    lifecycleScope.launch(Dispatchers.Default) {
-                        val safeCopy = sensorData.managedBitmap!!.createSafeCopyForUI()
-
-                        // 원본 즉시 해제 (핵심!)
-                        sensorData.managedBitmap!!.release()
-
-                        // UI 업데이트는 짧게
-                        withContext(Dispatchers.Main) {
-                            if (safeCopy?.isRecycled == false) {
-                                binding.imageView.setImageBitmap(safeCopy)
-                                successfulFrameCount++
-                            }
-                        }
-                    }
+                    //  Surface 병목 상관없이 최신 프레임만 즉시 표시
+                    displayLatestFrameOnly(sensorData)
                 } else {
-                    // 실패한 ManagedBitmap도 즉시 해제
-                    sensorData?.managedBitmap?.release()
                     handleUIUpdateFailure()
                 }
             } catch (e: Exception) {
-                Log.e("HomeFragment", " 프레임 Observer 처리 오류: ${e.message}", e)
-                sensorData?.managedBitmap?.release() // 예외 시에도 반드시 해제
+                Log.e("HomeFragment", " 최신 프레임 Observer 오류: ${e.message}", e)
+                sensorData?.managedBitmap?.release()
             }
+        }
+    }
+
+    private fun displayLatestFrameOnly(sensorData: SensorData) {
+        try {
+            val newManagedBitmap = sensorData.managedBitmap!!
+
+            if (!newManagedBitmap.isValid()) {
+                Log.w("HomeFragment", " 최신 프레임 무효: frameId=${sensorData.frameId}")
+                newManagedBitmap.release()
+                return
+            }
+
+            val bitmap = newManagedBitmap.bitmap
+            if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
+                Log.w("HomeFragment", " 최신 비트맵 상태 불량: frameId=${sensorData.frameId}")
+                newManagedBitmap.release()
+                return
+            }
+
+            Log.d("HomeFragment", " 최신 프레임 즉시 표시: frameId=${sensorData.frameId}")
+
+            // UI 스레드에서 즉시 업데이트 (큐잉 없음)
+            binding.imageView.post {
+                try {
+                    if (newManagedBitmap.isValid() && !bitmap.isRecycled) {
+                        // 안전한 UI 복사본 생성 (최신 프레임만)
+                        val safeCopy = newManagedBitmap.createSafeCopyForUI()
+
+                        if (safeCopy != null && !safeCopy.isRecycled) {
+                            binding.imageView.setImageBitmap(safeCopy)
+                            successfulFrameCount++
+                            frameSkipCount = 0
+                            Log.d("HomeFragment", "✅ 최신 프레임 UI 표시 완료: frameId=${sensorData.frameId}")
+                        } else {
+                            handleUIUpdateFailure()
+                        }
+
+                        // 원본 ManagedBitmap 즉시 해제 (핵심!)
+                        newManagedBitmap.release()
+
+                    } else {
+                        Log.e("HomeFragment", " UI 스레드에서 최신 비트맵 재검증 실패: frameId=${sensorData.frameId}")
+                        newManagedBitmap.release()
+                        handleUIUpdateFailure()
+                    }
+                } catch (e: Exception) {
+                    Log.e("HomeFragment", " 최신 프레임 UI 업데이트 예외: ${e.message}", e)
+                    newManagedBitmap.release()
+                    handleUIUpdateFailure()
+                }
+            }
+
+        } catch (e: Exception) {
+            Log.e("HomeFragment", " 최신 프레임 처리 실패: ${e.message}", e)
+            sensorData.managedBitmap?.release()
         }
     }
 
