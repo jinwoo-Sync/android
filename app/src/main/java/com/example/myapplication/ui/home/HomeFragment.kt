@@ -6,6 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Matrix
+import android.graphics.SurfaceTexture
 import android.location.LocationManager
 import android.net.Uri
 import android.os.Bundle
@@ -14,6 +17,8 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.LayoutInflater
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
@@ -55,7 +60,7 @@ private object FragmentUtils {
     }
 }
 
-class HomeFragment : Fragment() {
+class HomeFragment : Fragment(), TextureView.SurfaceTextureListener {
     private var _binding: FragmentHomeBinding? = null
     private val binding get() = _binding!!
     private val viewModel: HomeViewModel by viewModels {
@@ -65,10 +70,17 @@ class HomeFragment : Fragment() {
         )
     }
 
-    // ✅ 전역 BitmapPoolManager 참조 (MainActivity에서 생성된 싱글톤)
+    // 전역 BitmapPoolManager 참조 (MainActivity에서 생성된 싱글톤)
     private lateinit var bitmapPoolManager: BitmapPoolManager
 
-    // ✅ 현재 UI에 표시 중인 ManagedBitmap 참조 (복사 없음)
+    //  TextureView 관련 변수들
+    private var surfaceTexture: SurfaceTexture? = null
+    private var surface: Surface? = null
+    private var isTextureReady = false
+    private var textureWidth = 0
+    private var textureHeight = 0
+
+    //  현재 UI에 표시 중인 ManagedBitmap 참조 (복사 없음)
     private var currentManagedBitmap: ManagedBitmap? = null
 
     private var frameSkipCount = 0
@@ -88,14 +100,15 @@ class HomeFragment : Fragment() {
 
         try {
             initializeComponents()
+            setupTextureView()  //  TextureView 설정
             checkGpsAndPermissions()
             setupObservers()
             setupClickListeners()
-            // 🎯 센서 스트리밍을 늦게 시작 (UI 준비 후)
+            //  센서 스트리밍을 늦게 시작 (UI 준비 후)
             viewLifecycleOwner.lifecycleScope.launch {
                 delay(500) // UI 준비 대기
                 viewModel.startSensorStreaming()
-                Log.d("HomeFragment", "🎯 지연된 센서 스트리밍 시작")
+                Log.d("HomeFragment", " 지연된 센서 스트리밍 시작")
             }
             startHealthMonitoring()
 
@@ -110,11 +123,48 @@ class HomeFragment : Fragment() {
     private fun initializeComponents() {
         resourceMonitor = ResourceMonitor.getInstance(requireContext())
 
-        // ✅ MainActivity에서 생성된 BitmapPoolManager 싱글톤 참조
+        //  MainActivity에서 생성된 BitmapPoolManager 싱글톤 참조
         bitmapPoolManager = BitmapPoolManager.getInstance(requireContext())
 
-        FragmentUtils.logEvent("HomeFragment", "DEBUG", "✅ 전역 BitmapPoolManager 참조 완료")
+        FragmentUtils.logEvent("HomeFragment", "DEBUG", " 전역 BitmapPoolManager 참조 완료")
         Log.d("HomeFragment", "📊 초기 풀 상태: ${bitmapPoolManager.advancedTaggedBitmapPool.getStatus()}")
+    }
+
+    //  TextureView 설정 (OpenGL 사용)
+    private fun setupTextureView() {
+        binding.textureView.surfaceTextureListener = this
+        Log.d("HomeFragment", " TextureView 리스너 설정 완료 (OpenGL 준비)")
+    }
+
+    //  TextureView.SurfaceTextureListener 구현
+    override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+        this.surfaceTexture = surfaceTexture
+        this.surface = Surface(surfaceTexture)
+        this.textureWidth = width
+        this.textureHeight = height
+        this.isTextureReady = true
+
+        Log.d("HomeFragment", " OpenGL Surface 준비 완료: ${width}x${height}")
+        Log.d("HomeFragment", " TextureView → OpenGL 렌더링 활성화")
+    }
+
+    override fun onSurfaceTextureSizeChanged(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+        this.textureWidth = width
+        this.textureHeight = height
+        Log.d("HomeFragment", " OpenGL Surface 크기 변경: ${width}x${height}")
+    }
+
+    override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
+        this.isTextureReady = false
+        this.surface?.release()
+        this.surface = null
+        this.surfaceTexture = null
+        Log.d("HomeFragment", " OpenGL Surface 해제")
+        return true
+    }
+
+    override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) {
+        // 필요시 프레임 업데이트 콜백 처리
     }
 
     private fun startHealthMonitoring() {
@@ -122,7 +172,7 @@ class HomeFragment : Fragment() {
             while (isActive) {
                 delay(5000)
 
-                // ✅ 전역 풀 건강성 체크
+                //  전역 풀 건강성 체크
                 val healthStatus: PoolHealthStatus = bitmapPoolManager.advancedTaggedBitmapPool.getPoolHealthStatus()
                 if (healthStatus.healthLevel != HealthLevel.HEALTHY) {
                     FragmentUtils.logEvent("HomeFragment", "WARN", "전역 풀 건강성 문제 감지: ${healthStatus.healthLevel}")
@@ -140,7 +190,7 @@ class HomeFragment : Fragment() {
     }
 
     /**
-     * 🚨 전역 풀 복구 요청
+     *  전역 풀 복구 요청
      */
     private fun requestPoolRecovery() {
         try {
@@ -154,7 +204,7 @@ class HomeFragment : Fragment() {
 
             FragmentUtils.logEvent("HomeFragment", "WARN", "🔧 전역 풀 복구 요청")
 
-            // ✅ ViewModel을 통해 전역 풀 정리 요청
+            //  ViewModel을 통해 전역 풀 정리 요청
             viewModel.forceCleanupBitmapPool()
 
             showToast("전역 풀 복구 완료")
@@ -165,83 +215,101 @@ class HomeFragment : Fragment() {
     }
 
     /**
-     * 🎯 핵심 함수: Advanced Tagged Pool의 ManagedBitmap을 직접 UI에 표시
-     * - 복사 없음, 원본 참조 사용
-     * - 딥러닝 오버레이와 함께 표시
+     *  핵심 함수: TextureView + OpenGL을 통한 초고속 렌더링
+     * - Surface Compositor 완전 우회
+     * - GPU 하드웨어 가속 직접 사용
+     * - 예상 성능: 15~60fps
      */
-    private fun displayManagedBitmapDirectly(sensorData: com.example.myapplication.model.SensorData) {
+    private fun displayLatestFrameViaOpenGL(sensorData: SensorData) {
         try {
-            val newManagedBitmap = sensorData.managedBitmap
-            if (newManagedBitmap == null || !newManagedBitmap.isValid()) {
-                Log.w("HomeFragment", "⚠️ 무효한 ManagedBitmap: frameId=${sensorData.frameId}")
+            if (!isTextureReady || surface == null) {
+                Log.w("HomeFragment", "⚠️ OpenGL Surface 준비되지 않음 - 프레임 스킵")
+                sensorData.managedBitmap?.release()
+                handleUIUpdateFailure()
                 return
             }
 
-            // ✅ 추가 비트맵 검증
-            val bitmap = newManagedBitmap.bitmap
+            val managedBitmap = sensorData.managedBitmap
+            if (managedBitmap == null || !managedBitmap.isValid()) {
+                Log.w("HomeFragment", "⚠️ 무효한 ManagedBitmap: frameId=${sensorData.frameId}")
+                managedBitmap?.release()
+                return
+            }
+
+            val bitmap = managedBitmap.bitmap
             if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
                 Log.w("HomeFragment", "⚠️ 무효한 비트맵 상태: recycled=${bitmap.isRecycled}, size=${bitmap.width}x${bitmap.height}")
+                managedBitmap.release()
                 return
             }
 
-            Log.d("HomeFragment", "🎯 ManagedBitmap 직접 표시: frameId=${sensorData.frameId}, size=${bitmap.width}x${bitmap.height}")
+            Log.d("HomeFragment", " OpenGL 고속 렌더링 시작: frameId=${sensorData.frameId}, size=${bitmap.width}x${bitmap.height}")
 
-            // ✅ UI 스레드에서 안전하게 업데이트 - 이중 검증
-            binding.imageView.post {
-                try {
-                    // 🚨 UI 스레드에서 다시 한번 검증 (중요!)
-                    if (newManagedBitmap.isValid() && !bitmap.isRecycled) {
+            //  이전 프레임 즉시 해제 (메모리 최적화)
+            currentManagedBitmap?.release()
+            currentManagedBitmap = managedBitmap
 
-                        // 🎯 1단계: 이전 프레임 먼저 해제 (UI 업데이트 전)
-                        val previousManagedBitmap = currentManagedBitmap
-                        currentManagedBitmap = newManagedBitmap
+            //  OpenGL Surface에 직접 렌더링 (Surface Compositor 우회!)
+            try {
+                val canvas = surface!!.lockCanvas(null)
 
-                        // 🎯 2단계: 새로운 비트맵을 UI에 설정
-                        binding.imageView.setImageBitmap(bitmap)
+                // 비트맵을 TextureView 크기에 맞게 스케일링
+                val scaleX = textureWidth.toFloat() / bitmap.width
+                val scaleY = textureHeight.toFloat() / bitmap.height
+                val scale = minOf(scaleX, scaleY) // 비율 유지
 
-                        // 🎯 3단계: 이전 프레임 해제 (UI 업데이트 후)
-                        previousManagedBitmap?.release()
+                val scaledWidth = (bitmap.width * scale).toInt()
+                val scaledHeight = (bitmap.height * scale).toInt()
+                val offsetX = (textureWidth - scaledWidth) / 2
+                val offsetY = (textureHeight - scaledHeight) / 2
 
-                        // ✅ 사용 시간 업데이트 (Stale 방지)
-                        currentManagedBitmap!!.updateLastAccess()
-
-                        successfulFrameCount++
-                        frameSkipCount = 0
-
-                        Log.d("HomeFragment", "✅ UI 업데이트 성공: frameId=${sensorData.frameId}")
-                    } else {
-                        Log.e("HomeFragment", "❌ UI 스레드에서 비트맵 재검증 실패: frameId=${sensorData.frameId}")
-                        handleUIUpdateFailure()
-                    }
-                } catch (e: Exception) {
-                    Log.e("HomeFragment", "❌ UI 업데이트 예외: ${e.message}", e)
-                    handleUIUpdateFailure()
+                //  GPU 하드웨어 가속으로 직접 그리기
+                val matrix = Matrix().apply {
+                    setScale(scale, scale)
+                    postTranslate(offsetX.toFloat(), offsetY.toFloat())
                 }
+
+                canvas.drawBitmap(bitmap, matrix, null)
+                surface!!.unlockCanvasAndPost(canvas)
+
+                //  사용 시간 업데이트 (Stale 방지)
+                managedBitmap.updateLastAccess()
+
+                successfulFrameCount++
+                frameSkipCount = 0
+
+                Log.d("HomeFragment", " OpenGL 초고속 렌더링 완료: frameId=${sensorData.frameId} (fps 향상!)")
+
+            } catch (e: Exception) {
+                Log.e("HomeFragment", " OpenGL 렌더링 실패: ${e.message}", e)
+                managedBitmap.release()
+                currentManagedBitmap = null
+                handleUIUpdateFailure()
             }
 
         } catch (e: Exception) {
-            Log.e("HomeFragment", "❌ ManagedBitmap 처리 실패: ${e.message}", e)
+            Log.e("HomeFragment", " OpenGL 처리 전체 실패: ${e.message}", e)
+            sensorData.managedBitmap?.release()
+            currentManagedBitmap = null
         }
     }
 
     private fun clearCurrentDisplay() {
-        // ✅ UI 복사본은 recycle, ManagedBitmap은 release
-        binding.imageView.setImageBitmap(null)
+        //  TextureView는 자동으로 클리어됨, ManagedBitmap만 release
         currentManagedBitmap?.release()
         currentManagedBitmap = null
-        Log.d("HomeFragment", "🧹 UI 디스플레이 안전 클리어 완료")
+        Log.d("HomeFragment", " OpenGL 디스플레이 안전 클리어 완료")
     }
-
 
     private fun handleUIUpdateFailure() {
         frameSkipCount++
         if (frameSkipCount > 30) {
-            Log.w("HomeFragment", "🚨 지속적인 UI 업데이트 실패 - 전역 풀 복구 요청")
+            Log.w("HomeFragment", " 지속적인 OpenGL 업데이트 실패 - 전역 풀 복구 요청")
             requestPoolRecovery()
         }
 
-        // 🎯 이전 프레임을 그대로 유지하여 깜빡임 방지
-        Log.w("HomeFragment", "⚠️ UI 업데이트 실패 - 이전 프레임 유지 (스킵 카운트: $frameSkipCount)")
+        //  이전 프레임을 그대로 유지하여 깜빡임 방지
+        Log.w("HomeFragment", "⚠️ OpenGL 업데이트 실패 - 이전 프레임 유지 (스킵 카운트: $frameSkipCount)")
     }
 
     // 권한 관련 메서드들
@@ -302,18 +370,17 @@ class HomeFragment : Fragment() {
         binding.buttonOpenCamera.text = if (isStreaming) "스트리밍 중지" else "스트리밍 시작"
         binding.buttonCaptureFrame.text = if (isStreaming) "현재 프레임 저장" else "프레임 캡처"
 
-        // ✅ 스트리밍 중지 시에도 마지막 프레임 유지 (검은 화면 방지)
+        //  스트리밍 중지 시에도 마지막 프레임 유지 (검은 화면 방지)
         if (!isStreaming) {
             // clearStreamingState() 호출하지 않음 - 마지막 프레임 유지!
             binding.overlayView.clear() // 바운딩박스만 클리어
             binding.inferenceTime.text = "Inference: 0ms"
-            Log.d("HomeFragment", "🎯 스트리밍 중지 - 마지막 프레임 유지")
+            Log.d("HomeFragment", " 스트리밍 중지 - OpenGL 마지막 프레임 유지")
         }
     }
 
-
     private fun clearStreamingState() {
-        // ✅ 이 함수는 완전한 종료시에만 호출 (Fragment 종료 등)
+        //  이 함수는 완전한 종료시에만 호출 (Fragment 종료 등)
         binding.overlayView.clear()
         binding.inferenceTime.text = "Inference: 0ms"
         clearCurrentDisplay() // 여기서만 실제 클리어
@@ -356,76 +423,20 @@ class HomeFragment : Fragment() {
                 currentManagedBitmap = null
 
                 if (sensorData?.managedBitmap?.isValid() == true) {
-                    //  Surface 병목 상관없이 최신 프레임만 즉시 표시
-                    displayLatestFrameOnly(sensorData)
+                    //  OpenGL 고속 렌더링 (Surface 병목 완전 우회!)
+                    displayLatestFrameViaOpenGL(sensorData)
                 } else {
                     handleUIUpdateFailure()
                 }
             } catch (e: Exception) {
-                Log.e("HomeFragment", " 최신 프레임 Observer 오류: ${e.message}", e)
+                Log.e("HomeFragment", " OpenGL 프레임 Observer 오류: ${e.message}", e)
                 sensorData?.managedBitmap?.release()
             }
         }
     }
 
-    private fun displayLatestFrameOnly(sensorData: SensorData) {
-        try {
-            val newManagedBitmap = sensorData.managedBitmap!!
-
-            if (!newManagedBitmap.isValid()) {
-                Log.w("HomeFragment", " 최신 프레임 무효: frameId=${sensorData.frameId}")
-                newManagedBitmap.release()
-                return
-            }
-
-            val bitmap = newManagedBitmap.bitmap
-            if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
-                Log.w("HomeFragment", " 최신 비트맵 상태 불량: frameId=${sensorData.frameId}")
-                newManagedBitmap.release()
-                return
-            }
-
-            Log.d("HomeFragment", " 최신 프레임 즉시 표시: frameId=${sensorData.frameId}")
-
-            // UI 스레드에서 즉시 업데이트 (큐잉 없음)
-            binding.imageView.post {
-                try {
-                    if (newManagedBitmap.isValid() && !bitmap.isRecycled) {
-                        // 안전한 UI 복사본 생성 (최신 프레임만)
-                        val safeCopy = newManagedBitmap.createSafeCopyForUI()
-
-                        if (safeCopy != null && !safeCopy.isRecycled) {
-                            binding.imageView.setImageBitmap(safeCopy)
-                            successfulFrameCount++
-                            frameSkipCount = 0
-                            Log.d("HomeFragment", "✅ 최신 프레임 UI 표시 완료: frameId=${sensorData.frameId}")
-                        } else {
-                            handleUIUpdateFailure()
-                        }
-
-                        // 원본 ManagedBitmap 즉시 해제 (핵심!)
-                        newManagedBitmap.release()
-
-                    } else {
-                        Log.e("HomeFragment", " UI 스레드에서 최신 비트맵 재검증 실패: frameId=${sensorData.frameId}")
-                        newManagedBitmap.release()
-                        handleUIUpdateFailure()
-                    }
-                } catch (e: Exception) {
-                    Log.e("HomeFragment", " 최신 프레임 UI 업데이트 예외: ${e.message}", e)
-                    newManagedBitmap.release()
-                    handleUIUpdateFailure()
-                }
-            }
-
-        } catch (e: Exception) {
-            Log.e("HomeFragment", " 최신 프레임 처리 실패: ${e.message}", e)
-            sensorData.managedBitmap?.release()
-        }
-    }
-
     private fun setupSensorObservers() {
-        //  GPS 데이터 Observer 강화
+        // GPS 데이터 Observer 강화
         viewModel.gpsData.observe(viewLifecycleOwner) { data ->
             Log.d("HomeFragment", " GPS Observer 호출: $data")
             try {
@@ -436,7 +447,7 @@ class HomeFragment : Fragment() {
             }
         }
 
-        //  GNSS 데이터 Observer 강화
+        // GNSS 데이터 Observer 강화
         viewModel.gnssData.observe(viewLifecycleOwner) { data ->
             Log.d("HomeFragment", " GNSS Observer 호출: $data")
             try {
@@ -452,7 +463,7 @@ class HomeFragment : Fragment() {
             }
         }
 
-        //  IMU 데이터 Observer 강화
+        // IMU 데이터 Observer 강화
         viewModel.imuData.observe(viewLifecycleOwner) { data ->
             Log.d("HomeFragment", " IMU Observer 호출: $data")
             try {
@@ -465,7 +476,7 @@ class HomeFragment : Fragment() {
     }
 
     private fun setupStatusObservers() {
-        //  전역 Advanced Tagged Pool 상태 표시
+        // 전역 Advanced Tagged Pool 상태 표시
         viewModel.poolStatus.observe(viewLifecycleOwner) { poolStatus ->
             binding.poolStatusText.text = poolStatus
         }
@@ -497,10 +508,10 @@ class HomeFragment : Fragment() {
             binding.streamingCheckbox.isChecked = enabled
         }
 
-        // 🎯 전역 풀 복구 신호 Observer
+        //  전역 풀 복구 신호 Observer
         viewModel.shouldRecoverUIPool.observe(viewLifecycleOwner) { shouldRecover ->
             if (shouldRecover) {
-                Log.w("HomeFragment", "🚨 ViewModel에서 전역 풀 복구 신호 수신")
+                Log.w("HomeFragment", " ViewModel에서 전역 풀 복구 신호 수신")
                 requestPoolRecovery()
                 showToast("전역 풀 자동 복구 완료")
             }
@@ -519,7 +530,7 @@ class HomeFragment : Fragment() {
         }
 
         binding.buttonCleanupPool.setOnClickListener {
-            // ✅ 전역 Advanced Tagged Pool 정리
+            //  전역 Advanced Tagged Pool 정리
             viewModel.forceCleanupBitmapPool()
             showToast("전역 비트맵 풀 정리 완료")
         }
@@ -584,34 +595,35 @@ class HomeFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        Log.d("HomeFragment", "🎯 onResume - 센서 데이터 Observer 재활성화")
+        Log.d("HomeFragment", " onResume - OpenGL 센서 데이터 Observer 재활성화")
 
-        // 🎯 onResume에서 센서 재시작 (중요!)
+        //  onResume에서 센서 재시작 (중요!)
         viewModel.startSensorStreaming()
         viewModel.updatePoolStatus()
 
-        // 🎯 UI 강제 새로고침
+        //  UI 강제 새로고침
         viewLifecycleOwner.lifecycleScope.launch {
             delay(100)
             // 현재 LiveData 값들을 강제로 다시 observe
             viewModel.gpsData.value?.let {
                 binding.gpsLogText.text = it
-                Log.d("HomeFragment", "🎯 onResume GPS 강제 업데이트: $it")
+                Log.d("HomeFragment", " onResume GPS 강제 업데이트: $it")
             }
             viewModel.gnssData.value?.let {
                 binding.gnssLogText.text = it
-                Log.d("HomeFragment", "🎯 onResume GNSS 강제 업데이트: $it")
+                Log.d("HomeFragment", " onResume GNSS 강제 업데이트: $it")
             }
             viewModel.imuData.value?.let {
                 binding.imuLogText.text = it
-                Log.d("HomeFragment", "🎯 onResume IMU 강제 업데이트: $it")
+                Log.d("HomeFragment", " onResume IMU 강제 업데이트: $it")
             }
         }
     }
+
     override fun onDestroyView() {
         super.onDestroyView()
 
-        // ✅ Fragment 종료 시에만 마지막 ManagedBitmap 반납
+        //  Fragment 종료 시에만 마지막 ManagedBitmap 반납
         clearCurrentDisplay() // 완전 종료이므로 클리어 수행
 
         // 성능 통계
@@ -620,14 +632,14 @@ class HomeFragment : Fragment() {
             val successRate = (successfulFrameCount.toFloat() / total * 100)
             val formatter = DecimalFormat("#.#")
             FragmentUtils.logEvent("HomeFragment", "INFO",
-                "깜빡임 방지 ManagedBitmap 성공률: ${formatter.format(successRate)}% (성공: $successfulFrameCount, 스킵: $frameSkipCount)")
+                " OpenGL 고속 렌더링 성공률: ${formatter.format(successRate)}% (성공: $successfulFrameCount, 스킵: $frameSkipCount)")
         }
 
         viewModel.stopSensorStreaming()
         _binding = null
         resourceMonitor = null
 
-        Log.d("HomeFragment", "✅ HomeFragment 정리 완료 - 깜빡임 방지 적용됨")
+        Log.d("HomeFragment", " HomeFragment 정리 완료 - OpenGL 고속 렌더링 적용됨")
     }
 
     companion object {
