@@ -1650,7 +1650,7 @@ class SensorCollector(
     }
 
     /**
-     * 🧹 풀 정리 요청 처리 (BitmapPoolManager 위임)
+     *  풀 정리 요청 처리 (BitmapPoolManager 위임)
      */
     fun requestPoolCleanup() {
         try {
@@ -1664,7 +1664,7 @@ class SensorCollector(
     }
 
     /**
-     * 📊 풀 상세 상태 조회 (BitmapPoolManager 위임)
+     *  풀 상세 상태 조회 (BitmapPoolManager 위임)
      */
     fun getPoolDetailedStatus(): String {
         return try {

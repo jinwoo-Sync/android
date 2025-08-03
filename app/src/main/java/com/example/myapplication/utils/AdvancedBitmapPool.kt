@@ -638,14 +638,40 @@ class HighSpeedZeroCopyProcessor(
     private val TAG = "HighSpeedZeroCopyProcessor"
     private val processedFrames = AtomicLong(0)
 
+    fun HighSpeedZeroCopyProcessor(
+        imageBytes: ByteArray,
+        rotationDegrees: Int,
+        purpose: BitmapPurpose
+    ): ManagedBitmap? {
+        return processHighQualityZeroCopy(imageBytes, rotationDegrees, purpose)
+    }
+
+    // 목적별 비트맵 획득 (간단하게)
+    fun acquireOptimized(tag: String, purpose: BitmapPurpose): ManagedBitmap? {
+        val callerClass = Thread.currentThread().stackTrace[3].className.substringAfterLast('.')
+        val callerMethod = Thread.currentThread().stackTrace[3].methodName
+        val purposeTag = purpose.name
+        val timestamp = System.currentTimeMillis()
+
+        val finalTag = "${purposeTag}_${callerClass}_${callerMethod}_${timestamp}"
+        return bitmapPool.acquire(finalTag)
+    }
+
     fun processHighQualityZeroCopy(
         imageBytes: ByteArray,
-        rotationDegrees: Int
+        rotationDegrees: Int,
+        purpose: BitmapPurpose = BitmapPurpose.IMAGE_PROCESSING
     ): ManagedBitmap? {
-        val managedBitmap = bitmapPool.acquire("PROCESSING_${System.nanoTime()}")
+        val callerClass = Thread.currentThread().stackTrace[3].className.substringAfterLast('.')
+        val callerMethod = Thread.currentThread().stackTrace[3].methodName
+        val purposeTag = purpose.name
+        val timestamp = System.currentTimeMillis()
+
+        val processingTag = "${purposeTag}_${callerClass}_${callerMethod}_${timestamp}"
+        val managedBitmap = bitmapPool.acquire(processingTag)
 
         if (managedBitmap == null) {
-            Log.w(TAG, "ManagedBitmap 획득 실패")
+            Log.w(TAG, "ManagedBitmap 획득 실패: $processingTag")
             return null
         }
 
@@ -653,7 +679,7 @@ class HighSpeedZeroCopyProcessor(
         val bitmapHash = bitmap.hashCode().toString(16)
 
         if (!isValidBitmap(bitmap)) {
-            Log.e(TAG, "Invalid bitmap detected: @$bitmapHash")
+            Log.e(TAG, "Invalid bitmap detected: @$bitmapHash, tag: $processingTag")
             managedBitmap.release()
             return null
         }
@@ -664,14 +690,14 @@ class HighSpeedZeroCopyProcessor(
 
         try {
             if (!safeSetCanvasBitmap(canvas, bitmap)) {
-                Log.e(TAG, "Canvas.setBitmap() failed: @$bitmapHash")
+                Log.e(TAG, "Canvas.setBitmap() failed: @$bitmapHash, tag: $processingTag")
                 managedBitmap.release()
                 return null
             }
 
             val sourceBitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
             if (sourceBitmap == null || sourceBitmap.isRecycled) {
-                Log.w(TAG, "Bitmap decode failed: @$bitmapHash")
+                Log.w(TAG, "Bitmap decode failed: @$bitmapHash, tag: $processingTag")
                 managedBitmap.release()
                 return null
             }
@@ -697,7 +723,7 @@ class HighSpeedZeroCopyProcessor(
                 canvas.drawBitmap(sourceBitmap, matrix, paint)
                 managedBitmap.updateLastAccess()
             } catch (e: Exception) {
-                Log.e(TAG, "Canvas.drawBitmap failed: @$bitmapHash: ${e.message}", e)
+                Log.e(TAG, "Canvas.drawBitmap failed: @$bitmapHash, tag: $processingTag, ${e.message}", e)
                 sourceBitmap.recycle()
                 managedBitmap.release()
                 return null
@@ -706,17 +732,17 @@ class HighSpeedZeroCopyProcessor(
             sourceBitmap.recycle()
 
             val frameNum = processedFrames.incrementAndGet()
-            Log.d(TAG, "✅ 원형큐 비트맵 처리 완료: @$bitmapHash, frame=$frameNum, tag=${managedBitmap.tag}")
+            Log.d(TAG, "비트맵 처리 완료: @$bitmapHash, frame=$frameNum, tag=$processingTag")
 
             return managedBitmap
 
         } catch (e: OutOfMemoryError) {
-            Log.e(TAG, "OOM during processing @$bitmapHash", e)
+            Log.e(TAG, "OOM during processing @$bitmapHash, tag: $processingTag", e)
             managedBitmap.release()
             System.gc()
             return null
         } catch (e: Exception) {
-            Log.e(TAG, "Unexpected error @$bitmapHash: ${e.message}", e)
+            Log.e(TAG, "Unexpected error @$bitmapHash, tag: $processingTag, ${e.message}", e)
             managedBitmap.release()
             return null
         } finally {
@@ -729,6 +755,23 @@ class HighSpeedZeroCopyProcessor(
             }
         }
     }
+
+    // FPS 드롭 처리 (단순하게)
+    fun handleSurfaceFpsDegrade(currentFps: Double, context: String = "") {
+        if (currentFps <= 5.0) {
+            Log.w(TAG, "치명적 FPS 드롭 감지: ${currentFps}fps, context: $context")
+            bitmapPool.performEmergencyReset()
+        } else if (currentFps <= 10.0) {
+            Log.w(TAG, "FPS 드롭 감지: ${currentFps}fps, context: $context")
+            bitmapPool.forceCleanupStaleReferences()
+        }
+    }
+
+    // 풀 관리 위임
+    fun getPoolHealthStatus(): PoolHealthStatus = bitmapPool.getPoolHealthStatus()
+    fun requestPoolCleanup() = bitmapPool.forceCleanupStaleReferences()
+    fun performEmergencyReset() = bitmapPool.performEmergencyReset()
+    fun performPoolMaintenance() = bitmapPool.forceCleanupStaleReferences()
 
     private fun isValidBitmap(bitmap: Bitmap?): Boolean {
         return try {
@@ -759,10 +802,19 @@ class HighSpeedZeroCopyProcessor(
         }
     }
 
-    fun getStatus(): String = "원형큐Processor: Processed=${processedFrames.get()}"
+    fun getDetailedStatus(): String {
+        return buildString {
+            appendLine("=== HighSpeedZeroCopyProcessor Status ===")
+            appendLine("Processed Frames: ${processedFrames.get()}")
+            appendLine()
+            append(bitmapPool.getDetailedStatus())
+        }
+    }
+
+    fun getStatus(): String = "Processor: Processed=${processedFrames.get()}"
 
     fun cleanup() {
         processedFrames.set(0)
-        Log.d(TAG, "원형큐 프로세서 정리 완료")
+        Log.d(TAG, "프로세서 정리 완료")
     }
 }
