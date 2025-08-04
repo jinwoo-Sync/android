@@ -39,9 +39,9 @@
             app:layout_constraintTop_toBottomOf="@id/text_home"
             app:layout_constraintHeight_percent="0.35">
 
-            <!-- 🎯 ImageView → TextureView로 변경 (OpenGL 사용) -->
-            <TextureView
-                android:id="@+id/textureView"
+            <!--  GLSurfaceView 사용 -->
+            <android.opengl.GLSurfaceView
+                android:id="@+id/glSurfaceView"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:contentDescription="Camera Preview" />
@@ -69,7 +69,7 @@
             app:layout_constraintTop_toBottomOf="@id/camera_preview_container"
             tools:text="Inference: 0ms" />
 
-        <!-- 🎯 비트맵 풀 상태 표시 -->
+        <!--  비트맵 풀 상태 표시 -->
         <TextView
             android:id="@+id/pool_status_text"
             android:layout_width="match_parent"
@@ -159,7 +159,7 @@
 
         </LinearLayout>
 
-        <!-- 🎯 풀 관리 버튼 레이아웃 -->
+        <!-- 풀 관리 버튼 레이아웃 -->
         <LinearLayout
             android:id="@+id/poolControlLayout"
             android:layout_width="match_parent"
