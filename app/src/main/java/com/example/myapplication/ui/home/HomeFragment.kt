@@ -223,47 +223,35 @@ class HomeFragment : Fragment(), TextureView.SurfaceTextureListener {
     private fun displayLatestFrameViaOpenGL(sensorData: SensorData) {
         try {
             if (!isTextureReady || surface == null) {
-                Log.w("HomeFragment", "⚠️ OpenGL Surface 준비되지 않음 - 프레임 스킵")
-                sensorData.managedBitmap?.release()
-                handleUIUpdateFailure()
+                Log.w("HomeFragment", " OpenGL Surface 준비되지 않음 - 즉시 해제")
+                sensorData.managedBitmap?.release()  //  Surface 없으면 즉시 해제
                 return
             }
 
-            val managedBitmap = sensorData.managedBitmap
-            if (managedBitmap == null || !managedBitmap.isValid()) {
-                Log.w("HomeFragment", "⚠️ 무효한 ManagedBitmap: frameId=${sensorData.frameId}")
-                managedBitmap?.release()
-                return
-            }
-
+            val managedBitmap = sensorData.managedBitmap!!
             val bitmap = managedBitmap.bitmap
+
+            //  비트맵 유효성 검사 후 실패시 즉시 해제
             if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
-                Log.w("HomeFragment", "⚠️ 무효한 비트맵 상태: recycled=${bitmap.isRecycled}, size=${bitmap.width}x${bitmap.height}")
+                Log.w("HomeFragment", " 무효한 비트맵 - 즉시 해제")
                 managedBitmap.release()
                 return
             }
 
-            Log.d("HomeFragment", " OpenGL 고속 렌더링 시작: frameId=${sensorData.frameId}, size=${bitmap.width}x${bitmap.height}")
-
-            //  이전 프레임 즉시 해제 (메모리 최적화)
-            currentManagedBitmap?.release()
-            currentManagedBitmap = managedBitmap
-
-            //  OpenGL Surface에 직접 렌더링 (Surface Compositor 우회!)
+            //  OpenGL 렌더링
             try {
                 val canvas = surface!!.lockCanvas(null)
 
-                // 비트맵을 TextureView 크기에 맞게 스케일링
+                // 스케일링 및 렌더링 (기존과 동일)
                 val scaleX = textureWidth.toFloat() / bitmap.width
                 val scaleY = textureHeight.toFloat() / bitmap.height
-                val scale = minOf(scaleX, scaleY) // 비율 유지
+                val scale = minOf(scaleX, scaleY)
 
                 val scaledWidth = (bitmap.width * scale).toInt()
                 val scaledHeight = (bitmap.height * scale).toInt()
                 val offsetX = (textureWidth - scaledWidth) / 2
                 val offsetY = (textureHeight - scaledHeight) / 2
 
-                //  GPU 하드웨어 가속으로 직접 그리기
                 val matrix = Matrix().apply {
                     setScale(scale, scale)
                     postTranslate(offsetX.toFloat(), offsetY.toFloat())
@@ -272,25 +260,26 @@ class HomeFragment : Fragment(), TextureView.SurfaceTextureListener {
                 canvas.drawBitmap(bitmap, matrix, null)
                 surface!!.unlockCanvasAndPost(canvas)
 
-                //  사용 시간 업데이트 (Stale 방지)
+                //  렌더링 성공 - 이전 프레임과 교체
+                currentManagedBitmap?.release()
+                currentManagedBitmap = managedBitmap
                 managedBitmap.updateLastAccess()
 
                 successfulFrameCount++
                 frameSkipCount = 0
 
-                Log.d("HomeFragment", " OpenGL 초고속 렌더링 완료: frameId=${sensorData.frameId} (fps 향상!)")
+                Log.d("HomeFragment", " OpenGL 렌더링 성공: frameId=${sensorData.frameId}")
 
             } catch (e: Exception) {
-                Log.e("HomeFragment", " OpenGL 렌더링 실패: ${e.message}", e)
+                Log.e("HomeFragment", " OpenGL 렌더링 실패 - 즉시 해제: ${e.message}", e)
+                //  렌더링 실패시 새 비트맵 즉시 해제
                 managedBitmap.release()
-                currentManagedBitmap = null
                 handleUIUpdateFailure()
             }
 
         } catch (e: Exception) {
-            Log.e("HomeFragment", " OpenGL 처리 전체 실패: ${e.message}", e)
+            Log.e("HomeFragment", " OpenGL 처리 전체 실패 - 즉시 해제: ${e.message}", e)
             sensorData.managedBitmap?.release()
-            currentManagedBitmap = null
         }
     }
 
@@ -309,7 +298,7 @@ class HomeFragment : Fragment(), TextureView.SurfaceTextureListener {
         }
 
         //  이전 프레임을 그대로 유지하여 깜빡임 방지
-        Log.w("HomeFragment", "⚠️ OpenGL 업데이트 실패 - 이전 프레임 유지 (스킵 카운트: $frameSkipCount)")
+        Log.w("HomeFragment", "️ OpenGL 업데이트 실패 - 이전 프레임 유지 (스킵 카운트: $frameSkipCount)")
     }
 
     // 권한 관련 메서드들
@@ -418,19 +407,24 @@ class HomeFragment : Fragment(), TextureView.SurfaceTextureListener {
     private fun setupCameraFrameObserver() {
         viewModel.cameraFrame.observe(viewLifecycleOwner) { sensorData ->
             try {
-                //  기존 프레임 즉시 해제 - 최신것만 처리
+                //  1단계: 이전 프레임 강제 해제
                 currentManagedBitmap?.release()
                 currentManagedBitmap = null
 
                 if (sensorData?.managedBitmap?.isValid() == true) {
-                    //  OpenGL 고속 렌더링 (Surface 병목 완전 우회!)
+                    //  2단계: OpenGL 렌더링
                     displayLatestFrameViaOpenGL(sensorData)
                 } else {
+                    //  3단계: 실패한 프레임도 즉시 해제
+                    sensorData?.managedBitmap?.release()
                     handleUIUpdateFailure()
                 }
             } catch (e: Exception) {
-                Log.e("HomeFragment", " OpenGL 프레임 Observer 오류: ${e.message}", e)
+                Log.e("HomeFragment", " Observer 예외 - 강제 해제: ${e.message}", e)
+                //  4단계: 예외 발생시에도 반드시 해제
                 sensorData?.managedBitmap?.release()
+                currentManagedBitmap?.release()
+                currentManagedBitmap = null
             }
         }
     }
