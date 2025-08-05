@@ -106,8 +106,8 @@ class MainActivity : AppCompatActivity() {
         checkLocationServiceEnabled()
         setupNavigation()
 
-        fileLogger.i("MainActivity", "✅ 앱 시작 완료 - 세션: $sessionId")
-        Log.d("MainActivity", "✅ BitmapPoolManager와 완전한 모니터링 시스템 초기화 완료")
+        fileLogger.i("MainActivity", " 앱 시작 완료 - 세션: $sessionId")
+        Log.d("MainActivity", " BitmapPoolManager와 완전한 모니터링 시스템 초기화 완료")
     }
 
     /**
@@ -128,7 +128,7 @@ class MainActivity : AppCompatActivity() {
             fileLogger.i("MainActivity", " 로그 저장 위치: ${fileLogger.getLogDirectoryPath()}")
 
         } catch (e: Exception) {
-            Log.e("MainActivity", "❌ 모니터링 시스템 초기화 실패: ${e.message}", e)
+            Log.e("MainActivity", " 모니터링 시스템 초기화 실패: ${e.message}", e)
         }
     }
 
@@ -161,7 +161,7 @@ class MainActivity : AppCompatActivity() {
     private fun startGpuMemoryMonitoring() {
         try {
             gpuMemoryMonitor.startGpuMemoryMonitoring()
-            fileLogger.i("MainActivity", "🔍 GPU 메모리 모니터링 시작")
+            fileLogger.i("MainActivity", " GPU 메모리 모니터링 시작")
         } catch (e: Exception) {
             fileLogger.e("MainActivity", "GPU 메모리 모니터링 시작 실패: ${e.message}", e)
         }
@@ -219,7 +219,7 @@ class MainActivity : AppCompatActivity() {
                         }
                         HealthLevel.HEALTHY -> {
                             if (isPoolCritical.getAndSet(false)) {
-                                fileLogger.i("MainActivity", "✅ BitmapPool 상태 완전 회복: HEALTHY")
+                                fileLogger.i("MainActivity", " BitmapPool 상태 완전 회복: HEALTHY")
                             }
                         }
                     }
@@ -358,7 +358,7 @@ class MainActivity : AppCompatActivity() {
                             fps >= 15.0 -> {
                                 if (isLowFpsDetected.getAndSet(false)) {
                                     val context = if (isMp4Recording) "FPS회복_MP4녹화중" else "FPS회복"
-                                    fileLogger.i("MainActivity", "✅ FPS 회복: ${String.format("%.1f", fps)}fps ($context)")
+                                    fileLogger.i("MainActivity", " FPS 회복: ${String.format("%.1f", fps)}fps ($context)")
                                 }
                             }
                         }
@@ -521,7 +521,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun logDetailedPoolState(level: String, healthStatus: PoolHealthStatus, detailStatus: String) {
         try {
-            fileLogger.w("MainActivity", "🎭 BitmapPool $level 상태 상세:")
+            fileLogger.w("MainActivity", " BitmapPool $level 상태 상세:")
             fileLogger.w("MainActivity", "   Health: ${healthStatus.healthLevel}")
             fileLogger.w("MainActivity", "   Available: ${healthStatus.availableSlots}/${healthStatus.totalSlots}")
             fileLogger.w("MainActivity", "   Active: ${healthStatus.totalReferences}")
@@ -540,7 +540,7 @@ class MainActivity : AppCompatActivity() {
      */
     private suspend fun performPoolEmergencyRecovery(reason: String) = withContext(Dispatchers.IO) {
         try {
-            fileLogger.w("MainActivity", "🔧🔧 강화된 응급 복구 시작: $reason 🔧🔧")
+            fileLogger.w("MainActivity", " 강화된 응급 복구 시작: $reason ")
 
             // 1단계: UI 안전 클리어 (우선순위)
             launch(Dispatchers.Main) {
@@ -578,7 +578,7 @@ class MainActivity : AppCompatActivity() {
             fileLogger.w("MainActivity", "  힙 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
             fileLogger.w("MainActivity", "  가용 힙: ${String.format("%.1f", appMemory.availableHeapMB)} MB")
 
-            fileLogger.w("MainActivity", "✅✅ 강화된 응급 복구 완료: $reason ✅✅")
+            fileLogger.w("MainActivity", "강화된 응급 복구 완료: $reason ")
 
         } catch (e: Exception) {
             fileLogger.e("MainActivity", "응급 복구 실패: ${e.message}", e)
@@ -590,7 +590,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun startPeriodicMonitoring() {
         monitoringScope.launch {
-            fileLogger.i("MainActivity", "📊 정기 모니터링 시작 (30초 간격, BitmapPool 포함)")
+            fileLogger.i("MainActivity", " 정기 모니터링 시작 (30초 간격, BitmapPool 포함)")
 
             while (isActive) {
                 try {
@@ -660,7 +660,7 @@ class MainActivity : AppCompatActivity() {
      */
     private suspend fun performEmergencyRecovery(reason: String) = withContext(Dispatchers.IO) {
         try {
-            fileLogger.w("MainActivity", "🔧🔍 GPU 포함 응급 복구: $reason")
+            fileLogger.w("MainActivity", " GPU 포함 응급 복구: $reason")
 
             // GPU 상태 사전 체크
             val preGpuInfo = gpuMemoryMonitor.getCurrentGpuInfo()
@@ -703,7 +703,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            fileLogger.w("MainActivity", "✅🔍 GPU 포함 응급 복구 완료")
+            fileLogger.w("MainActivity", " GPU 포함 응급 복구 완료")
 
         } catch (e: Exception) {
             Log.e("MainActivity", "GPU 포함 응급 복구 실패: ${e.message}", e)
@@ -719,7 +719,7 @@ class MainActivity : AppCompatActivity() {
             val uptime = currentTime - appStartTime
             val currentFpsValue = currentFps.get()
 
-            fileLogger.i("MainActivity", "📊 상세 시스템 상태 (GPU 포함) - $context")
+            fileLogger.i("MainActivity", " 상세 시스템 상태 (GPU 포함) - $context")
             fileLogger.i("MainActivity", "타임스탬프: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(currentTime))}")
             fileLogger.i("MainActivity", "앱 실행 시간: ${uptime / 1000}초")
             fileLogger.i("MainActivity", "현재 FPS: ${currentFpsValue}fps")
@@ -744,10 +744,10 @@ class MainActivity : AppCompatActivity() {
             fileLogger.i("MainActivity", "Pool Stale: ${poolHealth.staleSlots}")
             fileLogger.i("MainActivity", "Pool Recommendation: ${poolHealth.recommendation}")
 
-            // 🔍 GPU 상세 상태 (새로 추가)
+            //  GPU 상세 상태 (새로 추가)
             val gpuInfo = gpuMemoryMonitor.getCurrentGpuInfo()
             if (gpuInfo != null) {
-                fileLogger.i("MainActivity", "=== 🔍 GPU 상세 상태 🔍 ===")
+                fileLogger.i("MainActivity", "===  GPU 상세 상태  ===")
                 fileLogger.i("MainActivity", "Graphics Memory: ${String.format("%.1f", gpuInfo.graphicsMemoryMB)} MB")
                 fileLogger.i("MainActivity", "GL Memory: ${String.format("%.1f", gpuInfo.glMemoryMB)} MB")
                 fileLogger.i("MainActivity", "Texture Memory: ${String.format("%.1f", gpuInfo.textureMemoryMB)} MB")
@@ -757,20 +757,20 @@ class MainActivity : AppCompatActivity() {
                 fileLogger.i("MainActivity", "Surface Buffers: ${gpuInfo.surfaceBufferCount}")
 
                 if (gpuMemoryMonitor.isGpuMemoryLeakDetected()) {
-                    fileLogger.w("MainActivity", "⚠️ GPU 메모리 누수 의심")
+                    fileLogger.w("MainActivity", " GPU 메모리 누수 의심")
                 }
             }
 
             // 메모리 경고 확인
             val warnings = resourceMonitor.checkAppMemoryWarnings()
             if (warnings.isNotEmpty()) {
-                fileLogger.w("MainActivity", "⚠️ 메모리 경고 감지")
+                fileLogger.w("MainActivity", " 메모리 경고 감지")
                 warnings.forEach { warning ->
                     fileLogger.w("MainActivity", "   $warning")
                 }
             }
 
-            fileLogger.i("MainActivity", "📊 상태 로깅 완료 - $context")
+            fileLogger.i("MainActivity", " 상태 로깅 완료 - $context")
 
         } catch (e: Exception) {
             fileLogger.e("MainActivity", "상세 상태 + GPU 로깅 실패: ${e.message}", e)
@@ -997,7 +997,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // ✅ 1단계: 최종 상태 저장 (BitmapPool 포함)
+        //  1단계: 최종 상태 저장 (BitmapPool 포함)
         runBlocking {
             try {
                 logFinalSystemState()
@@ -1006,7 +1006,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // ✅ 2단계: 모니터링 중지
+        //  2단계: 모니터링 중지
         try {
             fpsMonitor?.let {
                 Choreographer.getInstance().removeFrameCallback(it)
@@ -1020,7 +1020,7 @@ class MainActivity : AppCompatActivity() {
             Log.e("MainActivity", "모니터링 시스템 정리 실패: ${e.message}", e)
         }
 
-        // ✅ 3단계: 기존 정리 작업
+        //  3단계: 기존 정리 작업
         batteryOptimizationDialog?.dismiss()
         locationServiceDialog?.dismiss()
         batteryOptimizationDialog = null
@@ -1035,7 +1035,7 @@ class MainActivity : AppCompatActivity() {
             bitmapPoolManager.shutdown()
         }
 
-        Log.d("MainActivity", "✅ BitmapPool 완전 모니터링과 함께 Activity 정리 완료")
+        Log.d("MainActivity", " BitmapPool 완전 모니터링과 함께 Activity 정리 완료")
     }
 
     fun isCameraPermissionGranted(): Boolean = isCameraPermissionGranted
