@@ -412,8 +412,14 @@ class HomeFragment : Fragment() {
         }
 
         viewModel.boundingBoxes.observe(viewLifecycleOwner) { boundingBoxes ->
-            binding.overlayView.setResults(boundingBoxes)
-            binding.overlayView.invalidate()
+            if (::glRenderer.isInitialized) {
+                glRenderer.updateBoundingBoxes(boundingBoxes)
+                binding.glSurfaceView.requestRender()
+                Log.d("HomeFragment", "바운딩 박스를 GLRenderer로 전달: ${boundingBoxes.size}개")
+            }
+
+            // OverlayView는 클리어 (더 이상 사용하지 않음)
+            binding.overlayView.clear()
         }
 
         viewModel.inferenceTime.observe(viewLifecycleOwner) { time ->
