@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.location.LocationManager
 import android.net.Uri
+import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.provider.Settings
@@ -21,6 +22,7 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
 import com.example.myapplication.MainActivity
+import com.example.myapplication.R
 import com.example.myapplication.databinding.FragmentHomeBinding
 import com.example.myapplication.model.SensorData
 import com.example.myapplication.utils.BitmapPoolManager
@@ -51,7 +53,6 @@ private object FragmentUtils {
 
     fun showToast(context: Context, message: String, duration: Int = Toast.LENGTH_SHORT) {
         Toast.makeText(context, message, duration).show()
-        Toast.makeText(context, message, duration).show()
     }
 }
 
@@ -74,6 +75,7 @@ class HomeFragment : Fragment() {
 
     // 현재 UI에 표시 중인 ManagedBitmap 참조
     private var currentManagedBitmap: ManagedBitmap? = null
+    private var previousManagedBitmap: ManagedBitmap? = null
 
     private var frameSkipCount = 0
     private var successfulFrameCount = 0
@@ -81,6 +83,12 @@ class HomeFragment : Fragment() {
 
     // 복구 관련 변수
     private var lastRecoveryTime = 0L
+
+    // 🎯 GPU 충돌 방지 변수들
+    private val maxConsecutiveDrops = 3
+    private var consecutiveDrops = 0
+    private var lastRenderTime = 0L
+    private val minRenderInterval = 16L // 60fps 기준 최소 간격
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -92,7 +100,7 @@ class HomeFragment : Fragment() {
 
         try {
             initializeComponents()
-            setupGLSurfaceView()  // GLSurfaceView 설정
+            setupGLSurfaceView()  // 🎯 수정된 GLSurfaceView 설정
             checkGpsAndPermissions()
             setupObservers()
             setupClickListeners()
@@ -101,7 +109,7 @@ class HomeFragment : Fragment() {
             viewLifecycleOwner.lifecycleScope.launch {
                 delay(500) // UI 준비 대기
                 viewModel.startSensorStreaming()
-                Log.d("HomeFragment", " 지연된 센서 스트리밍 시작")
+                Log.d("HomeFragment", "✅ 지연된 센서 스트리밍 시작")
             }
             startHealthMonitoring()
 
@@ -117,11 +125,11 @@ class HomeFragment : Fragment() {
         resourceMonitor = ResourceMonitor.getInstance(requireContext())
         bitmapPoolManager = BitmapPoolManager.getInstance(requireContext())
 
-        FragmentUtils.logEvent("HomeFragment", "DEBUG", "✅ 전역 BitmapPoolManager 참조 완료")
+        FragmentUtils.logEvent("HomeFragment", "DEBUG", " 전역 BitmapPoolManager 참조 완료")
         Log.d("HomeFragment", " 초기 풀 상태: ${bitmapPoolManager.advancedTaggedBitmapPool.getStatus()}")
     }
 
-    // GLSurfaceView 설정 (완전한 OpenGL 사용)
+    //  GLSurfaceView 설정 (연속 렌더링 + 충돌 방지)
     private fun setupGLSurfaceView() {
         try {
             // OpenGL ES 2.0 설정
@@ -131,12 +139,13 @@ class HomeFragment : Fragment() {
             glRenderer = CameraGLRenderer()
             binding.glSurfaceView.setRenderer(glRenderer)
 
-            // 렌더 모드 설정 (필요할 때만 렌더링)
-            binding.glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
+            // 해결책 1: 연속 렌더링 모드로 변경 (FPS 0% 구간 방지)
+            binding.glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+           // binding.glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
 
             isGLReady = true
 
-            Log.d("HomeFragment", " GLSurfaceView 설정 완료 - 완전한 OpenGL 사용")
+            Log.d("HomeFragment", " GLSurfaceView 연속 렌더링 모드 설정 완료 - GPU 충돌 방지")
         } catch (e: Exception) {
             Log.e("HomeFragment", "GLSurfaceView 설정 실패: ${e.message}", e)
             isGLReady = false
@@ -158,9 +167,58 @@ class HomeFragment : Fragment() {
                 }
 
                 binding.poolStatusText.text = bitmapPoolManager.advancedTaggedBitmapPool.getStatus()
+
+                // GPU 상태도 주기적으로 체크
+                //checkGpuState("주기_모니터링")
             }
         }
     }
+
+/*    *//**
+     * GPU 상태 확인 (GLSurfaceView 컨텍스트 사용)
+     *//*
+    private fun checkGpuState(context: String) {
+        if (!isOpenGlInitialized || !isGLReady) {
+            Log.w("HomeFragment", "GPU 상태 확인 불가 - OpenGL 미초기화 ($context)")
+            return
+        }
+
+        try {
+            binding.glSurfaceView.queueEvent {
+                try {
+                    val glRenderer = android.opengl.GLES20.glGetString(android.opengl.GLES20.GL_RENDERER) ?: "Unknown"
+                    val glVendor = android.opengl.GLES20.glGetString(android.opengl.GLES20.GL_VENDOR) ?: "Unknown"
+                    val glVersion = android.opengl.GLES20.glGetString(android.opengl.GLES20.GL_VERSION) ?: "Unknown"
+
+                    Log.w("HomeFragment", "GPU 상태 - $context")
+                    Log.w("HomeFragment", "GPU 렌더러: $glRenderer")
+                    Log.w("HomeFragment", "GPU 벤더: $glVendor")
+                    Log.w("HomeFragment", "GPU 버전: $glVersion")
+
+                    // OpenGL 에러 체크
+                    val glError = android.opengl.GLES20.glGetError()
+                    if (glError != android.opengl.GLES20.GL_NO_ERROR) {
+                        Log.e("HomeFragment", "OpenGL 에러 감지: $glError")
+                    }
+
+                    // Native 메모리로 GPU 사용량 추정
+                    val appMemory = resourceMonitor?.getAppMemoryInfo()
+                    if (appMemory != null) {
+                        Log.w("HomeFragment", "Native 메모리 (GPU 포함): ${String.format("%.1f", appMemory.nativeHeapMB)} MB")
+
+                        if (appMemory.nativeHeapMB > 250) {
+                            Log.e("HomeFragment", "Native 메모리 과다 사용 - GPU 메모리 누수 의심")
+                        }
+                    }
+
+                } catch (e: Exception) {
+                    Log.e("HomeFragment", "GPU 상태 로깅 실패: ${e.message}", e)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("HomeFragment", "GPU 상태 확인 예외: ${e.message}", e)
+        }
+    }*/
 
     private fun requestPoolRecovery() {
         try {
@@ -182,10 +240,10 @@ class HomeFragment : Fragment() {
     }
 
     /**
-     *  핵심 함수: GLSurfaceView를 통한 순수 OpenGL 렌더링
-     * - Surface Compositor 완전 우회
-     * - GPU에서 직접 처리
-     * - 10분 후에도 FPS 유지
+     * 해결책 3: GPU 충돌 방지가 적용된 GLSurfaceView 렌더링
+     * - YOLO 실행 중 체크
+     * - 연속 드롭 제한
+     * - 최소 렌더링 간격 보장
      */
     private fun displayLatestFrameViaGLSurfaceView(sensorData: SensorData) {
         try {
@@ -209,31 +267,84 @@ class HomeFragment : Fragment() {
                 return
             }
 
-            Log.d("HomeFragment", " GLSurfaceView 순수 OpenGL 렌더링 시작: frameId=${sensorData.frameId}, size=${bitmap.width}x${bitmap.height}")
+            val currentTime = System.currentTimeMillis()
+            val frameId = sensorData.frameId
+
+            // GPU 충돌 방지 로직 (기존과 동일)
+            val isGpuBusy = viewModel.isDetectionRunning()
+            val tooFastRender = (currentTime - lastRenderTime) < minRenderInterval
+
+            if (isGpuBusy && consecutiveDrops < maxConsecutiveDrops) {
+                Log.w("HomeFragment", "️ GPU 사용 중 - 렌더링 지연: frameId=$frameId, drops=$consecutiveDrops")
+                managedBitmap.release()
+                consecutiveDrops++
+                handleUIUpdateFailure()
+                return
+            }
+
+            if (tooFastRender && consecutiveDrops < maxConsecutiveDrops) {
+                Log.d("HomeFragment", "️ 렌더링 속도 제한: frameId=$frameId")
+                managedBitmap.release()
+                consecutiveDrops++
+                return
+            }
+
+            if (consecutiveDrops >= maxConsecutiveDrops) {
+                Log.w("HomeFragment", " 강제 렌더링 시작: 연속 드롭 ${consecutiveDrops}회, frameId=$frameId")
+            }
+
+            Log.d("HomeFragment", " GLSurfaceView 실시간 렌더링 시작: frameId=$frameId, size=${bitmap.width}x${bitmap.height}")
 
             try {
-                //  이전 프레임 즉시 해제
-                currentManagedBitmap?.release()
+                // GPU 추적 시작 (비동기, 렌더링에 영향 없음)
+                trackUIRenderingStartAsync(frameId)
+
+                // 프레임 교체 로직 수정 - 안전한 프레임 전환
+                // 1. 이전 프레임을 임시 보관 (즉시 해제하지 않음)
+                previousManagedBitmap = currentManagedBitmap
+
+                // 2. 새 프레임을 현재 프레임으로 설정
                 currentManagedBitmap = managedBitmap
 
-                //  OpenGL 렌더러에 비트맵 전달
+                // 3. OpenGL 렌더러에 새 비트맵 전달
                 glRenderer.updateBitmap(bitmap)
 
-                //  GLSurfaceView 렌더링 요청 (GPU에서 직접 처리)
+                // 4. 실시간 렌더링 강제 요청
                 binding.glSurfaceView.requestRender()
 
-                // 사용 시간 업데이트
+                // 5. 새 프레임 사용 시간 업데이트
                 managedBitmap.updateLastAccess()
 
-                successfulFrameCount++
-                frameSkipCount = 0
+                // 6. 이전 프레임을 지연 해제 (렌더링 완료 후)
+                previousManagedBitmap?.let { prevBitmap ->
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        delay(33) // 약 2프레임 대기 (30fps 기준)
+                        try {
+                            prevBitmap.release()
+                            Log.d("HomeFragment", "이전 프레임 지연 해제: ${prevBitmap.tag}")
+                        } catch (e: Exception) {
+                            Log.w("HomeFragment", "이전 프레임 해제 실패: ${e.message}")
+                        }
+                    }
+                }
+                previousManagedBitmap = null
 
-                Log.d("HomeFragment", "✅ GLSurfaceView 순수 OpenGL 렌더링 완료: frameId=${sensorData.frameId} - Surface 우회!")
+                // 성공 통계 업데이트
+                successfulFrameCount++
+                consecutiveDrops = 0 // 성공 시 드롭 카운터 리셋
+                frameSkipCount = 0
+                lastRenderTime = currentTime
+
+                // 🎮 GPU 추적 완료 (비동기, 렌더링에 영향 없음)
+                trackUIRenderingEndAsync(frameId)
+
+                Log.d("HomeFragment", "✅ GLSurfaceView 실시간 렌더링 완료: frameId=$frameId")
 
             } catch (e: Exception) {
                 Log.e("HomeFragment", "❌ GLSurfaceView 렌더링 실패 - 즉시 해제: ${e.message}", e)
                 managedBitmap.release()
                 currentManagedBitmap = null
+                consecutiveDrops++
                 handleUIUpdateFailure()
             }
 
@@ -241,27 +352,68 @@ class HomeFragment : Fragment() {
             Log.e("HomeFragment", "❌ GLSurfaceView 처리 전체 실패 - 즉시 해제: ${e.message}", e)
             sensorData.managedBitmap?.release()
             currentManagedBitmap = null
+            consecutiveDrops++
+        }
+    }
+
+    /**
+     * 🎮 UI 렌더링 GPU 추적 시작 - 완전 비동기 처리
+     */
+    private fun trackUIRenderingStartAsync(frameId: Long) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val mainActivity = requireActivity() as? MainActivity
+                val gpuMonitor = mainActivity?.getGpuMonitor()
+
+                gpuMonitor?.trackUIRenderStart(frameId)
+            } catch (e: Exception) {
+                // 에러가 나도 로그만 남기고 UI에는 영향 없음
+                Log.w("HomeFragment", "GPU 추적 실패 (무시됨): ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 🎮 UI 렌더링 GPU 추적 완료 - 완전 비동기 처리
+     */
+    private fun trackUIRenderingEndAsync(frameId: Long) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val mainActivity = requireActivity() as? MainActivity
+                val gpuMonitor = mainActivity?.getGpuMonitor()
+
+                gpuMonitor?.trackUIRenderEnd(frameId)
+            } catch (e: Exception) {
+                // 에러가 나도 로그만 남기고 UI에는 영향 없음
+                Log.w("HomeFragment", "GPU 추적 완료 실패 (무시됨): ${e.message}")
+            }
         }
     }
 
     private fun clearCurrentDisplay() {
-        // GLSurfaceView 클리어
+        // GLSurfaceView 클리어 (null 비트맵으로 클리어)
         glRenderer.updateBitmap(null)
         binding.glSurfaceView.requestRender()
 
+        //
         currentManagedBitmap?.release()
+        previousManagedBitmap?.release()
+
         currentManagedBitmap = null
-        Log.d("HomeFragment", " GLSurfaceView 디스플레이 안전 클리어 완료")
+        previousManagedBitmap = null
+        consecutiveDrops = 0
+
+        Log.d("HomeFragment", "🗑️ GLSurfaceView 디스플레이 안전 클리어 완료")
     }
 
     private fun handleUIUpdateFailure() {
         frameSkipCount++
         if (frameSkipCount > 30) {
-            Log.w("HomeFragment", " 지속적인 GLSurfaceView 업데이트 실패 - 전역 풀 복구 요청")
+            Log.w("HomeFragment", "⚠️ 지속적인 GLSurfaceView 업데이트 실패 - 전역 풀 복구 요청")
             requestPoolRecovery()
         }
 
-        Log.w("HomeFragment", "️ GLSurfaceView 업데이트 실패 - 이전 프레임 유지 (스킵 카운트: $frameSkipCount)")
+        Log.w("HomeFragment", "⚠️ GLSurfaceView 업데이트 실패 - 이전 프레임 유지 (스킵 카운트: $frameSkipCount)")
     }
 
     // 권한 관련 메서드들 (기존과 동일)
@@ -325,7 +477,7 @@ class HomeFragment : Fragment() {
         if (!isStreaming) {
             binding.overlayView.clear()
             binding.inferenceTime.text = "Inference: 0ms"
-            Log.d("HomeFragment", " 스트리밍 중지 - GLSurfaceView 마지막 프레임 유지")
+            Log.d("HomeFragment", "🎯 스트리밍 중지 - GLSurfaceView 연속 렌더링 유지")
         }
     }
 
@@ -367,19 +519,16 @@ class HomeFragment : Fragment() {
     private fun setupCameraFrameObserver() {
         viewModel.cameraFrame.observe(viewLifecycleOwner) { sensorData ->
             try {
-                //  이전 프레임 강제 해제
-                currentManagedBitmap?.release()
-                currentManagedBitmap = null
 
                 if (sensorData?.managedBitmap?.isValid() == true) {
-                    //  GLSurfaceView 순수 OpenGL 렌더링
+                    //  🎯 GPU 충돌 방지가 적용된 GLSurfaceView 렌더링
                     displayLatestFrameViaGLSurfaceView(sensorData)
                 } else {
                     sensorData?.managedBitmap?.release()
                     handleUIUpdateFailure()
                 }
             } catch (e: Exception) {
-                Log.e("HomeFragment", " GLSurfaceView Observer 오류: ${e.message}", e)
+                Log.e("HomeFragment", "❌ GLSurfaceView Observer 오류: ${e.message}", e)
                 sensorData?.managedBitmap?.release()
                 currentManagedBitmap?.release()
                 currentManagedBitmap = null
@@ -440,7 +589,7 @@ class HomeFragment : Fragment() {
 
         viewModel.shouldRecoverUIPool.observe(viewLifecycleOwner) { shouldRecover ->
             if (shouldRecover) {
-                Log.w("HomeFragment", " ViewModel에서 전역 풀 복구 신호 수신")
+                Log.w("HomeFragment", "⚠️ ViewModel에서 전역 풀 복구 신호 수신")
                 requestPoolRecovery()
                 showToast("전역 풀 자동 복구 완료")
             }
@@ -482,6 +631,42 @@ class HomeFragment : Fragment() {
             handleFrameSkipButtonClick()
         }
     }
+
+
+/*
+     * GPU 모니터링 전용 GLSurfaceView 설정
+
+    private fun setupGpuMonitoringGLSurfaceView() {
+        glSurfaceView = GLSurfaceView(this)
+        glSurfaceView.setEGLContextClientVersion(2) // OpenGL ES 2.0 사용
+        glSurfaceView.setRenderer(object : GLSurfaceView.Renderer {
+            override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+                isOpenGlInitialized = true
+                fileLogger.i("MainActivity", "GPU 모니터링용 OpenGL 컨텍스트 초기화 완료")
+
+                // 초기 GPU 상태 로깅
+                logGpuMemoryState("OpenGL_초기화")
+            }
+
+            override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+                // 필요시 구현
+            }
+
+            override fun onDrawFrame(gl: GL10?) {
+                // GPU 모니터링용이므로 실제 렌더링은 하지 않음
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            }
+        })
+
+        // 보이지 않는 위치에 1x1 크기로 추가 (모니터링 전용)
+        glSurfaceView.layoutParams = ViewGroup.LayoutParams(1, 1)
+        glSurfaceView.visibility = View.GONE
+
+        // 메인 레이아웃에 추가
+        findViewById<ViewGroup>(R.id.container).addView(glSurfaceView)
+    }
+*/
+
 
     private fun handleCameraButtonClick(mainActivity: MainActivity) {
         if (hasRequiredPermissions(mainActivity)) {
@@ -525,7 +710,7 @@ class HomeFragment : Fragment() {
         super.onResume()
         binding.glSurfaceView.onResume()  //  GLSurfaceView Resume
 
-        Log.d("HomeFragment", " onResume - GLSurfaceView 재활성화")
+        Log.d("HomeFragment", "🎯 onResume - GLSurfaceView 연속 렌더링 재활성화")
         viewModel.startSensorStreaming()
         viewModel.updatePoolStatus()
     }
@@ -538,8 +723,18 @@ class HomeFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
 
-        // GLSurfaceView 정리
+        //
         clearCurrentDisplay()
+
+        //
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                currentManagedBitmap?.release()
+                previousManagedBitmap?.release()
+            } catch (e: Exception) {
+                Log.w("HomeFragment", "최종 프레임 해제 실패: ${e.message}")
+            }
+        }
 
         // 성능 통계
         val total = frameSkipCount + successfulFrameCount
@@ -547,14 +742,14 @@ class HomeFragment : Fragment() {
             val successRate = (successfulFrameCount.toFloat() / total * 100)
             val formatter = DecimalFormat("#.#")
             FragmentUtils.logEvent("HomeFragment", "INFO",
-                " GLSurfaceView 순수 OpenGL 렌더링 성공률: ${formatter.format(successRate)}% (성공: $successfulFrameCount, 스킵: $frameSkipCount)")
+                " GLSurfaceView 연속 렌더링 성공률: ${formatter.format(successRate)}% (성공: $successfulFrameCount, 스킵: $frameSkipCount)")
         }
 
         viewModel.stopSensorStreaming()
         _binding = null
         resourceMonitor = null
 
-        Log.d("HomeFragment", "✅ HomeFragment 정리 완료 - GLSurfaceView 순수 OpenGL 적용됨")
+        Log.d("HomeFragment", "✅ HomeFragment 정리 완료 - 프레임 깜빡임 해결")
     }
 
     companion object {

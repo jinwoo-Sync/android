@@ -50,6 +50,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import com.example.myapplication.utils.BitmapPoolManager
+import com.example.myapplication.utils.FileLogger
+import com.example.myapplication.utils.GpuMonitor
 import com.example.myapplication.utils.ManagedBitmap
 import com.google.android.gms.location.LocationRequest
 import java.util.concurrent.atomic.AtomicBoolean
@@ -1153,7 +1155,7 @@ class SensorCollector(
                     )
                     Log.d(TAG, " Frame delivered: frameId=$frameId")
                 } else {
-                    Log.w(TAG, "⚠️ UI 전달 시 비트맵 무효: frameId=$frameId")
+                    Log.w(TAG, " UI 전달 시 비트맵 무효: frameId=$frameId")
                     managedBitmap.release() // UI 전달 실패 시 해제
                     callback(null)
                 }
@@ -1180,31 +1182,117 @@ class SensorCollector(
             inferenceFrameSkipCount = 0
 
             if (currentDetectionStrategy.enableDetection) {
-                    ensureDetectorExecutor()
-                    if (detectorInitialized && isDetecting.compareAndSet(false, true)) {
-                        val inferenceStartTime = System.currentTimeMillis()
+                ensureDetectorExecutor()
+                if (detectorInitialized && isDetecting.compareAndSet(false, true)) {
 
-                        detectorExecutor.submit {
-                            try {
+                    //  해결책 3: GPU 충돌 방지가 적용된 GLSurfaceView 렌더링
+                    detectorExecutor.submit {
+                        try {
+                            //  해결책 2: OpenGL 렌더링 완료까지 대기
+                            Thread.sleep(16) // 1프레임 대기 (60fps 기준)
+
+                            val inferenceStartTime = System.currentTimeMillis()
+
+                            //  YOLO GPU 추적 시작 (비동기)
+                            trackYoloInferenceStartAsync(frameId)
+
+                            //  GPU 상태 추론 전 확인
+                            logGpuStateBeforeInference(frameId)
+
                             val reusableGpuBitmap = copyToGpuInferenceBitmap(managedBitmap.bitmap)
 
-                                if (reusableGpuBitmap != null) {
-                                    detector?.detect(reusableGpuBitmap, frameId)
+                            if (reusableGpuBitmap != null) {
+                                detector?.detect(reusableGpuBitmap, frameId)
 
                                 val inferenceEndTime = System.currentTimeMillis()
                                 val actualInferenceTime = inferenceEndTime - inferenceStartTime
                                 updateLastInferenceTime(actualInferenceTime)
 
-                                Log.d(TAG, " Detection 완료: frameId=$frameId, 추론시간=${actualInferenceTime}ms")
+                                //  YOLO GPU 추적 완료 (비동기)
+                                trackYoloInferenceEndAsync(frameId, actualInferenceTime)
+
+                                //  GPU 상태 추론 후 확인
+                                logGpuStateAfterInference(frameId, actualInferenceTime)
+
+                                Log.d(TAG, " Detection 완료 (GPU 분리): frameId=$frameId, 추론시간=${actualInferenceTime}ms")
                             }
-                            } catch (e: Exception) {
-                                Log.e(TAG, " Detection 오류: ${e.message}", e)
-                            } finally {
-                                isDetecting.set(false)
-                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, " Detection 오류: ${e.message}", e)
+                        } finally {
+                            isDetecting.set(false)
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * YOLO GPU 추적 시작 - 완전 비동기 처리
+     */
+    private fun trackYoloInferenceStartAsync(frameId: Long) {
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val gpuMonitor = GpuMonitor.getInstance(context, FileLogger.getInstance(context))
+                gpuMonitor.trackYoloInferenceStart(frameId)
+            } catch (e: Exception) {
+                Log.w(TAG, "YOLO GPU 추적 시작 실패 (무시됨): ${e.message}")
+            }
+        }
+    }
+
+    /**
+     *  YOLO GPU 추적 완료 - 완전 비동기 처리
+     */
+    private fun trackYoloInferenceEndAsync(frameId: Long, inferenceTimeMs: Long) {
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val gpuMonitor = GpuMonitor.getInstance(context, FileLogger.getInstance(context))
+                gpuMonitor.trackYoloInferenceEnd(frameId, inferenceTimeMs)
+            } catch (e: Exception) {
+                Log.w(TAG, "YOLO GPU 추적 완료 실패 (무시됨): ${e.message}")
+            }
+        }
+    }
+
+    /**
+     *  GPU 상태 추론 전 확인
+     */
+    private fun logGpuStateBeforeInference(frameId: Long) {
+        try {
+            val activeThreadCount = Thread.activeCount()
+            val currentThread = Thread.currentThread()
+
+            Log.d(TAG, " YOLO 추론 시작: frameId=$frameId")
+            Log.d(TAG, "   활성 스레드: $activeThreadCount")
+            Log.d(TAG, "   추론 스레드: ${currentThread.name}")
+            Log.d(TAG, "   GPU 비트맵: ${gpuInferenceBitmap?.let { "${it.width}x${it.height}, recycled=${it.isRecycled}" } ?: "null"}")
+
+        } catch (e: Exception) {
+            Log.w(TAG, "GPU 사전 상태 확인 실패: ${e.message}")
+        }
+    }
+
+    /**
+     * GPU 상태 추론 후 확인
+     */
+    private fun logGpuStateAfterInference(frameId: Long, inferenceTime: Long) {
+        try {
+            val activeDetections = isDetecting.get()
+
+            Log.d(TAG, " YOLO 추론 완료: frameId=$frameId")
+            Log.d(TAG, "   추론 시간: ${inferenceTime}ms")
+            Log.d(TAG, "   Detection 상태: $activeDetections")
+
+            //  추론 시간에 따른 GPU 부하 분석
+            when {
+                inferenceTime > 100 -> Log.w(TAG, " 긴 추론 시간 감지: ${inferenceTime}ms - GPU 경합 가능성")
+                inferenceTime > 200 -> Log.e(TAG, " 매우 긴 추론 시간: ${inferenceTime}ms - 심각한 GPU 경합!")
+                else -> Log.d(TAG, " 정상 추론 시간: ${inferenceTime}ms")
+            }
+
+        } catch (e: Exception) {
+            Log.w(TAG, "GPU 사후 상태 확인 실패: ${e.message}")
         }
     }
 

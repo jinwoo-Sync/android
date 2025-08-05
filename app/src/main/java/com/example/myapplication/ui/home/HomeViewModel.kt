@@ -98,15 +98,30 @@ class HomeViewModel(
     private val isRecoveryInProgress = AtomicBoolean(false)
     private val callbackRegistered = AtomicBoolean(false)
 
+    // 해결책 4: 프레임 드롭 허용 정책 변수들
+    private val maxConsecutiveDrops = 3
+    private var consecutiveDrops = 0
+    private var lastFrameTime = 0L
+
+    // YOLO Detection 상태 추적 (GPU 충돌 방지용)
+    private val _isDetectionRunning = AtomicBoolean(false)
+
     fun setServerTransmissionEnabled(enabled: Boolean) {
         _isServerTransmissionEnabled.postValue(enabled)
     }
 
     /**
-     *  Advanced Tagged Pool에서 온 프레임을 UI로 전달
+     * GPU 충돌 방지: YOLO Detection 실행 상태 확인
+     */
+    fun isDetectionRunning(): Boolean = _isDetectionRunning.get()
+
+    /**
+     * 해결책 4: 프레임 드롭 허용 정책이 적용된 프레임 업데이트
      */
     private fun updateCameraFrame(sensorData: SensorData?) {
         try {
+            val currentTime = System.currentTimeMillis()
+
             if (sensorData?.bitmap != null &&
                 !sensorData.bitmap.isRecycled &&
                 sensorData.bitmap.width > 0 &&
@@ -116,38 +131,67 @@ class HomeViewModel(
                     if (!sensorData.managedBitmap!!.isValid()) {
                         Log.w(TAG, " 무효한 ManagedBitmap 스킵: frameId=${sensorData.frameId}")
                         sensorData.managedBitmap!!.release()
+                        consecutiveDrops++
                         return
                     }
                 }
 
-                //  이전 프레임 무시하고 최신것만 즉시 UI에 전달
+                // 연속 드롭 제한 로직
+                if (consecutiveDrops >= maxConsecutiveDrops) {
+                    Log.w(TAG, " 강제 UI 업데이트: 연속 드롭 ${consecutiveDrops}회, frameId=${sensorData.frameId}")
+                    forceUIUpdate(sensorData)
+                    consecutiveDrops = 0
+                    return
+                }
+
+                //  일반 업데이트 - 항상 최신 데이터로 덮어쓰기 (큐잉 없음)
                 viewModelScope.launch(Dispatchers.Main.immediate) {
                     try {
                         if (!sensorData.bitmap.isRecycled && sensorData.bitmap.width > 0) {
-                            //  항상 최신 데이터로 덮어쓰기 (큐잉 없음)
                             _cameraFrame.value = sensorData
-                            Log.d(TAG, " 최신 프레임 즉시 UI 전달: frameId=${sensorData.frameId}")
+                            consecutiveDrops = 0 // 성공 시 리셋
+                            lastFrameTime = currentTime
+                            Log.d(TAG, " 프레임 UI 전달: frameId=${sensorData.frameId}")
                         } else {
                             sensorData.managedBitmap?.release()
+                            consecutiveDrops++
                             _cameraFrame.value = null
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, " 최신 프레임 UI 업데이트 실패: ${e.message}", e)
+                        Log.e(TAG, " 프레임 UI 업데이트 실패: ${e.message}", e)
                         sensorData.managedBitmap?.release()
+                        consecutiveDrops++
                         _cameraFrame.value = null
                     }
                 }
             } else {
                 // null 데이터도 즉시 전달
+                consecutiveDrops++
                 viewModelScope.launch(Dispatchers.Main.immediate) {
                     _cameraFrame.value = null
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, " 최신 프레임 처리 실패: ${e.message}", e)
+            Log.e(TAG, " 프레임 처리 실패: ${e.message}", e)
             sensorData?.managedBitmap?.release()
+            consecutiveDrops++
             viewModelScope.launch(Dispatchers.Main.immediate) {
                 _cameraFrame.value = null
+            }
+        }
+    }
+
+    /**
+     * 강제 UI 업데이트 (연속 드롭 해결용)
+     */
+    private fun forceUIUpdate(sensorData: SensorData) {
+        viewModelScope.launch(Dispatchers.Main.immediate) {
+            try {
+                _cameraFrame.value = sensorData
+                Log.w(TAG, " 강제 UI 업데이트 완료: frameId=${sensorData.frameId}")
+            } catch (e: Exception) {
+                Log.e(TAG, " 강제 UI 업데이트 실패: ${e.message}", e)
+                sensorData.managedBitmap?.release()
             }
         }
     }
@@ -266,7 +310,7 @@ class HomeViewModel(
 
         lastGnssUpdateTime = 0L
         lastImuUpdateTime = 0L
-        Log.d("HomeViewModel", " 센서 스트리밍 중지 완료")
+        Log.d("HomeViewModel", "✅ 센서 스트리밍 중지 완료")
     }
 
     /**
@@ -284,8 +328,12 @@ class HomeViewModel(
         //  Surface FPS 모니터링 시작
         startAdvancedSurfaceFpsMonitoring()
 
+        //  YOLO Detection 콜백에 상태 추적 추가
         homeRepository.detectionCallback = { boundingBoxes, inferenceTime, frameId ->
             Log.d(TAG, " ViewModel Detection 콜백 수신: frameId=$frameId, boxes=${boundingBoxes.size}, inference=${inferenceTime}ms")
+
+            //  Detection 상태 업데이트 (시작 시 true로 설정됨)
+            _isDetectionRunning.set(false) // 추론 완료
 
             if (boundingBoxes.isNotEmpty()) {
                 Log.d(TAG, " ViewModel에서 처리할 객체들: ${boundingBoxes.map { "${it.clsName}(conf=${it.cnf})" }}")
@@ -350,6 +398,9 @@ class HomeViewModel(
         updateCameraFrame(null)
         _boundingBoxes.postValue(emptyList())
         _inferenceTime.postValue("0ms")
+
+        //  Detection 상태 리셋
+        _isDetectionRunning.set(false)
     }
 
     /**
@@ -432,7 +483,7 @@ class HomeViewModel(
 
     override fun onCleared() {
         super.onCleared()
-        Log.d(TAG, "🧹 ViewModel 정리 시작")
+        Log.d(TAG, " ViewModel 정리 시작")
 
         //  안전한 정리 순서
         stopSurfaceFpsMonitoring()  // 1. FPS 모니터링 먼저 중지
@@ -443,10 +494,16 @@ class HomeViewModel(
         sensorCollector.closeCamera()
         _isStreaming.value = false
 
+        //  Detection 상태 리셋
+        _isDetectionRunning.set(false)
+
         Log.d(TAG, " ViewModel 완전 정리 완료")
     }
 
     fun onNewInference(timeMs: Long) {
+        //  Detection 시작 시 상태 업데이트
+        _isDetectionRunning.set(true)
+
         inferenceTimes.addLast(timeMs)
         if (inferenceTimes.size > 30) inferenceTimes.removeFirst()
 
@@ -523,13 +580,13 @@ class HomeViewModel(
 
                             if (fps < FPS_THRESHOLD) {
                                 consecutiveLowFpsCount++
-                                Log.w(TAG, " FPS 낮음: ${String.format("%.1f", fps)}fps (연속 ${consecutiveLowFpsCount}회)")
+                                Log.w(TAG, "⚠️ FPS 낮음: ${String.format("%.1f", fps)}fps (연속 ${consecutiveLowFpsCount}회)")
 
                                 //  더 빠른 응급 복구 트리거
                                 if (consecutiveLowFpsCount >= LOW_FPS_TRIGGER_COUNT &&
                                     isRecoveryInProgress.compareAndSet(false, true)) {
 
-                                    Log.w(TAG, " FPS 드롭 감지 - 즉시 응급 복구: ${consecutiveLowFpsCount}회")
+                                    Log.w(TAG, "🚨 FPS 드롭 감지 - 즉시 응급 복구: ${consecutiveLowFpsCount}회")
 
                                     viewModelScope.launch(Dispatchers.IO) {
                                         try {
@@ -543,10 +600,10 @@ class HomeViewModel(
                                             launch(Dispatchers.Main) {
                                                 _shouldRecoverUIPool.postValue(false)
                                             }
-                                            Log.d(TAG, " 단계별 응급 복구 완료")
+                                            Log.d(TAG, "✅ 단계별 응급 복구 완료")
 
                                         } catch (e: Exception) {
-                                            Log.e(TAG, " 응급 복구 처리 예외: ${e.message}", e)
+                                            Log.e(TAG, "❌ 응급 복구 처리 예외: ${e.message}", e)
                                             isRecoveryInProgress.set(false)
                                         }
                                     }
@@ -570,7 +627,7 @@ class HomeViewModel(
                         }
 
                     } catch (e: Exception) {
-                        Log.e(TAG, " FPS 모니터링 콜백 오류: ${e.message}", e)
+                        Log.e(TAG, "❌ FPS 모니터링 콜백 오류: ${e.message}", e)
                         // 오류 발생 시 재등록 중단
                         choreographerLock.lock()
                         try {
@@ -585,7 +642,7 @@ class HomeViewModel(
             //  안전한 콜백 등록
             callbackRegistered.set(true)
             Choreographer.getInstance().postFrameCallback(surfaceFpsMonitor!!)
-            Log.d(TAG, " 강화된 FPS 모니터링 시작 (임계값: ${FPS_THRESHOLD}fps)")
+            Log.d(TAG, "✅ 강화된 FPS 모니터링 시작 (임계값: ${FPS_THRESHOLD}fps)")
 
         } finally {
             choreographerLock.unlock()
@@ -596,7 +653,7 @@ class HomeViewModel(
      *  단계별 응급 복구 - 더 체계적인 접근
      */
     private suspend fun performStepByStepRecovery() = withContext(Dispatchers.IO) {
-        Log.w(TAG, " 단계적 응급 복구 시작")
+        Log.w(TAG, "🔧 단계적 응급 복구 시작")
 
         try {
             // 1단계: UI 프레임 클리어 (Main 스레드)
@@ -651,7 +708,7 @@ class HomeViewModel(
             surfaceFpsMonitor?.let {
                 try {
                     Choreographer.getInstance().removeFrameCallback(it)
-                    Log.d(TAG, " FPS 모니터링 콜백 제거")
+                    Log.d(TAG, "✅ FPS 모니터링 콜백 제거")
                 } catch (e: Exception) {
                     Log.w(TAG, "콜백 제거 실패: ${e.message}")
                 }

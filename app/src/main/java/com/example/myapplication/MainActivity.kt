@@ -29,12 +29,20 @@ import android.content.Context
 import android.content.Intent
 import android.location.LocationManager
 import android.net.Uri
+import android.opengl.GLES20
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.os.PowerManager
 import android.view.Choreographer
+import com.example.myapplication.utils.GpuMonitor
 import kotlinx.coroutines.*
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import javax.microedition.khronos.egl.EGL10
+import javax.microedition.khronos.egl.EGLContext
 
 class MainActivity : AppCompatActivity() {
     private val PERMISSION_REQUEST_CODE = 100
@@ -47,6 +55,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var fileLogger: FileLogger
     private lateinit var resourceMonitor: ResourceMonitor
     private val monitoringScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private lateinit var gpuMonitor: GpuMonitor
 
     // FPS 모니터링
     private var fpsMonitor: Choreographer.FrameCallback? = null
@@ -83,6 +92,9 @@ class MainActivity : AppCompatActivity() {
 
         //  1단계: 모니터링 시스템 초기화 (최우선!)
         initializeMonitoringSystem()
+
+        // GPU 모니터링용 GLSurfaceView 초기화
+        initializeGpuMonitoring()
 
         //  2단계: 기존 초기화
         val dataSynchronizer = DataSynchronizer()
@@ -126,24 +138,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun initializeGpuMonitoring() {
+        try {
+            gpuMonitor = GpuMonitor.getInstance(this, fileLogger)
+            gpuMonitor.initialize()
+
+            fileLogger.i("MainActivity", "🎮 GPU 모니터링 통합 완료")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "GPU 모니터링 초기화 실패: ${e.message}", e)
+        }
+    }
+
     /**
      * 완전한 모니터링 시작 (BitmapPool 포함)
      */
     private fun startComprehensiveMonitoring() {
-        // ✅ 1. 30초마다 정기 상태 저장
+        // 1. 30초마다 정기 상태 저장
         startPeriodicMonitoring()
 
-        // ✅ 2. 실시간 FPS 모니터링
+        // 2. 실시간 FPS 모니터링
         startRealTimeFpsMonitoring()
 
-        // ✅ 3. BitmapPool 전용 모니터링 (5초마다)
+        // 3. BitmapPool 전용 모니터링 (5초마다)
         startBitmapPoolMonitoring()
 
-        // ✅ 4. .mp4 녹화 상태 모니터링
+        // 4. .mp4 녹화 상태 모니터링
         startMp4RecordingMonitoring()
 
-        // ✅ 5. 초기 상태 저장
+        // 5. 초기 상태 저장
         logInitialSystemState()
+
+        startPeriodicGpuMonitoring()
     }
 
     /**
@@ -284,6 +309,7 @@ class MainActivity : AppCompatActivity() {
     /**
      *  실시간 FPS 모니터링 (.mp4 녹화 특별 추적 포함)
      */
+    // FPS 모니터링 수정 (GPU 상태 추가)
     private fun startRealTimeFpsMonitoring() {
         lastFpsTime = System.currentTimeMillis()
         frameCount = 0
@@ -294,29 +320,20 @@ class MainActivity : AppCompatActivity() {
                     frameCount++
                     val currentTime = System.currentTimeMillis()
 
-                    // 1초마다 FPS 계산
                     if (currentTime - lastFpsTime >= 1000) {
                         val fps = frameCount * 1000.0 / (currentTime - lastFpsTime)
                         currentFps.set(fps.toLong())
 
-                        // .mp4 녹화 중 FPS 드롭 특별 추적
-                        if (isMp4Recording && fps <= 10.0) {
-                            mp4RecordingFpsDrops++
-                            fileLogger.w("MainActivity", " .mp4 녹화 중 FPS 드롭: ${String.format("%.1f", fps)}fps (총 ${mp4RecordingFpsDrops}회)")
-
-                            // 녹화 중 FPS 드롭 시 BitmapPool 상태 즉시 체크
-                            monitoringScope.launch {
-                                logMp4FpsDropState(fps)
-                            }
-                        }
-
-                        //  일반 위험 상황 감지
+                        // FPS 드롭 시 GPU 상태 로깅
                         when {
                             fps <= 5.0 -> {
                                 val context = if (isMp4Recording) "치명적_FPS_드롭_MP4녹화중" else "치명적_FPS_드롭"
-                                fileLogger.e("MainActivity", " 치명적 FPS 드롭 감지: ${String.format("%.1f", fps)}fps ")
-                                logCriticalSystemState(context + "_${String.format("%.1f", fps)}")
+                                fileLogger.e("MainActivity", " 치명적 FPS 드롭 감지: ${String.format("%.1f", fps)}fps")
 
+                                // 🎮 GPU 상태 긴급 로깅
+                                gpuMonitor.logFpsDropGpuState(fps, context)
+
+                                logCriticalSystemState(context + "_${String.format("%.1f", fps)}")
                                 monitoringScope.launch {
                                     performEmergencyRecovery("치명적 FPS 드롭 - MP4: $isMp4Recording")
                                 }
@@ -324,20 +341,17 @@ class MainActivity : AppCompatActivity() {
                             fps <= 8.0 -> {
                                 if (!isLowFpsDetected.getAndSet(true)) {
                                     val context = if (isMp4Recording) "위험_FPS_드롭_MP4녹화중" else "위험_FPS_드롭"
-                                    fileLogger.w("MainActivity", " 위험 FPS 드롭 감지: ${String.format("%.1f", fps)}fps ")
+                                    fileLogger.w("MainActivity", " 위험 FPS 드롭 감지: ${String.format("%.1f", fps)}fps")
+
+                                    //  GPU 상태 경고 로깅
+                                    gpuMonitor.logFpsDropGpuState(fps, context)
+
                                     logDetailedSystemState(context + "_${String.format("%.1f", fps)}")
 
-                                    // 5초 후 플래그 리셋
                                     monitoringScope.launch {
                                         delay(5000)
                                         isLowFpsDetected.set(false)
                                     }
-                                }
-                            }
-                            fps >= 15.0 -> {
-                                if (isLowFpsDetected.getAndSet(false)) {
-                                    val context = if (isMp4Recording) "FPS회복_MP4녹화중" else "FPS회복"
-                                    fileLogger.i("MainActivity", "✅ FPS 회복: ${String.format("%.1f", fps)}fps ($context)")
                                 }
                             }
                         }
@@ -354,8 +368,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         Choreographer.getInstance().postFrameCallback(fpsMonitor!!)
-        fileLogger.i("MainActivity", " 실시간 FPS 모니터링 시작 (.mp4 녹화 추적 포함)")
+        fileLogger.i("MainActivity", "🎮 FPS + GPU 통합 모니터링 시작")
     }
+
 
     /**
      *  .mp4 녹화 시작 시 상태 로깅
@@ -461,6 +476,9 @@ class MainActivity : AppCompatActivity() {
             fileLogger.w("MainActivity", "   힙 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
             fileLogger.w("MainActivity", "   Native: ${String.format("%.1f", appMemory.nativeHeapMB)} MB")
             fileLogger.w("MainActivity", "   압박 수준: ${appMemory.memoryPressureLevel}")
+
+            // FPS 드롭 시 GPU 상태도 로깅
+            logGpuMemoryState("FPS_드롭_분석")
 
         } catch (e: Exception) {
             fileLogger.e("MainActivity", ".mp4 FPS 드롭 로깅 실패: ${e.message}", e)
@@ -767,6 +785,110 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // GpuMonitor에 접근할 수 있는 public 메서드 추가
+    fun getGpuMonitor(): GpuMonitor? {
+        return if (::gpuMonitor.isInitialized) gpuMonitor else null
+    }
+
+    /**
+     * GPU 상태를 안전하게 로깅합니다.
+     * @param context 로깅 컨텍스트 (로그 식별용)
+     */
+    private suspend fun logGpuMemoryState(context: String) = withContext(Dispatchers.IO) {
+        try {
+            /*if (!isOpenGlInitialized) {
+                fileLogger.w("MainActivity", "GPU 상태 확인 불가 - OpenGL 미초기화 ($context)")
+                return@withContext
+            }*/
+
+            val egl = EGLContext.getEGL() as? EGL10
+            val eglContext = egl?.eglGetCurrentContext()
+            if (eglContext == EGL10.EGL_NO_CONTEXT) {
+                fileLogger.w("MainActivity", "GPU 상태 확인 불가 - OpenGL 컨텍스트 없음 ($context)")
+                return@withContext
+            }
+
+            val isCompleted = AtomicBoolean(false)
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    val glRenderer = GLES20.glGetString(GLES20.GL_RENDERER) ?: "Unknown"
+                    val glVendor = GLES20.glGetString(GLES20.GL_VENDOR) ?: "Unknown"
+                    val glVersion = GLES20.glGetString(GLES20.GL_VERSION) ?: "Unknown"
+
+                    fileLogger.w("MainActivity", "🎮 GPU 상태 - $context")
+                    fileLogger.w("MainActivity", "GPU 렌더러: $glRenderer")
+                    fileLogger.w("MainActivity", "GPU 벤더: $glVendor")
+                    fileLogger.w("MainActivity", "GPU 버전: $glVersion")
+
+                    val extensions = GLES20.glGetString(GLES20.GL_EXTENSIONS) ?: ""
+                    val hasNvxMemoryInfo = extensions.contains("GL_NVX_gpu_memory_info")
+                    fileLogger.w("MainActivity", "NVX 메모리 확장 지원: $hasNvxMemoryInfo")
+
+                    if (hasNvxMemoryInfo) {
+                        val totalMemory = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder()).asIntBuffer()
+                        val currentMemory = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder()).asIntBuffer()
+
+                        GLES20.glGetIntegerv(0x9048, totalMemory) // GL_GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX
+                        var err = GLES20.glGetError()
+                        if (err != GLES20.GL_NO_ERROR) {
+                            fileLogger.e("MainActivity", "glGetIntegerv(총 메모리) 에러: $err")
+                        }
+                        GLES20.glGetIntegerv(0x9049, currentMemory) // GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX
+                        err = GLES20.glGetError()
+                        if (err != GLES20.GL_NO_ERROR) {
+                            fileLogger.e("MainActivity", "glGetIntegerv(가용 메모리) 에러: $err")
+                        }
+
+                        val total = totalMemory.get(0)
+                        val current = currentMemory.get(0)
+                        if (total > 0) fileLogger.w("MainActivity", "GPU 총 메모리: ${total / 1024} MB")
+                        else fileLogger.w("MainActivity", "GPU 총 메모리: 유효하지 않음 (0 KB)")
+                        if (current > 0) fileLogger.w("MainActivity", "GPU 가용 메모리: ${current / 1024} MB")
+                        else fileLogger.w("MainActivity", "GPU 가용 메모리: 유효하지 않음 (0 KB)")
+                    } else {
+                        fileLogger.w("MainActivity", "GPU 메모리 정보 확장 미지원, 대체 정보 로깅")
+                        val appMemory = resourceMonitor.getAppMemoryInfo()
+                        fileLogger.w("MainActivity", "대체: 힙 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
+                        val maxTextureSize = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder()).asIntBuffer()
+                        GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maxTextureSize)
+                        fileLogger.w("MainActivity", "대체: 최대 텍스처 크기: ${maxTextureSize.get(0)}")
+                    }
+
+                    isCompleted.set(true)
+                } catch (e: IllegalStateException) {
+                    fileLogger.e("MainActivity", "OpenGL 컨텍스트 오류: ${e.message}", e)
+                    isCompleted.set(true)
+                } catch (e: Exception) {
+                    fileLogger.e("MainActivity", "GPU 상태 로깅 실패: ${e.message}", e)
+                    isCompleted.set(true)
+                }
+            }
+
+            val startTime = System.currentTimeMillis()
+            while (!isCompleted.get() && System.currentTimeMillis() - startTime < 500) {
+                delay(10)
+            }
+            if (!isCompleted.get()) {
+                fileLogger.w("MainActivity", "GPU 상태 로깅 타임아웃 ($context)")
+            }
+        } catch (e: Exception) {
+            fileLogger.e("MainActivity", "GPU 상태 확인 예외: ${e.message}", e)
+        }
+    }
+
+    /**
+     * GPU 상태 정기 모니터링 (30초 간격)
+     */
+    private fun startPeriodicGpuMonitoring() {
+        monitoringScope.launch {
+            fileLogger.i("MainActivity", " GPU 정기 모니터링 시작 (30초 간격)")
+            while (isActive) {
+                logGpuMemoryState("정기_GPU_모니터링")
+                delay(30_000)
+            }
+        }
+    }
+
     private fun setupNavigation() {
         val navView: BottomNavigationView = binding.navView
         val navController = findNavController(R.id.nav_host_fragment_activity_main)
@@ -979,6 +1101,10 @@ class MainActivity : AppCompatActivity() {
 
         if (isFinishing) {
             bitmapPoolManager.shutdown()
+        }
+
+        if (::gpuMonitor.isInitialized) {
+            gpuMonitor.shutdown()
         }
 
         Log.d("MainActivity", "✅ BitmapPool 완전 모니터링과 함께 Activity 정리 완료")
