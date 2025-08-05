@@ -32,6 +32,7 @@ import android.net.Uri
 import android.provider.Settings
 import android.os.PowerManager
 import android.view.Choreographer
+import com.example.myapplication.utils.GpuMemoryMonitor
 import kotlinx.coroutines.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -78,6 +79,9 @@ class MainActivity : AppCompatActivity() {
 
     private val emergencyShutdownPrevention = AtomicBoolean(false)
 
+    // GPU 모니터링 추가
+    private lateinit var gpuMemoryMonitor: GpuMemoryMonitor
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -116,6 +120,8 @@ class MainActivity : AppCompatActivity() {
 
             fileLogger = FileLogger.getInstance(this)
             resourceMonitor = ResourceMonitor.getInstance(this)
+            gpuMemoryMonitor = GpuMemoryMonitor.getInstance(this)
+
             CrashHandler.setup(this)
 
             fileLogger.i("MainActivity", " 완전한 모니터링 시스템 초기화 완료 - 세션: $sessionId")
@@ -130,20 +136,35 @@ class MainActivity : AppCompatActivity() {
      * 완전한 모니터링 시작 (BitmapPool 포함)
      */
     private fun startComprehensiveMonitoring() {
-        // ✅ 1. 30초마다 정기 상태 저장
+        // 1. 30초마다 정기 상태 저장
         startPeriodicMonitoring()
 
-        // ✅ 2. 실시간 FPS 모니터링
+        // 2. 실시간 FPS 모니터링
         startRealTimeFpsMonitoring()
 
-        // ✅ 3. BitmapPool 전용 모니터링 (5초마다)
+        // 3. BitmapPool 전용 모니터링 (5초마다)
         startBitmapPoolMonitoring()
 
-        // ✅ 4. .mp4 녹화 상태 모니터링
+        // 4. .mp4 녹화 상태 모니터링
         startMp4RecordingMonitoring()
 
-        // ✅ 5. 초기 상태 저장
+        // 5. GPU 메모리 모니터링 시작
+        startGpuMemoryMonitoring()
+
+        // 6. 초기 상태 저장
         logInitialSystemState()
+    }
+
+    /**
+     * GPU 메모리 모니터링 시작
+     */
+    private fun startGpuMemoryMonitoring() {
+        try {
+            gpuMemoryMonitor.startGpuMemoryMonitoring()
+            fileLogger.i("MainActivity", "🔍 GPU 메모리 모니터링 시작")
+        } catch (e: Exception) {
+            fileLogger.e("MainActivity", "GPU 메모리 모니터링 시작 실패: ${e.message}", e)
+        }
     }
 
     /**
@@ -639,20 +660,25 @@ class MainActivity : AppCompatActivity() {
      */
     private suspend fun performEmergencyRecovery(reason: String) = withContext(Dispatchers.IO) {
         try {
-            fileLogger.w("MainActivity", " 긴급 UI 블로킹 해제: $reason")
+            fileLogger.w("MainActivity", "🔧🔍 GPU 포함 응급 복구: $reason")
 
-            //  1단계: UI 스레드 즉시 해제
+            // GPU 상태 사전 체크
+            val preGpuInfo = gpuMemoryMonitor.getCurrentGpuInfo()
+            if (preGpuInfo != null) {
+                fileLogger.w("MainActivity", "복구 전 GPU: Graphics=${String.format("%.1f", preGpuInfo.graphicsMemoryMB)}MB, Pressure=${preGpuInfo.memoryPressureLevel}")
+            }
+
+            // 기존 복구 단계들...
             launch(Dispatchers.Main.immediate) {
                 try {
-                    // HomeFragment의 현재 프레임 강제 해제
                     Log.w("MainActivity", "UI 프레임 강제 클리어")
                 } catch (e: Exception) {
                     Log.e("MainActivity", "UI 클리어 실패: ${e.message}")
                 }
             }
-            delay(100) // 매우 짧은 대기
+            delay(100)
 
-            //  2단계: BitmapPool 적극적 정리
+            // BitmapPool 적극적 정리
             try {
                 bitmapPoolManager.advancedTaggedBitmapPool.forceCleanupStaleReferences()
                 delay(200)
@@ -660,14 +686,27 @@ class MainActivity : AppCompatActivity() {
                 Log.e("MainActivity", "풀 정리 실패: ${e.message}")
             }
 
-            //  3단계: 메모리 정리 (마지막)
+            // 메모리 정리
             System.gc()
             delay(100)
 
-            fileLogger.w("MainActivity", " 긴급 UI 블로킹 해제 완료")
+            // GPU 상태 사후 체크
+            delay(1000) // GPU 상태 안정화 대기
+            val postGpuInfo = gpuMemoryMonitor.getCurrentGpuInfo()
+            if (postGpuInfo != null) {
+                fileLogger.w("MainActivity", "복구 후 GPU: Graphics=${String.format("%.1f", postGpuInfo.graphicsMemoryMB)}MB, Pressure=${postGpuInfo.memoryPressureLevel}")
+
+                // 복구 효과 분석
+                if (preGpuInfo != null) {
+                    val memoryReduction = preGpuInfo.graphicsMemoryMB - postGpuInfo.graphicsMemoryMB
+                    fileLogger.w("MainActivity", "GPU 메모리 복구: ${String.format("%.1f", memoryReduction)}MB 감소")
+                }
+            }
+
+            fileLogger.w("MainActivity", "✅🔍 GPU 포함 응급 복구 완료")
 
         } catch (e: Exception) {
-            Log.e("MainActivity", "긴급 복구 실패: ${e.message}", e)
+            Log.e("MainActivity", "GPU 포함 응급 복구 실패: ${e.message}", e)
         }
     }
 
@@ -680,7 +719,7 @@ class MainActivity : AppCompatActivity() {
             val uptime = currentTime - appStartTime
             val currentFpsValue = currentFps.get()
 
-            fileLogger.i("MainActivity", " 상세 시스템 상태 - $context ")
+            fileLogger.i("MainActivity", "📊 상세 시스템 상태 (GPU 포함) - $context")
             fileLogger.i("MainActivity", "타임스탬프: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(currentTime))}")
             fileLogger.i("MainActivity", "앱 실행 시간: ${uptime / 1000}초")
             fileLogger.i("MainActivity", "현재 FPS: ${currentFpsValue}fps")
@@ -694,7 +733,7 @@ class MainActivity : AppCompatActivity() {
             // ResourceMonitor를 통한 완전한 상태 로깅
             resourceMonitor.logAppResourceStatus("MainActivity", context)
 
-            //  BitmapPool 상세 상태 (가장 중요!)
+            // BitmapPool 상세 상태
             fileLogger.i("MainActivity", "=== BitmapPool 완전한 상태 ===")
             val poolHealth = bitmapPoolManager.advancedTaggedBitmapPool.getPoolHealthStatus()
             val poolDetail = bitmapPoolManager.getPoolDetailedStatus()
@@ -704,23 +743,37 @@ class MainActivity : AppCompatActivity() {
             fileLogger.i("MainActivity", "Pool Active: ${poolHealth.totalReferences}")
             fileLogger.i("MainActivity", "Pool Stale: ${poolHealth.staleSlots}")
             fileLogger.i("MainActivity", "Pool Recommendation: ${poolHealth.recommendation}")
-            fileLogger.i("MainActivity", "Pool Detail:")
-            fileLogger.i("MainActivity", poolDetail)
+
+            // 🔍 GPU 상세 상태 (새로 추가)
+            val gpuInfo = gpuMemoryMonitor.getCurrentGpuInfo()
+            if (gpuInfo != null) {
+                fileLogger.i("MainActivity", "=== 🔍 GPU 상세 상태 🔍 ===")
+                fileLogger.i("MainActivity", "Graphics Memory: ${String.format("%.1f", gpuInfo.graphicsMemoryMB)} MB")
+                fileLogger.i("MainActivity", "GL Memory: ${String.format("%.1f", gpuInfo.glMemoryMB)} MB")
+                fileLogger.i("MainActivity", "Texture Memory: ${String.format("%.1f", gpuInfo.textureMemoryMB)} MB")
+                fileLogger.i("MainActivity", "System Memory Usage: ${String.format("%.1f", gpuInfo.availableSystemMemoryMB)}/${String.format("%.1f", gpuInfo.totalSystemMemoryMB)} MB")
+                fileLogger.i("MainActivity", "Memory Pressure: ${gpuInfo.memoryPressureLevel}")
+                fileLogger.i("MainActivity", "EGL Contexts: ${gpuInfo.eglContextCount}")
+                fileLogger.i("MainActivity", "Surface Buffers: ${gpuInfo.surfaceBufferCount}")
+
+                if (gpuMemoryMonitor.isGpuMemoryLeakDetected()) {
+                    fileLogger.w("MainActivity", "⚠️ GPU 메모리 누수 의심")
+                }
+            }
 
             // 메모리 경고 확인
             val warnings = resourceMonitor.checkAppMemoryWarnings()
             if (warnings.isNotEmpty()) {
-                fileLogger.w("MainActivity", " 메모리 경고 감지 ")
+                fileLogger.w("MainActivity", "⚠️ 메모리 경고 감지")
                 warnings.forEach { warning ->
                     fileLogger.w("MainActivity", "   $warning")
                 }
             }
 
-            fileLogger.i("MainActivity", " 상태 로깅 완료 - $context ")
-            fileLogger.i("MainActivity", "")
+            fileLogger.i("MainActivity", "📊 상태 로깅 완료 - $context")
 
         } catch (e: Exception) {
-            fileLogger.e("MainActivity", "상세 상태 로깅 실패: ${e.message}", e)
+            fileLogger.e("MainActivity", "상세 상태 + GPU 로깅 실패: ${e.message}", e)
         }
     }
 
@@ -933,7 +986,8 @@ class MainActivity : AppCompatActivity() {
                     delay(200)
                     System.runFinalization()
                     delay(300)
-
+                    gpuMemoryMonitor.stopGpuMemoryMonitoring()
+                    delay(300)
                     // 최종 상태 저장
                     logFinalSystemState()
 

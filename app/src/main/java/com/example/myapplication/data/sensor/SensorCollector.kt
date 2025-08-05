@@ -52,6 +52,9 @@ import kotlin.math.abs
 import com.example.myapplication.utils.BitmapPoolManager
 import com.example.myapplication.utils.ManagedBitmap
 import com.google.android.gms.location.LocationRequest
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import java.util.concurrent.atomic.AtomicBoolean
 
 class DeepLearningAdaptiveManager {
@@ -218,6 +221,15 @@ class SensorCollector(
     private var gpuInferenceBitmap: Bitmap? = null
     private var gpuCanvas: Canvas? = null
     private val gpuBitmapLock = Object()
+
+    // GPU 추론용 재사용 Canvas와 Matrix 캐시
+    private var inferenceCanvas: Canvas? = null
+    private var inferenceMatrix: Matrix? = null
+    private val gpuInferenceLock = Object()
+    // GPU 추론용 비트맵을 BitmapPool에서 태그로 구분
+    private var currentInferenceBitmap: ManagedBitmap? = null
+    // 기존 coroutineScope 사용
+    private var gpuCleanupJob: Job? = null
 
     var cameraConfig = CameraConfig(
         imageSize = Size(840, 840),
@@ -1256,6 +1268,11 @@ class SensorCollector(
             detector?.close()
             detectorExecutor.shutdownNow()
 
+            // GPU 정리 Job 중지
+            gpuCleanupJob?.cancel()
+            gpuCleanupJob = null
+            cleanupGpuInferenceResources()
+
             synchronized(gpuBitmapLock) {
                 gpuCanvas = null
                 gpuInferenceBitmap?.takeIf { !it.isRecycled }?.recycle()
@@ -1714,27 +1731,121 @@ class SensorCollector(
     }
 
     private fun copyToGpuInferenceBitmap(sourceBitmap: Bitmap): Bitmap? {
-        return try {
-            if (sourceBitmap.isRecycled || sourceBitmap.width <= 0 || sourceBitmap.height <= 0) {
-                return null
-            }
+        return synchronized(gpuInferenceLock) {
+            try {
+                if (sourceBitmap.isRecycled || sourceBitmap.width <= 0 || sourceBitmap.height <= 0) {
+                    return null
+                }
 
-            val targetBitmap = getOrCreateGpuInferenceBitmap(sourceBitmap.width, sourceBitmap.height)
-            if (targetBitmap == null) {
-                return null
-            }
+                // 기존 추론용 비트맵이 있으면 재사용, 없으면 새로 획득
+                val inferenceBitmap = currentInferenceBitmap?.takeIf { it.isValid() }
+                    ?: run {
+                        // 기존 것 해제
+                        currentInferenceBitmap?.release()
 
-            synchronized(gpuBitmapLock) {
-                val canvas = gpuCanvas ?: Canvas(targetBitmap).also { gpuCanvas = it }
+                        // BitmapPool에서 추론 전용 태그로 획득 (기존 acquire 함수 사용)
+                        val newInferenceBitmap = bitmapPoolManager.advancedTaggedBitmapPool.acquire(
+                            "GPU_INFERENCE_REUSABLE_${System.currentTimeMillis()}"
+                        )
+                        currentInferenceBitmap = newInferenceBitmap
+                        newInferenceBitmap
+                    }
+
+                if (inferenceBitmap == null) {
+                    Log.e(TAG, "❌ GPU 추론용 ManagedBitmap 획득 실패")
+                    return null
+                }
+
+
+                val targetBitmap = inferenceBitmap.bitmap
+
+                // Canvas와 Matrix 재사용 (BitmapPool의 재사용 객체 활용)
+                val canvas = inferenceCanvas ?: run {
+                    val newCanvas = bitmapPoolManager.advancedTaggedBitmapPool.getReusableCanvas()
+                    inferenceCanvas = newCanvas
+                    newCanvas
+                }
+
+                val matrix = inferenceMatrix ?: run {
+                    val newMatrix = bitmapPoolManager.advancedTaggedBitmapPool.getReusableMatrix()
+                    inferenceMatrix = newMatrix
+                    newMatrix
+                }
+
+                // 안전한 Canvas 설정
                 canvas.setBitmap(targetBitmap)
-                canvas.drawColor(android.graphics.Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-                canvas.drawBitmap(sourceBitmap, 0f, 0f, null)
+                canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+
+                // 스케일링 및 복사
+                matrix.reset()
+                if (sourceBitmap.width != targetBitmap.width || sourceBitmap.height != targetBitmap.height) {
+                    val scaleX = targetBitmap.width.toFloat() / sourceBitmap.width
+                    val scaleY = targetBitmap.height.toFloat() / sourceBitmap.height
+                    matrix.setScale(scaleX, scaleY)
+                }
+
+                canvas.drawBitmap(sourceBitmap, matrix, null)
+
+                // 마지막 접근 시간 업데이트
+                inferenceBitmap.updateLastAccess()
+
+                Log.d(TAG, "✅ GPU 추론용 비트맵 재사용 성공")
+                return targetBitmap
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ GPU 추론용 비트맵 처리 예외: ${e.message}", e)
+                // 예외 발생 시 현재 추론용 비트맵 해제하고 재시도
+                currentInferenceBitmap?.release()
+                currentInferenceBitmap = null
+                return null
+            }
+        }
+    }
+
+    /**
+     * GPU 추론 전용 정리 함수
+     */
+    private fun cleanupGpuInferenceResources() {
+        synchronized(gpuInferenceLock) {
+            currentInferenceBitmap?.release()
+            currentInferenceBitmap = null
+
+            inferenceCanvas?.let {
+                bitmapPoolManager.advancedTaggedBitmapPool.returnReusableCanvas(it)
+                inferenceCanvas = null
             }
 
-            targetBitmap
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ GPU 비트맵 복사 예외: ${e.message}", e)
-            null
+            inferenceMatrix?.let {
+                bitmapPoolManager.advancedTaggedBitmapPool.returnReusableMatrix(it)
+                inferenceMatrix = null
+            }
+
+            Log.d(TAG, "GPU 추론 리소스 정리 완료")
+        }
+    }
+
+    /**
+     * 주기적 GPU 추론 리소스 정리 (5분마다)
+     */
+    private fun startPeriodicGpuCleanup() {
+        gpuCleanupJob?.cancel()
+        gpuCleanupJob = coroutineScope.launch {
+            while (isActive) {
+                delay(300_000) // 5분마다
+                try {
+                    synchronized(gpuInferenceLock) {
+                        // 5분 이상 된 추론용 비트맵은 교체
+                        currentInferenceBitmap?.let { bitmap ->
+                            if (bitmap.getAgeMillis() > 300_000) { // 5분 이상
+                                Log.d(TAG, "🔄 오래된 GPU 추론용 비트맵 교체")
+                                cleanupGpuInferenceResources()
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "주기적 GPU 정리 오류: ${e.message}", e)
+                }
+            }
         }
     }
 }
