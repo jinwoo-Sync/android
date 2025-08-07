@@ -32,6 +32,7 @@ import android.net.Uri
 import android.provider.Settings
 import android.os.PowerManager
 import android.view.Choreographer
+import android.view.WindowManager
 import androidx.lifecycle.lifecycleScope
 import com.example.myapplication.Logsystem.AdvancedPerformanceMonitor
 import com.example.myapplication.Logsystem.GpuMemoryMonitor
@@ -110,6 +111,12 @@ override fun onCreate(savedInstanceState: Bundle?) {
     lifecycleScope.launch(Dispatchers.IO) {
         initializeHeavySystemsInBackground()
     }
+
+    // 하드웨어 가속 강제 활성화
+    window.setFlags(
+        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+    )
 }
 
 //  Fragment가 즉시 필요로 하는 객체들만 동기적으로 초기화
