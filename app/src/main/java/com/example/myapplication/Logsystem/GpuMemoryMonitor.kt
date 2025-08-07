@@ -60,7 +60,7 @@ class GpuMemoryMonitor private constructor(
      */
     fun startGpuMemoryMonitoring() {
         if (isMonitoring.compareAndSet(false, true)) {
-            fileLogger.i(TAG, "🔍 GPU 메모리 모니터링 시작")
+            fileLogger.i(TAG, "🔍 GPU 메모리 모니터링 시작 (5초 간격)")
 
             monitoringScope.launch {
                 while (isMonitoring.get()) {
@@ -69,10 +69,10 @@ class GpuMemoryMonitor private constructor(
                         analyzeGpuMemoryTrend(gpuInfo)
                         lastGpuInfo.set(gpuInfo)
 
-                        delay(1000) // 1초마다 체크
+                        delay(5000) // 1초 → 5초로 변경
                     } catch (e: Exception) {
                         fileLogger.e(TAG, "GPU 메모리 모니터링 오류: ${e.message}", e)
-                        delay(2000) // 오류 시 2초 대기
+                        delay(10000) // 2초 → 10초로 변경
                     }
                 }
             }

@@ -91,51 +91,66 @@ class AdvancedPerformanceMonitor private constructor(
      * FPS 모니터링 시작
      */
     private fun startFpsMonitoring() {
-        lastFrameTime = System.currentTimeMillis()
-        frameCount.set(0)
+        // 메인 스레드에서 실행되도록 보장
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post {
+                initializeChoreographer()
+            }
+            return
+        }
+        initializeChoreographer()
+    }
 
-        fpsMonitor = object : Choreographer.FrameCallback {
-            override fun doFrame(frameTimeNanos: Long) {
-                try {
-                    val currentTime = System.currentTimeMillis()
-                    val frameNum = frameCount.incrementAndGet()
+    private fun initializeChoreographer() {
+        try {
+            lastFrameTime = System.currentTimeMillis()
+            frameCount.set(0)
 
-                    // 1초마다 FPS 계산
-                    if (currentTime - lastFrameTime >= 1000) {
-                        val fps = frameNum * 1000.0 / (currentTime - lastFrameTime)
-                        val frameDrops = (60 - fps).toInt().coerceAtLeast(0)
+            fpsMonitor = object : Choreographer.FrameCallback {
+                override fun doFrame(frameTimeNanos: Long) {
+                    try {
+                        val currentTime = System.currentTimeMillis()
+                        val frameNum = frameCount.incrementAndGet()
 
-                        val fpsData = FpsData(currentTime, fps, frameDrops)
-                        fpsHistory.offer(fpsData)
+                        // 1초마다 FPS 계산
+                        if (currentTime - lastFrameTime >= 1000) {
+                            val fps = frameNum * 1000.0 / (currentTime - lastFrameTime)
+                            val frameDrops = (60 - fps).toInt().coerceAtLeast(0)
 
-                        // 히스토리 크기 제한
-                        while (fpsHistory.size > 60) { // 1분치 데이터
-                            fpsHistory.poll()
+                            val fpsData = FpsData(currentTime, fps, frameDrops)
+                            fpsHistory.offer(fpsData)
+
+                            // 히스토리 크기 제한
+                            while (fpsHistory.size > 60) {
+                                fpsHistory.poll()
+                            }
+
+                            // FPS 저하 감지
+                            if (fps < 30) {
+                                fileLogger.w(TAG, "FPS 저하 감지: ${String.format("%.1f", fps)}fps, 드롭: ${frameDrops}프레임")
+                                triggerPerformanceAnalysis("LOW_FPS")
+                            }
+
+                            lastFrameTime = currentTime
+                            frameCount.set(0)
                         }
 
-                        // FPS 저하 감지
-                        if (fps < 30) {
-                            fileLogger.w(TAG, "FPS 저하 감지: ${String.format("%.1f", fps)}fps, 드롭: ${frameDrops}프레임")
-                            triggerPerformanceAnalysis("LOW_FPS")
+                        // 다음 프레임 등록
+                        if (isMonitoring.get()) {
+                            Choreographer.getInstance().postFrameCallback(this)
                         }
 
-                        lastFrameTime = currentTime
-                        frameCount.set(0)
+                    } catch (e: Exception) {
+                        fileLogger.e(TAG, "FPS 모니터링 오류: ${e.message}", e)
                     }
-
-                    // 다음 프레임 등록
-                    if (isMonitoring.get()) {
-                        Choreographer.getInstance().postFrameCallback(this)
-                    }
-
-                } catch (e: Exception) {
-                    fileLogger.e(TAG, "FPS 모니터링 오류: ${e.message}", e)
                 }
             }
-        }
 
-        Choreographer.getInstance().postFrameCallback(fpsMonitor!!)
-        fileLogger.i(TAG, "FPS 모니터링 시작")
+            Choreographer.getInstance().postFrameCallback(fpsMonitor!!)
+            fileLogger.i(TAG, "FPS 모니터링 시작")
+        } catch (e: IllegalStateException) {
+            fileLogger.e(TAG, "Choreographer 초기화 실패", e)
+        }
     }
 
     /**
@@ -331,23 +346,30 @@ class AdvancedPerformanceMonitor private constructor(
     }
 
     /**
-     * 성능 문제 발생 시 상세 분석 트리거
+     * 성능 문제 발생 시 상세 분석 트리거 / 백그라운드 작업 최적화
      */
     private fun triggerPerformanceAnalysis(reason: String) {
-        monitoringScope.launch {
-            fileLogger.e(TAG, "성능 분석 트리거: $reason")
+        monitoringScope.launch(Dispatchers.IO) {
+            try {
+                fileLogger.e(TAG, "성능 분석 트리거: $reason")
 
-            // 상세 리소스 상태 로깅
-            resourceMonitor.logAppResourceStatus(TAG, "성능문제_$reason")
+                // 무거운 작업들을 IO 디스패처로 이동
+                resourceMonitor.logAppResourceStatus(TAG, "성능문제_$reason")
 
-            // 현재 스택 트레이스 덤프 (메인 스레드가 블록된 경우)
-            if (reason.contains("MAIN_THREAD") || reason.contains("ANR")) {
-                dumpMainThreadStackTrace()
-            }
+                if (reason.contains("MAIN_THREAD") || reason.contains("ANR")) {
+                    dumpMainThreadStackTrace()
+                }
 
-            // 힙 덤프 (메모리 문제인 경우)
-            if (reason.contains("MEMORY")) {
-                requestHeapDump()
+                if (reason.contains("MEMORY")) {
+                    requestHeapDump()
+                }
+
+                // UI 업데이트는 메인 스레드에서
+                withContext(Dispatchers.Main) {
+                    // UI 관련 업데이트가 필요한 경우 여기서 처리
+                }
+            } catch (e: Exception) {
+                fileLogger.e(TAG, "성능 분석 실패: ${e.message}", e)
             }
         }
     }

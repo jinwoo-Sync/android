@@ -57,6 +57,7 @@ import com.google.android.gms.location.LocationRequest
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 
 class DeepLearningAdaptiveManager {
@@ -576,30 +577,49 @@ class SensorCollector(
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
     }
 
+    //,-> log trace에서 IMU 센서 데이터를 문자열로 변환하는 작업에서 main thread의 ui blocking을 유발하고 있음.
     private fun updateLatestImuData(systemTimestamp: Long, monoTimestamp: Long) {
-        latestImuData = FloatArray(9).apply {
-            latestAccelerometer.copyInto(this, 0, 0, 3)
-            latestGyroscope.copyInto(this, 3, 0, 3)
-            latestMagnetometer.copyInto(this, 6, 0, 3)
-        }
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                // Update latestImuData in background
+                latestImuData = FloatArray(9).apply {
+                    latestAccelerometer.copyInto(this, 0, 0, 3)
+                    latestGyroscope.copyInto(this, 3, 0, 3)
+                    latestMagnetometer.copyInto(this, 6, 0, 3)
+                }
 
-        val sensorData = SensorData_String(
-            value = "ACC[${latestAccelerometer.joinToString(",")}] GYRO[${
-                latestGyroscope.joinToString(
-                    ","
+                // Format sensor data string with 5 decimal places (matching original precision)
+                val dataString = buildString {
+                    append("ACC[")
+                    append(latestAccelerometer.joinToString(",") { String.format("%.5f", it) })
+                    append("] GYRO[")
+                    append(latestGyroscope.joinToString(",") { String.format("%.5f", it) })
+                    append("] MAG[")
+                    append(latestMagnetometer.joinToString(",") { String.format("%.5f", it) })
+                    append("]")
+                }
+
+                // Create SensorData_String object
+                val sensorData = SensorData_String(
+                    value = dataString,
+                    timestamp = systemTimestamp,
+                    monoTimestamp = monoTimestamp
                 )
-            }] MAG[${latestMagnetometer.joinToString(",")}]",
-            timestamp = systemTimestamp,
-            monoTimestamp = monoTimestamp
-        )
 
-        android.os.Handler(android.os.Looper.getMainLooper()).post {
-            imuCallback?.invoke(sensorData)
-        }
+                // Update UI on main thread
+                withContext(Dispatchers.Main) {
+                    imuCallback?.invoke(sensorData)
+                }
 
-        if (::dataSynchronizer.isInitialized) {
-            LoggerManager.getInstance(context, dataSynchronizer)
-                .pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
+                // Push data to LoggerManager if initialized
+                if (::dataSynchronizer.isInitialized) {
+                    LoggerManager.getInstance(context, dataSynchronizer)
+                        .pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
+                }
+            } catch (e: Exception) {
+                // Log error or handle appropriately
+                Log.e("ImuDataProcessor", "Error processing IMU data", e)
+            }
         }
     }
 
