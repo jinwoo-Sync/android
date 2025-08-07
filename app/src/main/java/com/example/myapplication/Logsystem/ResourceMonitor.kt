@@ -68,7 +68,11 @@ class ResourceMonitor private constructor(private val context: Context) {
         // Native 메모리 정보
         val memoryInfo = Debug.MemoryInfo()
         Debug.getMemoryInfo(memoryInfo)
-        val nativeHeapMB = memoryInfo.nativeHeapSize / 1024.0
+        val nativeHeapMB = try {
+            (memoryInfo.getTotalPss() - memoryInfo.dalvikPss) / 1024.0
+        } catch (e: Exception) {
+            0.0
+        }
 
         // 메모리 압박 수준 판정
         val memoryPressureLevel = when {

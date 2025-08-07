@@ -1,6 +1,7 @@
 package com.example.myapplication.data.logging
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.location.Location
 import android.os.Build
 import android.os.Environment
@@ -11,7 +12,7 @@ import com.example.myapplication.data.streaming.StreamingClient
 import com.example.myapplication.data.streaming.StreamingClientFactory
 import com.example.myapplication.data.sync.*
 import com.example.myapplication.model.*
-import com.example.myapplication.utils.ResourceMonitor
+import com.example.myapplication.Logsystem.ResourceMonitor
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -439,7 +440,15 @@ class LoggerManager private constructor(
                     // ✅ 현재 세션의 실제 ID로 메타데이터 생성
                     val actualSessionId = currentSessionTimestamp ?: "unknown"
                     val bitmapSizeMB = if (!frameEntry.bitmap.isRecycled) {
-                        resourceMonitor.getBitmapMemoryUsage(frameEntry.bitmap).sizeMB
+                        val width = frameEntry.bitmap.width
+                        val height = frameEntry.bitmap.height
+                        val bytesPerPixel = when (frameEntry.bitmap.config) {
+                            Bitmap.Config.ARGB_8888 -> 4
+                            Bitmap.Config.RGB_565 -> 2
+                            Bitmap.Config.ALPHA_8 -> 1
+                            else -> 4
+                        }
+                        (width * height * bytesPerPixel) / (1024.0 * 1024.0)
                     } else 0.0
 
                     val metadata = VideoFrameMetadata(
@@ -1367,7 +1376,7 @@ class LoggerManager private constructor(
 
     // ✅ 로그 저장 활성화 시 메타데이터 헤더 파일 생성
     fun enableLogSaving() {
-        resourceMonitor.logResourceStatus(TAG, "로그 저장 시작")
+        resourceMonitor.logAppResourceStatus(TAG, "로그 저장 시작")
         isLogSavingEnabled = true
         currentLogDirectory = createLogDirectory()
 
@@ -1393,10 +1402,10 @@ class LoggerManager private constructor(
                         currentSessionTimestamp = videoEncoder!!.getSessionId()
                         Log.d(TAG, "📁 로그 저장 및 비디오 녹화 활성화: ${currentLogDirectory!!.absolutePath}")
                         Log.d(TAG, "🎬 초기 비디오 세션: $currentSessionTimestamp")
-                        resourceMonitor.logResourceStatus(TAG, "로그 저장 활성화 완료")
+                        resourceMonitor.logAppResourceStatus(TAG, "로그 저장 활성화 완료")
                     } else {
                         Log.e(TAG, "❌ 비디오 인코더 시작 실패")
-                        resourceMonitor.logResourceStatus(TAG, "비디오 인코더 시작 실패")
+                        resourceMonitor.logAppResourceStatus(TAG, "비디오 인코더 시작 실패")
                         videoEncoder = null
                     }
                 }
@@ -1408,7 +1417,7 @@ class LoggerManager private constructor(
 
     // ✅ 로그 저장 비활성화 시 남은 메타데이터 저장
     fun disableLogSaving() {
-        resourceMonitor.logResourceStatus(TAG, "로그 저장 중지 시작")
+        resourceMonitor.logAppResourceStatus(TAG, "로그 저장 중지 시작")
         isLogSavingEnabled = false
 
         // ✅ 비디오 인코더 중지 및 남은 메타데이터 저장
@@ -1429,7 +1438,7 @@ class LoggerManager private constructor(
         currentLogDirectory = null
         System.gc()
         runBlocking { delay(100) }
-        resourceMonitor.logResourceStatus(TAG, "로그 저장 중지 완료")
+        resourceMonitor.logAppResourceStatus(TAG, "로그 저장 중지 완료")
         Log.d(TAG, "📁 로그 저장 및 비디오 녹화 비활성화")
     }
 
@@ -1639,8 +1648,9 @@ class LoggerManager private constructor(
     }
 
     fun getSystemStatus(): String {
-        val memoryInfo = resourceMonitor.getDetailedMemoryInfo()
-        val warnings = resourceMonitor.checkMemoryWarnings()
+        val memoryInfo = resourceMonitor.getAppMemoryInfo()
+        val systemMemInfo = resourceMonitor.getSystemMemoryInfo()
+        val warnings = resourceMonitor.checkAppMemoryWarnings()
 
         return buildString {
             append("=== LoggerManager 상태 ===\n")
@@ -1668,9 +1678,10 @@ class LoggerManager private constructor(
             append("세션: ${queueStatus.gnssSessionQueueSize}/${MAX_GNSS_SESSION_QUEUE}\n")
             append("총 데이터 포인트: ${queueStatus.totalDataPoints}\n")
             append("=== 메모리 상태 ===\n")
-            append("힙 사용률: ${DecimalFormat("#.#").format(memoryInfo.heapUsagePercent)}%\n")
-            append("사용 가능한 힙: ${DecimalFormat("#.#").format(memoryInfo.availableHeapMB)} MB\n")
-            append("시스템 메모리 부족: ${if (memoryInfo.systemMemoryLow) "예" else "아니오"}\n")
+            append("힙 사용률: ${String.format("%.1f", memoryInfo.heapUsagePercent)}%\n")
+            append("사용 가능한 힙: ${String.format("%.1f", memoryInfo.availableHeapMB)} MB\n")
+            append("Native 메모리: ${String.format("%.1f", memoryInfo.nativeHeapMB)} MB\n")
+            append("시스템 메모리 부족: ${if (systemMemInfo.systemMemoryLow) "예" else "아니오"}\n")
             if (warnings.isNotEmpty()) {
                 append("=== 메모리 경고 ===\n")
                 warnings.forEach { append("⚠️ $it\n") }

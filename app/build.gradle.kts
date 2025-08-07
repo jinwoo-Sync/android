@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+    id("com.google.gms.google-services") // Firebase 플러그인
 }
 
 android {
@@ -107,6 +108,15 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+
+    // Firebase BOM
+    implementation(platform("com.google.firebase:firebase-bom:32.7.1"))
+    // Firebase Performance Monitoring
+    implementation("com.google.firebase:firebase-perf")
+    // Firebase Crashlytics
+    implementation("com.google.firebase:firebase-crashlytics")
+    // Firebase Analytics
+    implementation("com.google.firebase:firebase-analytics")
 
     debugImplementation("com.squareup.leakcanary:leakcanary-android:2.14")
 }

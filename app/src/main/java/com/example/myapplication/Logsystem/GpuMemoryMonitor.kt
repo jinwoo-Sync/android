@@ -166,7 +166,7 @@ class GpuMemoryMonitor private constructor(
         val previousInfo = lastGpuInfo.get()
 
         // 1초마다 상세 로그 (FPS 1fps 상황에서만)
-        logDetailedGpuState(currentInfo)
+        //logDetailedGpuState(currentInfo)
 
         if (previousInfo != null) {
             // GPU 메모리 누수 감지

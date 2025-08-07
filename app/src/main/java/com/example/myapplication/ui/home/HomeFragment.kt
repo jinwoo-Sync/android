@@ -27,7 +27,7 @@ import com.example.myapplication.utils.BitmapPoolManager
 import com.example.myapplication.utils.HealthLevel
 import com.example.myapplication.utils.ManagedBitmap
 import com.example.myapplication.utils.PoolHealthStatus
-import com.example.myapplication.utils.ResourceMonitor
+import com.example.myapplication.Logsystem.ResourceMonitor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
