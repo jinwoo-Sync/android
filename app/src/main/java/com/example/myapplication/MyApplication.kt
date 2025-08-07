@@ -18,6 +18,7 @@ class MyApplication : Application() {
 
         // 크래시 핸들러 설정
         CrashHandler.setup(this)
+
     }
 
     private fun initializeLeakCanary() {

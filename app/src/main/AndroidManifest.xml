@@ -42,6 +42,9 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <meta-data
+            android:name="androidx.emoji2.emoji2_emoji_compat_config_helper"
+            android:value="false" />
     </application>
 
 </manifest>

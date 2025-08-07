@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     id("com.google.gms.google-services") // Firebase 플러그인
+    id("com.google.firebase.crashlytics") // 이 줄 추가!
 }
 
 android {
@@ -30,7 +31,7 @@ android {
     buildTypes {
         debug {
             isDebuggable = true
-            applicationIdSuffix = ".debug"
+            //applicationIdSuffix = ".debug"
             // debug는 기본 debug signing 사용
         }
 
@@ -96,6 +97,14 @@ dependencies {
     implementation(libs.tensorflow.lite.gpu)
     implementation(libs.tensorflow.lite.select.tf.ops)
     implementation(libs.tensorflow.lite.metadata)
+
+    // 기존 라이브러리에서 EmojiCompat 제외
+    implementation("androidx.appcompat:appcompat") {
+        exclude(group = "androidx.emoji2")
+    }
+    implementation("com.google.android.material:material") {
+        exclude(group = "androidx.emoji2")
+    }
 
     // 네트워킹
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

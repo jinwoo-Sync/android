@@ -83,7 +83,7 @@ class AdvancedPerformanceMonitor private constructor(
             startPerformanceSnapshots()
 
             // Perfetto 추적도 함께 시작
-            perfettoTracer.startSystemTrace("ComprehensiveMonitoring")
+            perfettoTracer.startPerfettoTrace("ComprehensiveMonitoring")
         }
     }
 
@@ -456,7 +456,7 @@ class AdvancedPerformanceMonitor private constructor(
             memoryLeakDetector?.interrupt()
 
             // Perfetto 추적 중지
-            perfettoTracer.stopSystemTrace()
+            perfettoTracer.stopPerfettoTrace()
 
             // 최종 보고서 생성
             val report = generatePerformanceReport()
