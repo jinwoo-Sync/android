@@ -1171,6 +1171,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        if (::sensorCollector.isInitialized) {
+            sensorCollector.stopSensorStreaming()
+            sensorCollector.closeCamera()
+            // 🎯 추가: SensorCollector 정리
+            sensorCollector.cleanup()
+        }
+
         //  1단계: 최종 상태 저장 (BitmapPool 포함)
         runBlocking {
             try {

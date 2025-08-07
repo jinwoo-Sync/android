@@ -22,6 +22,8 @@ import android.location.*
 import android.media.Image
 import android.media.ImageReader
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 import android.util.Range
@@ -179,6 +181,17 @@ class SensorCollector(
     // ✅ BitmapPoolManager에서 풀과 프로세서 참조
     private val taggedBitmapPool get() = bitmapPoolManager.advancedTaggedBitmapPool
     private val highSpeedProcessor get() = bitmapPoolManager.highSpeedProcessor
+
+    // 추가: 전용 이미지 처리 스레드
+    private val imageProcessingThread = HandlerThread("ImageProcessing-${System.currentTimeMillis()}").apply {
+        start()
+    }
+    private val imageProcessingHandler by lazy {
+        Handler(imageProcessingThread.looper)
+    }
+    private val mainHandler by lazy {
+        Handler(Looper.getMainLooper())
+    }
 
     private val frameProcessingStats = AtomicInteger(0)
 
@@ -757,7 +770,7 @@ class SensorCollector(
                 cameraConfig.imageFormat,
                 4
             ).apply {
-                setOnImageAvailableListener(createAdvancedImageListener(cameraId, callback), null)
+                setOnImageAvailableListener(createAdvancedImageListener(cameraId, callback), imageProcessingHandler)
             }
 
             if (!cameraOpenCloseLock.tryAcquire(3, TimeUnit.SECONDS)) {
@@ -1124,13 +1137,13 @@ class SensorCollector(
 
         //  ManagedBitmap 유효성 재검증
         if (!managedBitmap.isValid() || managedBitmap.bitmap.isRecycled) {
-            Log.w(TAG, " 무효한 ManagedBitmap 감지 - 프레임 스킵: frameId=$frameId")
-            managedBitmap.release() // 즉시 해제
-            coroutineScope.launch(Dispatchers.Main) { callback(null) }
+            Log.w(TAG, "무효한 ManagedBitmap 감지 - 프레임 스킵: frameId=$frameId")
+            managedBitmap.release()
+            mainHandler.post { callback(null) }
             return
         }
 
-        //  LoggerManager 처리는 백그라운드에서 (기존 coroutineScope 사용)
+        // LoggerManager 처리는 백그라운드에서 (이미 백그라운드 스레드)
         if (::dataSynchronizer.isInitialized) {
             coroutineScope.launch(Dispatchers.IO) {
                 try {
@@ -1144,13 +1157,13 @@ class SensorCollector(
                     )
                     LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
                 } catch (e: Exception) {
-                    Log.e(TAG, " 백그라운드 LoggerManager 처리 실패: ${e.message}", e)
+                    Log.e(TAG, "백그라운드 LoggerManager 처리 실패: ${e.message}", e)
                 }
             }
         }
 
-        // UI로 즉시 전달 (블로킹 최소화)
-        coroutineScope.launch(Dispatchers.Main) {
+        // 🎯 수정: UI로 메인 스레드에서 전달
+        mainHandler.post {
             try {
                 if (managedBitmap.isValid() && !managedBitmap.bitmap.isRecycled) {
                     callback(
@@ -1163,15 +1176,15 @@ class SensorCollector(
                             frameId = frameId
                         )
                     )
-                    Log.d(TAG, " Frame delivered: frameId=$frameId")
+                    Log.d(TAG, "✅ Non-blocking frame delivered: frameId=$frameId")
                 } else {
                     Log.w(TAG, "⚠️ UI 전달 시 비트맵 무효: frameId=$frameId")
-                    managedBitmap.release() // UI 전달 실패 시 해제
+                    managedBitmap.release()
                     callback(null)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, " Frame delivery error: ${e.message}", e)
-                managedBitmap.release() // 예외 시 해제
+                Log.e(TAG, "Frame delivery error: ${e.message}", e)
+                managedBitmap.release()
                 callback(null)
             }
         }
@@ -1179,9 +1192,9 @@ class SensorCollector(
         handleSelectiveDetection(managedBitmap, frameId)
 
         if (frameCount % 90 == 0) {
-            Log.i(TAG, " ${taggedBitmapPool.getStatus()}")
-            Log.i(TAG, " ${highSpeedProcessor.getStatus()}")
-            Log.i(TAG, " 딥러닝 전략: ${currentDetectionStrategy}")
+            Log.i(TAG, "📊 Non-blocking: ${taggedBitmapPool.getStatus()}")
+            Log.i(TAG, "📊 Processor: ${highSpeedProcessor.getStatus()}")
+            Log.i(TAG, "📊 Thread: ${Thread.currentThread().name}")
         }
     }
 
@@ -1260,6 +1273,7 @@ class SensorCollector(
         isSessionActive.set(false)
 
         try {
+            imageProcessingHandler.removeCallbacksAndMessages(null)
             cleanupCameraResources()
             isStreaming.set(false)
             frameCount = 0
@@ -1443,6 +1457,13 @@ class SensorCollector(
             } catch (e: InterruptedException) {
                 detectorExecutor.shutdownNow()
                 Thread.currentThread().interrupt()
+            }
+
+            try {
+                imageProcessingHandler.removeCallbacksAndMessages(null)
+                Log.d(TAG, "✅ 이미지 처리 핸들러 정리 완료")
+            } catch (e: Exception) {
+                Log.e(TAG, "이미지 처리 핸들러 정리 실패: ${e.message}", e)
             }
 
             coroutineScope.cancel()
@@ -1821,6 +1842,25 @@ class SensorCollector(
             }
 
             Log.d(TAG, "GPU 추론 리소스 정리 완료")
+        }
+    }
+
+    fun cleanup() {
+        try {
+            imageProcessingHandler.removeCallbacksAndMessages(null)
+            imageProcessingThread.quitSafely()
+
+            // join()은 Unit을 반환하므로 try-catch로 타임아웃 처리
+            try {
+                imageProcessingThread.join(1000)
+                Log.d(TAG, "✅ SensorCollector 이미지 처리 스레드 정리 완료")
+            } catch (e: InterruptedException) {
+                Log.w(TAG, "이미지 처리 스레드 종료 인터럽트")
+                Thread.currentThread().interrupt()
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "이미지 처리 스레드 정리 실패: ${e.message}", e)
         }
     }
 

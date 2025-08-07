@@ -106,6 +106,11 @@ dependencies {
         exclude(group = "androidx.emoji2")
     }
 
+
+    //  추가: UI 성능 최적화
+    implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.activity:activity-ktx:1.8.2")
+
     // 네트워킹
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
