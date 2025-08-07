@@ -1,6 +1,8 @@
 package com.example.myapplication
 
 import android.app.Application
+import com.example.myapplication.Logsystem.CrashHandler
+import com.example.myapplication.Logsystem.LeakCanaryIntegration
 
 class MyApplication : Application() {
     override fun onCreate() {
@@ -10,6 +12,12 @@ class MyApplication : Application() {
         if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             initializeLeakCanary()
         }
+
+        // LeakCanary 애플리케이션 레벨 설정
+        LeakCanaryIntegration.setupInApplication(this)
+
+        // 크래시 핸들러 설정
+        CrashHandler.setup(this)
     }
 
     private fun initializeLeakCanary() {

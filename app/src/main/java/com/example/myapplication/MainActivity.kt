@@ -22,7 +22,7 @@ import com.example.myapplication.Logsystem.CrashHandler
 import com.example.myapplication.Logsystem.FileLogger
 import com.example.myapplication.utils.HealthLevel
 import com.example.myapplication.utils.PoolHealthStatus
-import com.example.myapplication.utils.ResourceMonitor
+import com.example.myapplication.Logsystem.ResourceMonitor
 import com.google.android.material.bottomnavigation.BottomNavigationView
 import android.app.AlertDialog
 import android.content.Context
@@ -32,7 +32,9 @@ import android.net.Uri
 import android.provider.Settings
 import android.os.PowerManager
 import android.view.Choreographer
+import com.example.myapplication.Logsystem.AdvancedPerformanceMonitor
 import com.example.myapplication.Logsystem.GpuMemoryMonitor
+import com.example.myapplication.Logsystem.LeakCanaryIntegration
 import kotlinx.coroutines.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -151,8 +153,49 @@ class MainActivity : AppCompatActivity() {
         // 5. GPU 메모리 모니터링 시작
         startGpuMemoryMonitoring()
 
-        // 6. 초기 상태 저장
+        // 6. 통합 성능 모니터링 시작 (새로 추가)
+        startAdvancedPerformanceMonitoring()
+
+        // 7. LeakCanary 통합 (새로 추가)
+        startLeakCanaryIntegration()
+
+        // 8. 초기 상태 저장
         logInitialSystemState()
+    }
+
+    /**
+     * 통합 성능 모니터링 시작
+     */
+    private fun startAdvancedPerformanceMonitoring() {
+        try {
+            val advancedMonitor = AdvancedPerformanceMonitor.getInstance(this)
+            advancedMonitor.startComprehensiveMonitoring()
+            fileLogger.i("MainActivity", "✅ 통합 성능 모니터링 시작")
+        } catch (e: Exception) {
+            fileLogger.e("MainActivity", "통합 성능 모니터링 시작 실패: ${e.message}", e)
+        }
+    }
+
+    /**
+     * LeakCanary 통합 시작
+     */
+    private fun startLeakCanaryIntegration() {
+        try {
+            val leakCanaryIntegration = LeakCanaryIntegration.getInstance(this)
+
+            // BitmapPoolManager 감시
+            leakCanaryIntegration.watchObject(bitmapPoolManager, "BitmapPoolManager")
+
+            // SensorCollector 감시
+            leakCanaryIntegration.watchObject(sensorCollector, "SensorCollector")
+
+            // HomeRepository 감시
+            leakCanaryIntegration.watchObject(homeRepository, "HomeRepository")
+
+            fileLogger.i("MainActivity", "✅ LeakCanary 통합 완료")
+        } catch (e: Exception) {
+            fileLogger.e("MainActivity", "LeakCanary 통합 실패: ${e.message}", e)
+        }
     }
 
     /**
