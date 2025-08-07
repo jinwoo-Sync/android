@@ -59,6 +59,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.asCoroutineDispatcher
 
 class DeepLearningAdaptiveManager {
     private val TAG = "DeepLearningAdaptiveManager"
@@ -284,6 +285,18 @@ class SensorCollector(
     private var gnssCallback: ((SensorData_String) -> Unit)? = null
     private var detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
 
+    // Create bounded thread pool for sensor processing (4 threads max)
+    private val sensorThreadPoolExecutor = Executors.newFixedThreadPool(4) { r ->
+        Thread(r, "SensorProcessor-${System.currentTimeMillis()}").apply {
+            priority = Thread.NORM_PRIORITY
+        }
+    }
+    private val sensorThreadPool = sensorThreadPoolExecutor.asCoroutineDispatcher()
+    
+    // Dedicated scope for sensor processing with bounded thread pool
+    private val sensorScope = CoroutineScope(sensorThreadPool + SupervisorJob())
+    
+    // Keep IO scope for general background work
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
@@ -328,34 +341,36 @@ class SensorCollector(
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(locationResult: LocationResult) {
-            locationResult.lastLocation?.let { location ->
-                val gpsTimestamp = location.time
-                val localTimestamp = System.currentTimeMillis()
-                val monoTimestamp = System.nanoTime()
-                val isGpsTimeValid =
-                    gpsTimestamp > 0 && abs(gpsTimestamp - localTimestamp) < 86400000L
+            // Process GPS data on sensor thread pool
+            sensorScope.launch(Dispatchers.IO) {
+                locationResult.lastLocation?.let { location ->
+                    val gpsTimestamp = location.time
+                    val localTimestamp = System.currentTimeMillis()
+                    val monoTimestamp = System.nanoTime()
+                    val isGpsTimeValid =
+                        gpsTimestamp > 0 && abs(gpsTimestamp - localTimestamp) < 86400000L
 
-                if (::dataSynchronizer.isInitialized && isGpsTimeValid) {
-                    dataSynchronizer.updateTimeSync(gpsTimestamp, localTimestamp)
-                    Log.d(TAG, "🎯 GPS 시간 동기화 업데이트: gpsTime=$gpsTimestamp, localTime=$localTimestamp")
-                }
+                    if (::dataSynchronizer.isInitialized && isGpsTimeValid) {
+                        dataSynchronizer.updateTimeSync(gpsTimestamp, localTimestamp)
+                        Log.d(TAG, "🎯 GPS 시간 동기화 업데이트: gpsTime=$gpsTimestamp, localTime=$localTimestamp")
+                    }
 
-                val sensorData = SensorData_String(
-                    value = "Lat: ${location.latitude}, Lon: ${location.longitude}, Alt: ${if (location.hasAltitude()) location.altitude else "N/A"}, Acc: ${if (location.hasAccuracy()) location.accuracy else "N/A"}m",
-                    timestamp = localTimestamp,
-                    monoTimestamp = monoTimestamp
-                )
+                    val sensorData = SensorData_String(
+                        value = "Lat: ${location.latitude}, Lon: ${location.longitude}, Alt: ${if (location.hasAltitude()) location.altitude else "N/A"}, Acc: ${if (location.hasAccuracy()) location.accuracy else "N/A"}m",
+                        timestamp = localTimestamp,
+                        monoTimestamp = monoTimestamp
+                    )
 
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    synchronized(this@SensorCollector) {
+                    // Only switch to Main for UI callback
+                    withContext(Dispatchers.Main) {
                         gpsCallback?.invoke(sensorData)
                     }
-                }
 
-                if (::dataSynchronizer.isInitialized) {
-                    LoggerManager.getInstance(context, dataSynchronizer).pushGps(
-                        location, localTimestamp, monoTimestamp
-                    )
+                    if (::dataSynchronizer.isInitialized) {
+                        LoggerManager.getInstance(context, dataSynchronizer).pushGps(
+                            location, localTimestamp, monoTimestamp
+                        )
+                    }
                 }
             }
         }
@@ -364,11 +379,13 @@ class SensorCollector(
     @RequiresApi(Build.VERSION_CODES.N)
     private val gnssMeasurementsCallback = object : GnssMeasurementsEvent.Callback() {
         override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
-            val clock = event.clock
-            val gpsTimestamp = clock.timeNanos / 1_000_000
-            val localTimestamp = System.currentTimeMillis()
-            val monoTimestamp = System.nanoTime()
-            val isGpsTimeValid = gpsTimestamp > 0 && abs(gpsTimestamp - localTimestamp) < 86400000L
+            // Process GNSS measurements on sensor thread pool
+            sensorScope.launch(Dispatchers.IO) {
+                val clock = event.clock
+                val gpsTimestamp = clock.timeNanos / 1_000_000
+                val localTimestamp = System.currentTimeMillis()
+                val monoTimestamp = System.nanoTime()
+                val isGpsTimeValid = gpsTimestamp > 0 && abs(gpsTimestamp - localTimestamp) < 86400000L
 
             val clockData = GnssClockData(
                 gpsTimestamp = gpsTimestamp,
@@ -432,19 +449,23 @@ class SensorCollector(
                     additionalInfo = "State=0x${measurement.state.toString(16)}, MP=${measurement.multipathIndicator}"
                 )
 
-                gnssCallback?.invoke(
-                    SensorData_String(
-                        value = "GNSS: ${comprehensiveData.gnssType}, Sat: ${comprehensiveData.satelliteId}, C/N0: ${comprehensiveData.signalStrength}",
-                        timestamp = localTimestamp,
-                        monoTimestamp = monoTimestamp
+                // Switch to Main only for UI callback
+                withContext(Dispatchers.Main) {
+                    gnssCallback?.invoke(
+                        SensorData_String(
+                            value = "GNSS: ${comprehensiveData.gnssType}, Sat: ${comprehensiveData.satelliteId}, C/N0: ${comprehensiveData.signalStrength}",
+                            timestamp = localTimestamp,
+                            monoTimestamp = monoTimestamp
+                        )
                     )
-                )
+                }
 
                 if (::dataSynchronizer.isInitialized) {
                     LoggerManager.getInstance(context, dataSynchronizer).pushComprehensiveGnss(
                         comprehensiveData, clockData
                     )
                 }
+            }
             }
         }
     }
@@ -453,8 +474,10 @@ class SensorCollector(
     @RequiresApi(Build.VERSION_CODES.N)
     private val gnssStatusCallback = object : GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(status: GnssStatus) {
-            val localTimestamp = System.currentTimeMillis()
-            val monoTimestamp = System.nanoTime()
+            // Process GNSS status on sensor thread pool
+            sensorScope.launch(Dispatchers.IO) {
+                val localTimestamp = System.currentTimeMillis()
+                val monoTimestamp = System.nanoTime()
 
             val totalSatellites = status.satelliteCount
             var usedSatellites = 0
@@ -485,6 +508,7 @@ class SensorCollector(
                         .pushSatelliteStatus(satelliteStatus)
                 }
             }
+            }
         }
 
         override fun onFirstFix(ttffMillis: Int) {
@@ -514,8 +538,10 @@ class SensorCollector(
     @RequiresApi(Build.VERSION_CODES.N)
     private val gnssNavigationMessageCallback = object : GnssNavigationMessage.Callback() {
         override fun onGnssNavigationMessageReceived(message: GnssNavigationMessage) {
-            val localTimestamp = System.currentTimeMillis()
-            val monoTimestamp = System.nanoTime()
+            // Process navigation messages on sensor thread pool
+            sensorScope.launch(Dispatchers.IO) {
+                val localTimestamp = System.currentTimeMillis()
+                val monoTimestamp = System.nanoTime()
 
             val navigationData = GnssNavigationData(
                 gpsTimestamp = 0L,
@@ -535,17 +561,19 @@ class SensorCollector(
                 LoggerManager.getInstance(context, dataSynchronizer)
                     .pushNavigationMessage(navigationData)
             }
+            }
         }
     }
 
     private val accelerometerListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             if (!imuConfig.accelerometerEnabled) return
-            synchronized(this@SensorCollector) {
+            // Process on sensor thread pool, no main thread blocking
+            sensorScope.launch(Dispatchers.IO) {
                 latestAccelerometer = event.values.clone()
                 val systemTimestamp = System.currentTimeMillis()
                 val monoTimestamp = System.nanoTime()
-                updateLatestImuData(systemTimestamp, monoTimestamp)
+                updateLatestImuDataAsync(systemTimestamp, monoTimestamp)
             }
         }
 
@@ -555,11 +583,12 @@ class SensorCollector(
     private val gyroscopeListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             if (!imuConfig.gyroscopeEnabled) return
-            synchronized(this@SensorCollector) {
+            // Process on sensor thread pool, no main thread blocking
+            sensorScope.launch(Dispatchers.IO) {
                 latestGyroscope = event.values.clone()
                 val systemTimestamp = System.currentTimeMillis()
                 val monoTimestamp = System.nanoTime()
-                updateLatestImuData(systemTimestamp, monoTimestamp)
+                updateLatestImuDataAsync(systemTimestamp, monoTimestamp)
             }
         }
 
@@ -569,20 +598,21 @@ class SensorCollector(
     private val magnetometerListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             if (!imuConfig.magnetometerEnabled) return
-            synchronized(this@SensorCollector) {
+            // Process on sensor thread pool, no main thread blocking
+            sensorScope.launch(Dispatchers.IO) {
                 latestMagnetometer = event.values.clone()
                 val systemTimestamp = System.currentTimeMillis()
                 val monoTimestamp = System.nanoTime()
-                updateLatestImuData(systemTimestamp, monoTimestamp)
+                updateLatestImuDataAsync(systemTimestamp, monoTimestamp)
             }
         }
 
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
     }
 
-    //,-> log trace에서 IMU 센서 데이터를 문자열로 변환하는 작업에서 main thread의 ui blocking을 유발하고 있음.
-    private fun updateLatestImuData(systemTimestamp: Long, monoTimestamp: Long) {
-        coroutineScope.launch(Dispatchers.IO) {
+    // Async version that doesn't block any thread
+    private suspend fun updateLatestImuDataAsync(systemTimestamp: Long, monoTimestamp: Long) {
+        // Already in IO dispatcher from caller, no need to launch again
             try {
                 // Update latestImuData in background
                 latestImuData = FloatArray(9).apply {
@@ -623,7 +653,6 @@ class SensorCollector(
                 // Log error or handle appropriately
                 Log.e("ImuDataProcessor", "Error processing IMU data", e)
             }
-        }
     }
 
     fun setDataSynchronizer(synchronizer: DataSynchronizer) {
@@ -656,51 +685,57 @@ class SensorCollector(
                 2
             ).apply {
                 setOnImageAvailableListener({ reader ->
-                    val image = reader.acquireLatestImage()
-                    image?.let {
-                        try {
-                            val bitmap = when (cameraConfig.imageFormat) {
-                                ImageFormat.JPEG -> {
-                                    val buffer = it.planes[0].buffer
-                                    val bytes = ByteArray(buffer.remaining())
-                                    buffer.get(bytes)
-                                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                }
-
-                                ImageFormat.YUV_420_888 -> yuvToBitmap(it)
-                                else -> null
-                            }
-                            bitmap?.let { bmp ->
-                                val rotatedBitmap =
-                                    safeRotateBitmap(bmp, getRotationDegrees(cameraId))
-                                val frameId = System.currentTimeMillis()
-                                val systemTime = System.currentTimeMillis()
-                                val monoTime = System.nanoTime()
-                                val sensorData = SensorData(
-                                    value = "Camera ID: $cameraId",
-                                    bitmap = rotatedBitmap,
-                                    timestamp = systemTime,
-                                    monoTimestamp = monoTime,
-                                    frameId = frameId
-                                )
-                                if (::dataSynchronizer.isInitialized) {
-                                    LoggerManager.getInstance(context, dataSynchronizer)
-                                        .pushCamera(sensorData)
-                                }
-                                callback(sensorData)
-                                ensureDetectorExecutor()
-                                detectorExecutor.submit {
-                                    if (rotatedBitmap != null) {
-                                        detector?.detect(rotatedBitmap, frameId)
+                    // Process camera data on sensor thread pool
+                    sensorScope.launch(Dispatchers.IO) {
+                        val image = reader.acquireLatestImage()
+                        image?.let {
+                            try {
+                                val bitmap = when (cameraConfig.imageFormat) {
+                                    ImageFormat.JPEG -> {
+                                        val buffer = it.planes[0].buffer
+                                        val bytes = ByteArray(buffer.remaining())
+                                        buffer.get(bytes)
+                                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                                     }
+
+                                    ImageFormat.YUV_420_888 -> yuvToBitmap(it)
+                                    else -> null
                                 }
-                            } ?: callback(null)
-                        } finally {
-                            it.close()
-                        }
-                        setOnImageAvailableListener(null, null)
-                        closeCamera()
-                    } ?: callback(null)
+                                bitmap?.let { bmp ->
+                                    val rotatedBitmap =
+                                        safeRotateBitmap(bmp, getRotationDegrees(cameraId))
+                                    val frameId = System.currentTimeMillis()
+                                    val systemTime = System.currentTimeMillis()
+                                    val monoTime = System.nanoTime()
+                                    val sensorData = SensorData(
+                                        value = "Camera ID: $cameraId",
+                                        bitmap = rotatedBitmap,
+                                        timestamp = systemTime,
+                                        monoTimestamp = monoTime,
+                                        frameId = frameId
+                                    )
+                                    if (::dataSynchronizer.isInitialized) {
+                                        LoggerManager.getInstance(context, dataSynchronizer)
+                                            .pushCamera(sensorData)
+                                    }
+                                    // Switch to Main only for callback
+                                    withContext(Dispatchers.Main) {
+                                        callback(sensorData)
+                                    }
+                                    ensureDetectorExecutor()
+                                    detectorExecutor.submit {
+                                        if (rotatedBitmap != null) {
+                                            detector?.detect(rotatedBitmap, frameId)
+                                        }
+                                    }
+                                } ?: withContext(Dispatchers.Main) { callback(null) }
+                            } finally {
+                                it.close()
+                            }
+                            setOnImageAvailableListener(null, null)
+                            closeCamera()
+                        } ?: withContext(Dispatchers.Main) { callback(null) }
+                    }
                 }, null)
             }
             if (!cameraOpenCloseLock.tryAcquire(2, TimeUnit.SECONDS)) {
@@ -890,10 +925,12 @@ class SensorCollector(
                     .setMinUpdateDistanceMeters(0f)
                     .build()
 
+                // Use background thread looper for location updates
+                val backgroundHandler = Handler(imageProcessingThread.looper)
                 fusedLocationClient.requestLocationUpdates(
                     locationRequest,
                     locationCallback,
-                    Looper.getMainLooper()
+                    backgroundHandler.looper
                 )
                 Log.d(TAG, "✅ GPS만 재시작 완료")
             } catch (e: Exception) {
@@ -1004,10 +1041,12 @@ class SensorCollector(
                         if (managedBitmap != null) {
                             handleAdvancedTaggedFrame(managedBitmap, callback)
                         } else {
-                            coroutineScope.launch(Dispatchers.Main) { callback(null) }
+                            // Use sensorScope for consistency
+                            sensorScope.launch(Dispatchers.Main) { callback(null) }
                         }
                     } else {
-                        coroutineScope.launch(Dispatchers.Main) { callback(null) }
+                        // Use sensorScope for consistency
+                        sensorScope.launch(Dispatchers.Main) { callback(null) }
                     }
 
                 } finally {
@@ -1153,22 +1192,23 @@ class SensorCollector(
         managedBitmap: ManagedBitmap,
         callback: (SensorData?) -> Unit
     ) {
-        val frameId = System.nanoTime()
-        val systemTime = System.currentTimeMillis()
+        // Process frame in sensor thread pool
+        sensorScope.launch(Dispatchers.IO) {
+            val frameId = System.nanoTime()
+            val systemTime = System.currentTimeMillis()
 
-        frameProcessingStats.incrementAndGet()
+            frameProcessingStats.incrementAndGet()
 
-        //  ManagedBitmap 유효성 재검증
-        if (!managedBitmap.isValid() || managedBitmap.bitmap.isRecycled) {
-            Log.w(TAG, "무효한 ManagedBitmap 감지 - 프레임 스킵: frameId=$frameId")
-            managedBitmap.release()
-            mainHandler.post { callback(null) }
-            return
-        }
+            //  ManagedBitmap 유효성 재검증
+            if (!managedBitmap.isValid() || managedBitmap.bitmap.isRecycled) {
+                Log.w(TAG, "무효한 ManagedBitmap 감지 - 프레임 스킵: frameId=$frameId")
+                managedBitmap.release()
+                withContext(Dispatchers.Main) { callback(null) }
+                return@launch
+            }
 
-        // LoggerManager 처리는 백그라운드에서 (이미 백그라운드 스레드)
-        if (::dataSynchronizer.isInitialized) {
-            coroutineScope.launch(Dispatchers.IO) {
+            // LoggerManager 처리는 백그라운드에서 (이미 백그라운드 스레드)
+            if (::dataSynchronizer.isInitialized) {
                 try {
                     val sensorData = SensorData(
                         value = "TaggedFrame: $frameId",
@@ -1183,41 +1223,41 @@ class SensorCollector(
                     Log.e(TAG, "백그라운드 LoggerManager 처리 실패: ${e.message}", e)
                 }
             }
-        }
 
-        // 🎯 수정: UI로 메인 스레드에서 전달
-        mainHandler.post {
-            try {
-                if (managedBitmap.isValid() && !managedBitmap.bitmap.isRecycled) {
-                    callback(
-                        SensorData(
-                            value = "Advanced Tagged Frame: $frameId",
-                            bitmap = managedBitmap.bitmap,
-                            managedBitmap = managedBitmap,
-                            timestamp = systemTime,
-                            monoTimestamp = System.nanoTime(),
-                            frameId = frameId
+            // 🎯 수정: UI로 메인 스레드에서 전달 - withContext를 사용
+            withContext(Dispatchers.Main) {
+                try {
+                    if (managedBitmap.isValid() && !managedBitmap.bitmap.isRecycled) {
+                        callback(
+                            SensorData(
+                                value = "Advanced Tagged Frame: $frameId",
+                                bitmap = managedBitmap.bitmap,
+                                managedBitmap = managedBitmap,
+                                timestamp = systemTime,
+                                monoTimestamp = System.nanoTime(),
+                                frameId = frameId
+                            )
                         )
-                    )
-                    Log.d(TAG, "✅ Non-blocking frame delivered: frameId=$frameId")
-                } else {
-                    Log.w(TAG, "⚠️ UI 전달 시 비트맵 무효: frameId=$frameId")
+                        Log.d(TAG, "✅ Non-blocking frame delivered: frameId=$frameId")
+                    } else {
+                        Log.w(TAG, "⚠️ UI 전달 시 비트맵 무효: frameId=$frameId")
+                        managedBitmap.release()
+                        callback(null)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Frame delivery error: ${e.message}", e)
                     managedBitmap.release()
                     callback(null)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Frame delivery error: ${e.message}", e)
-                managedBitmap.release()
-                callback(null)
             }
-        }
 
-        handleSelectiveDetection(managedBitmap, frameId)
+            handleSelectiveDetection(managedBitmap, frameId)
 
-        if (frameCount % 90 == 0) {
-            Log.i(TAG, "📊 Non-blocking: ${taggedBitmapPool.getStatus()}")
-            Log.i(TAG, "📊 Processor: ${highSpeedProcessor.getStatus()}")
-            Log.i(TAG, "📊 Thread: ${Thread.currentThread().name}")
+            if (frameCount % 90 == 0) {
+                Log.i(TAG, "📊 Non-blocking: ${taggedBitmapPool.getStatus()}")
+                Log.i(TAG, "📊 Processor: ${highSpeedProcessor.getStatus()}")
+                Log.i(TAG, "📊 Thread: ${Thread.currentThread().name}")
+            }
         }
     }
 
@@ -1398,10 +1438,12 @@ class SensorCollector(
 
         try {
             fusedLocationClient.removeLocationUpdates(locationCallback)
+            // Use background thread looper for location updates
+            val backgroundHandler = Handler(imageProcessingThread.looper)
             fusedLocationClient.requestLocationUpdates(
                 locationRequest,
                 locationCallback,
-                Looper.getMainLooper()
+                backgroundHandler.looper
             )
             Log.d(TAG, "✅ GPS 위치 업데이트 재시작")
         } catch (e: Exception) {
@@ -1489,6 +1531,8 @@ class SensorCollector(
                 Log.e(TAG, "이미지 처리 핸들러 정리 실패: ${e.message}", e)
             }
 
+            // Cancel both scopes
+            sensorScope.cancel()
             coroutineScope.cancel()
 
             Log.d(TAG, "모든 센서 스트리밍 중지 및 리소스 정리 완료")
@@ -1909,6 +1953,19 @@ class SensorCollector(
                 Log.w(TAG, "이미지 처리 스레드 종료 인터럽트")
                 Thread.currentThread().interrupt()
             }
+            
+            // Clean up sensor thread pool
+            sensorScope.cancel()
+            sensorThreadPoolExecutor.shutdown()
+            try {
+                if (!sensorThreadPoolExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
+                    sensorThreadPoolExecutor.shutdownNow()
+                }
+            } catch (e: InterruptedException) {
+                sensorThreadPoolExecutor.shutdownNow()
+                Thread.currentThread().interrupt()
+            }
+            Log.d(TAG, "✅ 센서 스레드 풀 정리 완료")
 
         } catch (e: Exception) {
             Log.e(TAG, "이미지 처리 스레드 정리 실패: ${e.message}", e)
@@ -1920,7 +1977,8 @@ class SensorCollector(
      */
     private fun startPeriodicGpuCleanup() {
         gpuCleanupJob?.cancel()
-        gpuCleanupJob = coroutineScope.launch {
+        // Use sensorScope for GPU cleanup
+        gpuCleanupJob = sensorScope.launch {
             while (isActive) {
                 delay(300_000) // 5분마다
                 try {
