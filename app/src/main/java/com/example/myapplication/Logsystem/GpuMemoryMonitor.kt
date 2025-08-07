@@ -1,5 +1,5 @@
 // app/src/main/java/com/example/myapplication/utils/GpuMemoryMonitor.kt
-package com.example.myapplication.utils
+package com.example.myapplication.Logsystem
 
 import android.app.ActivityManager
 import android.content.Context
@@ -180,7 +180,8 @@ class GpuMemoryMonitor private constructor(
             // 임계 상태 감지
             if (currentInfo.graphicsMemoryMB > 100f || currentInfo.memoryPressureLevel == "HIGH") {
                 val criticalCount = criticalGpuStateCount.incrementAndGet()
-                fileLogger.e(TAG, " GPU 임계 상태: Graphics=${String.format("%.1f", currentInfo.graphicsMemoryMB)}MB, " +
+                fileLogger.e(
+                    TAG, " GPU 임계 상태: Graphics=${String.format("%.1f", currentInfo.graphicsMemoryMB)}MB, " +
                         "Pressure=${currentInfo.memoryPressureLevel}, 연속 ${criticalCount}회")
 
                 if (criticalCount >= 3) {

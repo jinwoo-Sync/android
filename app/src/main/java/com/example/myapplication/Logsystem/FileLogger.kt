@@ -1,5 +1,5 @@
 // app/src/main/java/com/example/myapplication/utils/FileLogger.kt
-package com.example.myapplication.utils
+package com.example.myapplication.Logsystem
 
 import android.content.Context
 import android.os.Build

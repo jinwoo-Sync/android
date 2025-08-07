@@ -18,8 +18,8 @@ import com.example.myapplication.data.sensor.SensorCollector
 import com.example.myapplication.data.sync.DataSynchronizer
 import com.example.myapplication.databinding.ActivityMainBinding
 import com.example.myapplication.utils.BitmapPoolManager
-import com.example.myapplication.utils.CrashHandler
-import com.example.myapplication.utils.FileLogger
+import com.example.myapplication.Logsystem.CrashHandler
+import com.example.myapplication.Logsystem.FileLogger
 import com.example.myapplication.utils.HealthLevel
 import com.example.myapplication.utils.PoolHealthStatus
 import com.example.myapplication.utils.ResourceMonitor
@@ -32,7 +32,7 @@ import android.net.Uri
 import android.provider.Settings
 import android.os.PowerManager
 import android.view.Choreographer
-import com.example.myapplication.utils.GpuMemoryMonitor
+import com.example.myapplication.Logsystem.GpuMemoryMonitor
 import kotlinx.coroutines.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
