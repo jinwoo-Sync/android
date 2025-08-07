@@ -188,6 +188,35 @@
 
         </LinearLayout>
 
+        <!-- 센서 제어 버튼 레이아웃 -->
+        <LinearLayout
+            android:id="@+id/sensorControlLayout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="8dp"
+            app:layout_constraintTop_toBottomOf="@id/poolControlLayout"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent">
+
+            <Button
+                android:id="@+id/button_pause_sensors"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="센서 일시정지"
+                android:layout_marginEnd="8dp" />
+
+            <Button
+                android:id="@+id/button_resume_sensors"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="센서 재개"
+                android:layout_marginStart="8dp" />
+
+        </LinearLayout>
+
         <!-- 설정 및 컨트롤 레이아웃 -->
         <LinearLayout
             android:id="@+id/controlLayout"
@@ -198,7 +227,7 @@
             android:layout_marginTop="8dp"
             android:layout_marginStart="16dp"
             android:layout_marginEnd="16dp"
-            app:layout_constraintTop_toBottomOf="@id/poolControlLayout"
+            app:layout_constraintTop_toBottomOf="@id/sensorControlLayout"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent">
 

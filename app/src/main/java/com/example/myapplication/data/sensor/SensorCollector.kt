@@ -217,6 +217,9 @@ class SensorCollector(
     private val locationManager =
         context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    private val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    private val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    private val magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
 
     private var detector: Detector? = null
     private var detectorExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -1862,6 +1865,34 @@ class SensorCollector(
             }
 
             Log.d(TAG, "GPU 추론 리소스 정리 완료")
+        }
+    }
+
+    fun pauseSensorStreaming() {
+        try {
+            sensorManager.unregisterListener(accelerometerListener)
+            sensorManager.unregisterListener(gyroscopeListener)
+            sensorManager.unregisterListener(magnetometerListener)
+            Log.d(TAG, "센서 일시 중단")
+        } catch (e: Exception) {
+            Log.d(TAG, "센서 일시 중단 실패: ${e.message}", e)
+        }
+    }
+
+    fun resumeSensorStreaming() {
+        try {
+            accelerometer?.let { 
+                sensorManager.registerListener(accelerometerListener, it, SensorManager.SENSOR_DELAY_GAME)
+            }
+            gyroscope?.let { 
+                sensorManager.registerListener(gyroscopeListener, it, SensorManager.SENSOR_DELAY_GAME)
+            }
+            magnetometer?.let { 
+                sensorManager.registerListener(magnetometerListener, it, SensorManager.SENSOR_DELAY_GAME)
+            }
+            Log.d(TAG, "센서 재시작")
+        } catch (e: Exception) {
+            Log.d(TAG, "센서 재시작 실패: ${e.message}", e)
         }
     }
 

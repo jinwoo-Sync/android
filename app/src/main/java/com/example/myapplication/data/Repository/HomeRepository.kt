@@ -417,4 +417,30 @@ class HomeRepository(
             null
         }
     }
+
+    /**
+     * ✅ 센서 일시 중단 (IMU 센서만)
+     */
+    suspend fun pauseSensors() {
+        try {
+            sensorCollector.pauseSensorStreaming()
+            Log.d(TAG, "✅ Repository: 센서 일시 중단 완료")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Repository: 센서 일시 중단 실패: ${e.message}", e)
+            throw e
+        }
+    }
+
+    /**
+     * ✅ 센서 재개 (IMU 센서만)
+     */
+    suspend fun resumeSensors() {
+        try {
+            sensorCollector.resumeSensorStreaming()
+            Log.d(TAG, "✅ Repository: 센서 재개 완료")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Repository: 센서 재개 실패: ${e.message}", e)
+            throw e
+        }
+    }
 }

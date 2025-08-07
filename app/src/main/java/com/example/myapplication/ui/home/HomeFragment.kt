@@ -487,6 +487,16 @@ class HomeFragment : Fragment() {
         binding.buttonSetFrameSkip.setOnClickListener {
             handleFrameSkipButtonClick()
         }
+
+        binding.buttonPauseSensors.setOnClickListener {
+            viewModel.pauseSensors()
+            showToast("IMU 센서 일시정지")
+        }
+
+        binding.buttonResumeSensors.setOnClickListener {
+            viewModel.resumeSensors()
+            showToast("IMU 센서 재개")
+        }
     }
 
     private fun handleCameraButtonClick(mainActivity: MainActivity) {

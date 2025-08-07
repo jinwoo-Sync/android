@@ -270,6 +270,38 @@ class HomeViewModel(
     }
 
     /**
+     * ✅ IMU 센서 일시 중단
+     */
+    fun pauseSensors() {
+        viewModelScope.launch {
+            try {
+                homeRepository.pauseSensors()
+                _imuData.postValue("IMU: 일시 중단됨")
+                Log.d("HomeViewModel", "✅ ViewModel: IMU 센서 일시 중단 완료")
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "❌ ViewModel: IMU 센서 일시 중단 실패: ${e.message}", e)
+                _imuData.postValue("IMU: 일시 중단 실패")
+            }
+        }
+    }
+
+    /**
+     * ✅ IMU 센서 재개
+     */
+    fun resumeSensors() {
+        viewModelScope.launch {
+            try {
+                homeRepository.resumeSensors()
+                _imuData.postValue("IMU: 재개됨")
+                Log.d("HomeViewModel", "✅ ViewModel: IMU 센서 재개 완료")
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "❌ ViewModel: IMU 센서 재개 실패: ${e.message}", e)
+                _imuData.postValue("IMU: 재개 실패")
+            }
+        }
+    }
+
+    /**
      * 카메라 스트리밍 시작 - Advanced Tagged Pool 사용
      */
     private fun startCameraStreaming() {
