@@ -203,13 +203,13 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
 
             while (isActive) {
                 try {
-                    delay(30_000) // 30초 대기
+                    delay(120_000) // 30초 → 2분으로 변경
 
                     if (!perfettoTracer.isTracing()) {
                         val traceFilePath = perfettoTracer.startPerfettoTrace("ContinuousTrace_${sessionId}_${traceCount}")
                         fileLogger.i("MainActivity", "🔄 지속적 Perfetto 추적 시작 #${traceCount}: $traceFilePath")
 
-                        delay(PERFETTO_TRACE_DURATION) // 60초 추적
+                        delay(30_000) // 60초 → 30초로 단축
                         stopPerfettoTracing()
 
                         traceCount++
@@ -217,7 +217,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
 
                 } catch (e: Exception) {
                     fileLogger.e("MainActivity", "지속적 Perfetto 추적 오류: ${e.message}", e)
-                    delay(10_000) // 오류 시 10초 대기
+                    delay(300_000) // 에러 시 5분 대기
                 }
             }
         }
