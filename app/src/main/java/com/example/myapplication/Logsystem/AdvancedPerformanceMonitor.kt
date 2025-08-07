@@ -351,7 +351,7 @@ class AdvancedPerformanceMonitor private constructor(
     private fun triggerPerformanceAnalysis(reason: String) {
         monitoringScope.launch(Dispatchers.IO) {
             try {
-                fileLogger.e(TAG, "성능 분석 트리거: $reason")
+                //fileLogger.e(TAG, "성능 분석 트리거: $reason")
 
                 // 무거운 작업들을 IO 디스패처로 이동
                 resourceMonitor.logAppResourceStatus(TAG, "성능문제_$reason")

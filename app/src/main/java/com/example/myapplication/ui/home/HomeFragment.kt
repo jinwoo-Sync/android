@@ -81,6 +81,15 @@ class HomeFragment : Fragment() {
 
     // 복구 관련 변수
     private var lastRecoveryTime = 0L
+    
+    // TextView 업데이트 쓰로틀링 변수
+    private var lastGpsText: String? = null
+    private var lastGnssText: String? = null
+    private var lastImuText: String? = null
+    private var lastGpsUpdateTime = 0L
+    private var lastGnssUpdateTime = 0L
+    private var lastImuUpdateTime = 0L
+    private val TEXT_UPDATE_INTERVAL_MS = 200L // 200ms 쓰로틀링
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -336,6 +345,14 @@ class HomeFragment : Fragment() {
     }
 
     private fun resetSensorDisplays() {
+        // 쓰로틀링 상태 초기화하여 즉시 업데이트 허용
+        lastGpsText = null
+        lastGnssText = null
+        lastImuText = null
+        lastGpsUpdateTime = 0L
+        lastGnssUpdateTime = 0L
+        lastImuUpdateTime = 0L
+        
         binding.gpsLogText.text = "GPS: 대기 중"
         binding.gnssLogText.text = "GNSS: 대기 중"
         binding.imuLogText.text = "IMU: 대기 중"
@@ -389,7 +406,16 @@ class HomeFragment : Fragment() {
 
     private fun setupSensorObservers() {
         viewModel.gpsData.observe(viewLifecycleOwner) { data ->
-            binding.gpsLogText.text = data
+            val currentTime = System.currentTimeMillis()
+            // 200ms 쓰로틀링 및 텍스트 변경 확인
+            if (currentTime - lastGpsUpdateTime >= TEXT_UPDATE_INTERVAL_MS && data != lastGpsText) {
+                lastGpsText = data
+                lastGpsUpdateTime = currentTime
+                // post를 사용하여 다음 UI 프레임으로 연기
+                binding.gpsLogText.post {
+                    binding.gpsLogText.text = data
+                }
+            }
         }
 
         viewModel.gnssData.observe(viewLifecycleOwner) { data ->
@@ -398,11 +424,30 @@ class HomeFragment : Fragment() {
             } else {
                 data
             }
-            binding.gnssLogText.text = displayText
+            
+            val currentTime = System.currentTimeMillis()
+            // 200ms 쓰로틀링 및 텍스트 변경 확인
+            if (currentTime - lastGnssUpdateTime >= TEXT_UPDATE_INTERVAL_MS && displayText != lastGnssText) {
+                lastGnssText = displayText
+                lastGnssUpdateTime = currentTime
+                // post를 사용하여 다음 UI 프레임으로 연기
+                binding.gnssLogText.post {
+                    binding.gnssLogText.text = displayText
+                }
+            }
         }
 
         viewModel.imuData.observe(viewLifecycleOwner) { data ->
-            binding.imuLogText.text = data
+            val currentTime = System.currentTimeMillis()
+            // 200ms 쓰로틀링 및 텍스트 변경 확인
+            if (currentTime - lastImuUpdateTime >= TEXT_UPDATE_INTERVAL_MS && data != lastImuText) {
+                lastImuText = data
+                lastImuUpdateTime = currentTime
+                // post를 사용하여 다음 UI 프레임으로 연기
+                binding.imuLogText.post {
+                    binding.imuLogText.text = data
+                }
+            }
         }
     }
 
