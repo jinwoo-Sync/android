@@ -216,7 +216,6 @@ class HomeViewModel(
                         
                         withContext(Dispatchers.Main) {
                             _gpsData.value = gpsInfo
-                            Log.d("HomeViewModel", "✅ GPS 통합 업데이트 완료")
                         }
                     }
                 }
@@ -234,7 +233,6 @@ class HomeViewModel(
                         
                         withContext(Dispatchers.Main) {
                             _imuData.value = imuInfo
-                            Log.d("HomeViewModel", "✅ IMU 통합 업데이트 완료")
                         }
                     }
                 }
@@ -251,7 +249,6 @@ class HomeViewModel(
                         
                         withContext(Dispatchers.Main) {
                             _gnssData.value = gnssInfo
-                            Log.d("HomeViewModel", "✅ GNSS 통합 업데이트 완룮")
                         }
                     }
                 }
