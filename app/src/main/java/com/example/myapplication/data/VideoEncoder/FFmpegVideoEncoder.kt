@@ -49,24 +49,22 @@ class SimpleVideoEncoder(private val context: Context) {
     private val workingBitmaps = CircularQueue<Bitmap>(capacity = 2)
 
     init {
-        // 🎯 작업용 bitmap 초기화
+        //  작업용 bitmap 초기화
         initializeWorkingBitmaps()
     }
 
     /**
-     * 🎯 CircularQueue로 YUV 변환용 작업 bitmap 초기화
+     *  CircularQueue로 YUV 변환용 작업 bitmap 초기화 (메모리 사용량 최소화)
      */
     private fun initializeWorkingBitmaps() {
-        for (i in 0 until 2) {
-            try {
-                val bitmap = Bitmap.createBitmap(VIDEO_WIDTH, VIDEO_HEIGHT, Bitmap.Config.ARGB_8888)
-                workingBitmaps.push(bitmap)
-                Log.d(TAG, "✅ YUV 작업용 bitmap 생성: @${bitmap.hashCode().toString(16)}")
-            } catch (e: OutOfMemoryError) {
-                Log.w(TAG, "⚠️ YUV 작업용 bitmap 생성 실패: $i")
-                System.gc()
-                break
-            }
+        // 풀 크기를 1개로 줄여서 메모리 사용량 최소화
+        try {
+            val bitmap = Bitmap.createBitmap(VIDEO_WIDTH, VIDEO_HEIGHT, Bitmap.Config.RGB_565) // ARGB_8888 대신 RGB_565 사용
+            workingBitmaps.push(bitmap)
+            Log.d(TAG, "최적화된 YUV 작업용 bitmap 생성")
+        } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "작업용 bitmap 생성 실패 - 메모리 부족")
+            System.gc()
         }
     }
 
@@ -129,22 +127,11 @@ class SimpleVideoEncoder(private val context: Context) {
     fun addFrame(bitmap: Bitmap): Boolean {
         if (!isRecording.get()) return false
 
-        try {
-            val inputBufferIndex = mediaCodec!!.dequeueInputBuffer(10000)
+        return try {
+            val inputBufferIndex = mediaCodec!!.dequeueInputBuffer(5000) // 타임아웃 단축
             if (inputBufferIndex >= 0) {
-                val scaledBitmap = if (bitmap.width != VIDEO_WIDTH || bitmap.height != VIDEO_HEIGHT) {
-                    Bitmap.createScaledBitmap(bitmap, VIDEO_WIDTH, VIDEO_HEIGHT, true)
-                } else {
-                    bitmap
-                }
-
-                // 🛡️ 완전히 독립적인 일회용 복사본 (30fps 견딜 수 있는 유일한 방법)
-                val safeCopy = Bitmap.createBitmap(scaledBitmap)
-                val yuvData = try {
-                    bitmapToColorYUV420(safeCopy) // 독립 복사본에서 getPixels() - 안전!
-                } finally {
-                    safeCopy.recycle() // 즉시 해제로 메모리 누수 방지
-                }
+                // 즉시 처리 방식으로 변경 - 메모리 누수 방지
+                val yuvData = convertBitmapDirectly(bitmap)
 
                 val inputBuffer = mediaCodec!!.getInputBuffer(inputBufferIndex)!!
                 inputBuffer.clear()
@@ -154,17 +141,33 @@ class SimpleVideoEncoder(private val context: Context) {
                 mediaCodec!!.queueInputBuffer(inputBufferIndex, 0, yuvData.size, presentationTimeUs, 0)
                 frameIndex++
 
-                if (scaledBitmap != bitmap) scaledBitmap.recycle()
-
-                if (frameIndex % 30 == 0L) {
-                    Log.d(TAG, "✅ 고속 안전 컬러 인코딩: frame=$frameIndex")
-                }
+                true
+            } else {
+                false
             }
-            return true
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to add frame: ${e.message}", e)
-            return false
+            Log.e(TAG, "프레임 추가 실패: ${e.message}")
+            false
         }
+    }
+
+    // 직접 변환으로 메모리 복사 최소화
+    private fun convertBitmapDirectly(bitmap: Bitmap): ByteArray {
+        val scaledBitmap = if (bitmap.width != VIDEO_WIDTH || bitmap.height != VIDEO_HEIGHT) {
+            Bitmap.createScaledBitmap(bitmap, VIDEO_WIDTH, VIDEO_HEIGHT, false) // 품질 대신 성능 우선
+        } else {
+            bitmap
+        }
+
+        val yuvData = try {
+            bitmapToColorYUV420(scaledBitmap)
+        } finally {
+            if (scaledBitmap != bitmap) {
+                scaledBitmap.recycle()
+            }
+        }
+
+        return yuvData
     }
 
     /**
