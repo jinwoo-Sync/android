@@ -66,7 +66,10 @@ class HomeViewModel(
 
     private var lastGnssUpdateTime = 0L
     private var lastImuUpdateTime = 0L
+    private var lastGpsUpdateTime = 0L
     private val IMU_UPDATE_INTERVAL_MS = 1000L
+    private val GPS_UPDATE_INTERVAL_MS = 500L
+    private val GNSS_UPDATE_INTERVAL_MS = 500L
 
     private val inferenceTimes = ArrayDeque<Long>(30)
     private var currentSkipInterval = 2
@@ -205,40 +208,63 @@ class HomeViewModel(
 
         homeRepository.startSensorStreaming(
             gpsCallback = { sensorDataString ->
-                // GPS 콜백 처리 (기존과 동일)
-                viewModelScope.launch(Dispatchers.Main.immediate) {
-                    val gpsInfo = buildString {
-                        append("GPS: ${sensorDataString.value}")
-                        append("\nSysTS: ${sensorDataString.timestamp}")
+                // GPS 500ms 쓰로틀링 및 비동기 포맷팅
+                val currentTime = System.currentTimeMillis()
+                if (currentTime - lastGpsUpdateTime >= GPS_UPDATE_INTERVAL_MS) {
+                    lastGpsUpdateTime = currentTime
+                    
+                    // Dispatchers.Default에서 문자열 포맷팅
+                    viewModelScope.launch(Dispatchers.Default) {
+                        val gpsInfo = buildString {
+                            append("GPS: ${sensorDataString.value}")
+                            append("\nSysTS: ${sensorDataString.timestamp}")
+                        }
+                        
+                        // Main으로 UI 반영
+                        withContext(Dispatchers.Main) {
+                            _gpsData.value = gpsInfo
+                            Log.d("HomeViewModel", "✅ GPS UI 업데이트 완료")
+                        }
                     }
-                    _gpsData.value = gpsInfo
-                    Log.d("HomeViewModel", "✅ GPS UI 업데이트 완료")
                 }
             },
             imuCallback = { sensorDataString ->
-                // IMU 콜백 처리 (기존과 동일)
+                // IMU 1000ms 쓰로틀링 및 비동기 포맷팅
                 val currentTime = System.currentTimeMillis()
                 if (currentTime - lastImuUpdateTime >= IMU_UPDATE_INTERVAL_MS) {
-                    viewModelScope.launch(Dispatchers.Main.immediate) {
+                    lastImuUpdateTime = currentTime
+                    
+                    // Dispatchers.Default에서 문자열 포맷팅
+                    viewModelScope.launch(Dispatchers.Default) {
                         val imuInfo = buildString {
                             append("IMU: ${sensorDataString.value}")
                             append("\nSysTS: ${sensorDataString.timestamp}")
                         }
-                        _imuData.value = imuInfo
-                        Log.d("HomeViewModel", "✅ IMU UI 업데이트 완료")
+                        
+                        // Main으로 UI 반영
+                        withContext(Dispatchers.Main) {
+                            _imuData.value = imuInfo
+                            Log.d("HomeViewModel", "✅ IMU UI 업데이트 완료")
+                        }
                     }
-                    lastImuUpdateTime = currentTime
                 }
             },
             gnssCallback = { sensorDataString ->
-                // GNSS 콜백 처리 (기존과 동일)
+                // GNSS 500ms 쓰로틀링 및 비동기 포맷팅
                 val currentTime = System.currentTimeMillis()
-                if (currentTime - lastGnssUpdateTime >= 1000) {
-                    viewModelScope.launch(Dispatchers.Main.immediate) {
-                        _gnssData.value = "GNSS: ${sensorDataString.value}"
-                        Log.d("HomeViewModel", "✅ GNSS UI 업데이트 완료")
-                    }
+                if (currentTime - lastGnssUpdateTime >= GNSS_UPDATE_INTERVAL_MS) {
                     lastGnssUpdateTime = currentTime
+                    
+                    // Dispatchers.Default에서 문자열 포맷팅
+                    viewModelScope.launch(Dispatchers.Default) {
+                        val gnssInfo = "GNSS: ${sensorDataString.value}"
+                        
+                        // Main으로 UI 반영
+                        withContext(Dispatchers.Main) {
+                            _gnssData.value = gnssInfo
+                            Log.d("HomeViewModel", "✅ GNSS UI 업데이트 완료")
+                        }
+                    }
                 }
             },
             detectionCallback = null // 센서에서는 detection 안함
@@ -266,6 +292,7 @@ class HomeViewModel(
 
         lastGnssUpdateTime = 0L
         lastImuUpdateTime = 0L
+        lastGpsUpdateTime = 0L
         Log.d("HomeViewModel", " 센서 스트리밍 중지 완료")
     }
 

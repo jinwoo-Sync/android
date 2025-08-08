@@ -85,7 +85,7 @@
             app:layout_constraintTop_toBottomOf="@id/inference_time"
             tools:text="Pool: Available=2, Active=4" />
 
-        <!-- GPS 로그 -->
+        <!-- GPS 로그 - 최적화된 TextView -->
         <TextView
             android:id="@+id/gps_log_text"
             android:layout_width="match_parent"
@@ -96,12 +96,15 @@
             android:textSize="10sp"
             android:maxLines="2"
             android:ellipsize="none"
-            android:scrollbars="vertical"
+            android:includeFontPadding="false"
+            android:focusable="false"
+            android:longClickable="false"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toBottomOf="@id/pool_status_text"
             tools:text="GPS: 대기 중" />
 
+        <!-- GNSS 로그 - 최적화된 TextView -->
         <TextView
             android:id="@+id/gnss_log_text"
             android:layout_width="match_parent"
@@ -110,12 +113,16 @@
             android:layout_marginTop="8dp"
             android:layout_marginEnd="16dp"
             android:textSize="10sp"
+            android:maxLines="2"
+            android:includeFontPadding="false"
+            android:focusable="false"
+            android:longClickable="false"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toBottomOf="@id/gps_log_text"
             tools:text="GNSS: 대기 중" />
 
-        <!-- IMU 로그 -->
+        <!-- IMU 로그 - 최적화된 TextView -->
         <TextView
             android:id="@+id/imu_log_text"
             android:layout_width="match_parent"
@@ -124,6 +131,10 @@
             android:layout_marginTop="8dp"
             android:layout_marginEnd="16dp"
             android:textSize="10sp"
+            android:maxLines="2"
+            android:includeFontPadding="false"
+            android:focusable="false"
+            android:longClickable="false"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toBottomOf="@id/gnss_log_text"

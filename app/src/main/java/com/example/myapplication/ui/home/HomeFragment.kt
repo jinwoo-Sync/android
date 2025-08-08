@@ -35,6 +35,49 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.DecimalFormat
+import android.os.Handler
+import android.os.Looper
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * TextView 업데이트 배칭 처리기
+ */
+private class TextUpdateBatcher {
+    private val handler = Handler(Looper.getMainLooper())
+    private val pendingUpdates = ConcurrentHashMap<String, Runnable>()
+    private var batchRunnable: Runnable? = null
+    private val BATCH_INTERVAL_MS = 100L // 100ms 단위 배칭
+    
+    fun scheduleUpdate(key: String, update: () -> Unit) {
+        pendingUpdates[key] = Runnable { update() }
+        scheduleBatch()
+    }
+    
+    private fun scheduleBatch() {
+        if (batchRunnable == null) {
+            batchRunnable = Runnable {
+                executeBatch()
+                batchRunnable = null
+            }
+            handler.postDelayed(batchRunnable!!, BATCH_INTERVAL_MS)
+        }
+    }
+    
+    private fun executeBatch() {
+        val updates = pendingUpdates.values.toList()
+        pendingUpdates.clear()
+        
+        // 모든 업데이트를 한 번에 실행
+        handler.post {
+            updates.forEach { it.run() }
+        }
+    }
+    
+    fun shutdown() {
+        batchRunnable?.let { handler.removeCallbacks(it) }
+        pendingUpdates.clear()
+    }
+}
 
 /**
  * 공통 유틸리티 모음
@@ -82,14 +125,18 @@ class HomeFragment : Fragment() {
     // 복구 관련 변수
     private var lastRecoveryTime = 0L
     
-    // TextView 업데이트 쓰로틀링 변수
+    // TextView 업데이트 배칭 및 쓰로틀링 변수
+    private val textUpdateBatcher = TextUpdateBatcher()
     private var lastGpsText: String? = null
     private var lastGnssText: String? = null
     private var lastImuText: String? = null
     private var lastGpsUpdateTime = 0L
     private var lastGnssUpdateTime = 0L
     private var lastImuUpdateTime = 0L
-    private val TEXT_UPDATE_INTERVAL_MS = 200L // 200ms 쓰로틀링
+    private val GPS_UPDATE_INTERVAL_MS = 500L // GPS 500ms 간격
+    private val IMU_UPDATE_INTERVAL_MS = 1000L // IMU 1000ms 간격
+    private val GNSS_UPDATE_INTERVAL_MS = 500L // GNSS 500ms 간격
+    private var textUpdatesEnabled = true // FPS 낮을 때 업데이트 중지용
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -406,19 +453,23 @@ class HomeFragment : Fragment() {
 
     private fun setupSensorObservers() {
         viewModel.gpsData.observe(viewLifecycleOwner) { data ->
+            if (!textUpdatesEnabled) return@observe
+            
             val currentTime = System.currentTimeMillis()
-            // 200ms 쓰로틀링 및 텍스트 변경 확인
-            if (currentTime - lastGpsUpdateTime >= TEXT_UPDATE_INTERVAL_MS && data != lastGpsText) {
+            // GPS 500ms 쓰로틀링 및 텍스트 변경 확인
+            if (currentTime - lastGpsUpdateTime >= GPS_UPDATE_INTERVAL_MS && data != lastGpsText) {
                 lastGpsText = data
                 lastGpsUpdateTime = currentTime
-                // post를 사용하여 다음 UI 프레임으로 연기
-                binding.gpsLogText.post {
+                // 배칭 처리
+                textUpdateBatcher.scheduleUpdate("gps") {
                     binding.gpsLogText.text = data
                 }
             }
         }
 
         viewModel.gnssData.observe(viewLifecycleOwner) { data ->
+            if (!textUpdatesEnabled) return@observe
+            
             val displayText = if (data == "GNSS: 대기 중") {
                 "GNSS 데이터가 수신되지 않습니다."
             } else {
@@ -426,25 +477,27 @@ class HomeFragment : Fragment() {
             }
             
             val currentTime = System.currentTimeMillis()
-            // 200ms 쓰로틀링 및 텍스트 변경 확인
-            if (currentTime - lastGnssUpdateTime >= TEXT_UPDATE_INTERVAL_MS && displayText != lastGnssText) {
+            // GNSS 500ms 쓰로틀링 및 텍스트 변경 확인
+            if (currentTime - lastGnssUpdateTime >= GNSS_UPDATE_INTERVAL_MS && displayText != lastGnssText) {
                 lastGnssText = displayText
                 lastGnssUpdateTime = currentTime
-                // post를 사용하여 다음 UI 프레임으로 연기
-                binding.gnssLogText.post {
+                // 배칭 처리
+                textUpdateBatcher.scheduleUpdate("gnss") {
                     binding.gnssLogText.text = displayText
                 }
             }
         }
 
         viewModel.imuData.observe(viewLifecycleOwner) { data ->
+            if (!textUpdatesEnabled) return@observe
+            
             val currentTime = System.currentTimeMillis()
-            // 200ms 쓰로틀링 및 텍스트 변경 확인
-            if (currentTime - lastImuUpdateTime >= TEXT_UPDATE_INTERVAL_MS && data != lastImuText) {
+            // IMU 1000ms 쓰로틀링 및 텍스트 변경 확인  
+            if (currentTime - lastImuUpdateTime >= IMU_UPDATE_INTERVAL_MS && data != lastImuText) {
                 lastImuText = data
                 lastImuUpdateTime = currentTime
-                // post를 사용하여 다음 UI 프레임으로 연기
-                binding.imuLogText.post {
+                // 배칭 처리
+                textUpdateBatcher.scheduleUpdate("imu") {
                     binding.imuLogText.text = data
                 }
             }
@@ -599,6 +652,9 @@ class HomeFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
 
+        // 배칭 시스템 정리
+        textUpdateBatcher.shutdown()
+        
         // GLSurfaceView 정리
         clearCurrentDisplay()
 
@@ -618,6 +674,44 @@ class HomeFragment : Fragment() {
         Log.d("HomeFragment", "✅ HomeFragment 정리 완료 - GLSurfaceView 순수 OpenGL 적용됨")
     }
 
+    /**
+     * TextView 업데이트 일시정지
+     */
+    fun pauseTextUpdates() {
+        textUpdatesEnabled = false
+        Log.d("HomeFragment", "TextView 업데이트 일시정지")
+    }
+    
+    /**
+     * TextView 업데이트 재개
+     */
+    fun resumeTextUpdates() {
+        textUpdatesEnabled = true
+        Log.d("HomeFragment", "TextView 업데이트 재개")
+    }
+    
+    /**
+     * FPS 드랍 시 응급 복구
+     */
+    fun onLowFpsDetected(fps: Float) {
+        if (fps < 5) {
+            Log.w("HomeFragment", "FPS 5 이하 감지: ${fps}fps - TextView 업데이트 중지")
+            pauseTextUpdates()
+            
+            // requestLayout 및 GC 호출로 복구
+            lifecycleScope.launch(Dispatchers.Main) {
+                binding.root.requestLayout()
+                delay(100)
+                System.gc()
+                delay(500)
+                
+                // 복구 후 재개
+                resumeTextUpdates()
+                Log.d("HomeFragment", "FPS 복구 루틴 완료 - TextView 업데이트 재개")
+            }
+        }
+    }
+    
     companion object {
         private const val REQUEST_CODE_PERMISSIONS = 100
     }

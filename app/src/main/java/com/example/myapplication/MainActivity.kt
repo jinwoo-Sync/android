@@ -55,12 +55,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var perfettoTracer: PerfettoTracer
     private val monitoringScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // FPS 모니터링
+    // FPS 모니터링 강화
     private var fpsMonitor: Choreographer.FrameCallback? = null
     private var lastFpsTime = 0L
     private var frameCount = 0
     private val currentFps = AtomicLong(60)
     private val isLowFpsDetected = AtomicBoolean(false)
+    private var consecutiveLowFpsCount = 0
+    private val FPS_CRITICAL_THRESHOLD = 5 // FPS 5 이하 긴급 처리
+    private val FPS_WARNING_THRESHOLD = 10 // FPS 10 이하 경고
+    private var isEmergencyRecoveryActive = false
 
     //  BitmapPool 모니터링 추가
     private var lastPoolHealthCheck = 0L
@@ -95,6 +99,7 @@ class MainActivity : AppCompatActivity() {
     // 응급 복구 변수
     private var emergencyRecoveryCount = 0
     private var lastRecoveryTime = 0L
+    private var isTextUpdatesPaused = false
 
 override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -479,6 +484,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     private fun startRealTimeFpsMonitoring() {
         lastFpsTime = System.currentTimeMillis()
         frameCount = 0
+        consecutiveLowFpsCount = 0
 
         fpsMonitor = object : Choreographer.FrameCallback {
             override fun doFrame(frameTimeNanos: Long) {
@@ -490,6 +496,9 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                     if (currentTime - lastFpsTime >= 1000) {
                         val fps = frameCount * 1000.0 / (currentTime - lastFpsTime)
                         currentFps.set(fps.toLong())
+                        
+                        // FPS에 따른 TextView 업데이트 제어
+                        handleFpsBasedTextViewControl(fps)
 
                         // .mp4 녹화 중 FPS 드롭 특별 추적
                         if (isMp4Recording && fps <= 10.0) {
@@ -502,24 +511,30 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                             }
                         }
 
-                        //  일반 위험 상황 감지
+                        //  강화된 FPS 기반 복구 로직
                         when {
-                            fps <= 5.0 -> {
-                                val context = if (isMp4Recording) "치명적_FPS_드롭_MP4녹화중" else "치명적_FPS_드롭"
-                                fileLogger.e("MainActivity", " 치명적 FPS 드롭 감지: ${String.format("%.1f", fps)}fps ")
-                                logCriticalSystemState(context + "_${String.format("%.1f", fps)}")
-
-                                // 응급 힙 덤프 생성
-                                generateEmergencyHeapDump("CriticalFPS_${String.format("%.1f", fps)}")
-
-                                monitoringScope.launch {
-                                    performEmergencyRecovery("치명적 FPS 드롭 - MP4: $isMp4Recording")
+                            fps < FPS_CRITICAL_THRESHOLD -> {
+                                consecutiveLowFpsCount++
+                                
+                                // FPS 5 이하일 때 즉시 TextView 업데이트 중지 및 복구
+                                if (!isEmergencyRecoveryActive) {
+                                    isEmergencyRecoveryActive = true
+                                    val context = if (isMp4Recording) "치명적_FPS_드롭_MP4녹화중" else "치명적_FPS_드롭"
+                                    fileLogger.e("MainActivity", " FPS ${FPS_CRITICAL_THRESHOLD} 이하 감지: ${String.format("%.1f", fps)}fps ")
+                                    
+                                    // TextView 업데이트 즉시 중지
+                                    pauseTextViewUpdates()
+                                    
+                                    // 긴급 복구 시작
+                                    monitoringScope.launch {
+                                        performTextViewEmergencyRecovery(fps)
+                                    }
                                 }
                             }
-                            fps <= 8.0 -> {
+                            fps < FPS_WARNING_THRESHOLD -> {
                                 if (!isLowFpsDetected.getAndSet(true)) {
-                                    val context = if (isMp4Recording) "위험_FPS_드롭_MP4녹화중" else "위험_FPS_드롭"
-                                    fileLogger.w("MainActivity", " 위험 FPS 드롭 감지: ${String.format("%.1f", fps)}fps ")
+                                    val context = if (isMp4Recording) "경고_FPS_드롭_MP4녹화중" else "경고_FPS_드롭"
+                                    fileLogger.w("MainActivity", " FPS ${FPS_WARNING_THRESHOLD} 이하 감지: ${String.format("%.1f", fps)}fps ")
                                     logDetailedSystemState(context + "_${String.format("%.1f", fps)}")
 
                                     // 5초 후 플래그 리셋
@@ -530,6 +545,9 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                                 }
                             }
                             fps >= 15.0 -> {
+                                consecutiveLowFpsCount = 0
+                                isEmergencyRecoveryActive = false
+                                
                                 if (isLowFpsDetected.getAndSet(false)) {
                                     val context = if (isMp4Recording) "FPS회복_MP4녹화중" else "FPS회복"
                                     fileLogger.i("MainActivity", " FPS 회복: ${String.format("%.1f", fps)}fps ($context)")
@@ -1313,6 +1331,92 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
         }
 
         Log.d("MainActivity", " Documents/save/ Perfetto 추적과 함께 Activity 정리 완료")
+    }
+
+    /**
+     * FPS 기반 TextView 업데이트 제어
+     */
+    private fun handleFpsBasedTextViewControl(fps: Double) {
+        when {
+            fps < FPS_CRITICAL_THRESHOLD && !isTextUpdatesPaused -> {
+                pauseTextViewUpdates()
+            }
+            fps >= FPS_WARNING_THRESHOLD && isTextUpdatesPaused -> {
+                resumeTextViewUpdates()
+            }
+        }
+    }
+    
+    /**
+     * TextView 업데이트 일시정지
+     */
+    private fun pauseTextViewUpdates() {
+        isTextUpdatesPaused = true
+        
+        // HomeFragment의 pauseTextUpdates() 호출
+        val navController = findNavController(R.id.nav_host_fragment_activity_main)
+        val currentFragment = supportFragmentManager.primaryNavigationFragment?.childFragmentManager?.fragments?.firstOrNull()
+        if (currentFragment is com.example.myapplication.ui.home.HomeFragment) {
+            currentFragment.pauseTextUpdates()
+        }
+        
+        fileLogger.w("MainActivity", "TextView 업데이트 일시정지")
+    }
+    
+    /**
+     * TextView 업데이트 재개
+     */
+    private fun resumeTextViewUpdates() {
+        isTextUpdatesPaused = false
+        
+        // HomeFragment의 resumeTextUpdates() 호출
+        val navController = findNavController(R.id.nav_host_fragment_activity_main)
+        val currentFragment = supportFragmentManager.primaryNavigationFragment?.childFragmentManager?.fragments?.firstOrNull()
+        if (currentFragment is com.example.myapplication.ui.home.HomeFragment) {
+            currentFragment.resumeTextUpdates()
+        }
+        
+        fileLogger.i("MainActivity", "TextView 업데이트 재개")
+    }
+    
+    /**
+     * TextView 관련 긴급 복구
+     */
+    private suspend fun performTextViewEmergencyRecovery(fps: Double) = withContext(Dispatchers.IO) {
+        try {
+            fileLogger.w("MainActivity", "TextView 긴급 복구 시작 - FPS: ${String.format("%.1f", fps)}")
+            
+            // 1. requestLayout 호출
+            withContext(Dispatchers.Main) {
+                window.decorView.requestLayout()
+            }
+            delay(100)
+            
+            // 2. GC 호출
+            System.gc()
+            delay(200)
+            System.runFinalization()
+            delay(200)
+            
+            // 3. BitmapPool 정리
+            bitmapPoolManager.advancedTaggedBitmapPool.forceCleanupStaleReferences()
+            delay(300)
+            
+            // 4. TextView 업데이트 재개
+            withContext(Dispatchers.Main) {
+                resumeTextViewUpdates()
+            }
+            
+            // 5. 복구 완료 플래그 리셋
+            isEmergencyRecoveryActive = false
+            consecutiveLowFpsCount = 0
+            
+            fileLogger.i("MainActivity", "TextView 긴급 복구 완료")
+            
+        } catch (e: Exception) {
+            fileLogger.e("MainActivity", "TextView 긴급 복구 실패: ${e.message}", e)
+            isEmergencyRecoveryActive = false
+        }
     }
 
     fun isCameraPermissionGranted(): Boolean = isCameraPermissionGranted
