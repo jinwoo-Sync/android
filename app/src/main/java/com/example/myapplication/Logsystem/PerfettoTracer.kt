@@ -10,6 +10,7 @@ import android.util.Log
 import com.example.myapplication.Logsystem.GpuMemoryMonitor
 import com.example.myapplication.utils.BitmapPoolManager
 import kotlinx.coroutines.*
+import kotlinx.coroutines.delay
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -42,7 +43,18 @@ class PerfettoTracer private constructor(
     private var startTime: Long = 0
     private var methodTracingActive = false
     private var tempMethodTraceFileName: String? = null
-    
+    private var traceSegmentIndex = 0
+    private var traceSegmentFiles = mutableListOf<File>()
+    private var lastRotationTime = 0L
+    private var lastSegmentStartMs: Long = 0L
+    private var rotationJob: Job? = null
+    private val segmentFiles = mutableListOf<File>()
+    private val ROTATION_INTERVAL_MS = 15000L // 15초마다 회전
+    private val ROTATION_CHECK_PERIOD_MS = 1_000L
+    private val ROTATION_BUFFER_THRESHOLD = 48 * 1024 * 1024 // 48MB에서 회전 (64MB 버퍼의 75%)
+
+    private var segmentIndex = 0
+
     // 순환 버퍼로 메모리 사용량 최적화 (50,000개 제한)
     private val performanceEvents = mutableListOf<PerformanceEvent>()
     private val maxEventsInMemory = 50_000
@@ -71,33 +83,37 @@ class PerfettoTracer private constructor(
             isTracing = true
             startTime = System.currentTimeMillis()
             performanceEvents.clear()
+            eventsWrittenToDisk = 0
+            segmentFiles.clear()
+            segmentIndex = 0
 
-            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
-                .format(Date())
-
-            // Documents/save/ 폴더에 모든 파일 저장
+            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
             val saveDir = getSaveDirectory()
 
-            // Perfetto UI에서 읽을 수 있는 파일 생성 (전체 앱 실행 기간)
             perfettoTraceFile = File(saveDir, "full_app_perfetto_trace_${timestamp}.perfetto-trace")
             methodTraceFile = File(saveDir, "full_app_method_trace_${timestamp}.trace")
 
             fileLogger.i(TAG, "✅ Perfetto 추적 시작")
             fileLogger.i(TAG, "📁 Perfetto 파일: ${perfettoTraceFile!!.absolutePath}")
-            fileLogger.i(TAG, "📁 메서드 추적 파일: ${methodTraceFile!!.absolutePath}")
+            fileLogger.i(TAG, "📁 메서드 추적(인덱스) 파일: ${methodTraceFile!!.absolutePath}")
 
-            // 1. 시스템 추적 시작
+            // 1) 시스템 섹션 시작
             Trace.beginSection("$category-SystemTrace")
             addPerformanceEvent("System Trace Start", "system", "B")
 
-            // 2. 메서드 추적 시작
+            // 2) 첫 세그먼트 시작 + 회전 타이머 가동
             startMethodTracingForPerfetto()
+            rotationJob = tracingScope.launch {
+                while (isActive && isTracing) {
+                    delay(ROTATION_CHECK_PERIOD_MS)
+                    checkAndRotateTraceSegment()
+                }
+            }
 
-            // 3. 실시간 성능 데이터 수집 시작
+            // 3) 실시간 성능 수집
             startRealTimePerformanceCollection()
 
             return perfettoTraceFile!!.absolutePath
-
         } catch (e: Exception) {
             fileLogger.e(TAG, "Perfetto 추적 시작 실패: ${e.message}", e)
             isTracing = false
@@ -106,7 +122,7 @@ class PerfettoTracer private constructor(
     }
 
     /**
-     * Perfetto 호환 메서드 추적 - Documents/save/에 저장
+     * Perfetto 호환 메서드 추적 - 세그먼트 롤링 방식
      */
     private fun startMethodTracingForPerfetto() {
         try {
@@ -114,28 +130,144 @@ class PerfettoTracer private constructor(
 
             // 중복 방지
             if (methodTracingActive) {
-                fileLogger.w(TAG, "이미 메서드 트레이싱 활성 상태, 먼저 중지합니다")
                 try { Debug.stopMethodTracing() } catch (_: Exception) {}
                 methodTracingActive = false
             }
 
-            // 임시 파일(내부 저장소). 주의: startMethodTracing 은 확장자 없이 "베이스 경로"를 줘야 합니다.
-            tempMethodTraceFileName = "temp_method_trace_${System.currentTimeMillis()}"
+            // 세그먼트용 임시 base path (확장자는 OS가 .trace 자동 부여)
+            val ts = System.currentTimeMillis()
+            tempMethodTraceFileName = "trace_seg_${segmentIndex}_${ts}"
             val tempBase = File(context.cacheDir, tempMethodTraceFileName!!).absolutePath
 
-            fileLogger.i(TAG, "📊 메서드 추적 시작 (임시): $tempBase.trace")
-            Debug.startMethodTracing(tempBase, 64 * 1024 * 1024) // 64MB 버퍼
+            fileLogger.i(TAG, "📊 세그먼트 시작 #$segmentIndex : $tempBase.trace")
+            Debug.startMethodTracing(tempBase, 64 * 1024 * 1024) // 세그먼트당 64MB
             methodTracingActive = true
+            lastSegmentStartMs = System.currentTimeMillis()
 
             addPerformanceEvent(
-                "Method Tracing Start", "method", "B",
-                mapOf("temp_base" to tempBase, "final_file" to methodTraceFile!!.absolutePath)
+                "Method Segment Start", "method", "B",
+                mapOf("segment_index" to segmentIndex, "temp_base" to tempBase)
             )
         } catch (e: Exception) {
-            fileLogger.e(TAG, "메서드 추적 시작 실패: ${e.message}", e)
             methodTracingActive = false
+            fileLogger.e(TAG, "세그먼트 시작 실패: ${e.message}", e)
         }
     }
+
+
+    /**
+     * 새로운 트레이스 세그먼트 시작
+     */
+    private fun startNewTraceSegment() {
+        try {
+            // 이전 세그먼트 종료
+            if (methodTracingActive) {
+                try { 
+                    Debug.stopMethodTracing() 
+                    Thread.sleep(500) // 파일 쓰기 완료 대기
+                } catch (_: Exception) {}
+                methodTracingActive = false
+            }
+            
+            // 새 세그먼트 파일명
+            val segmentName = "trace_seg_${traceSegmentIndex}_${System.currentTimeMillis()}"
+            tempMethodTraceFileName = segmentName
+            val tempBase = File(context.cacheDir, segmentName).absolutePath
+            
+            // 새 세그먼트 시작
+            Debug.startMethodTracing(tempBase, 64 * 1024 * 1024)
+            methodTracingActive = true
+            traceSegmentIndex++
+            lastRotationTime = System.currentTimeMillis()
+            
+            fileLogger.i(TAG, "🔄 트레이스 세그먼트 #${traceSegmentIndex} 시작: $segmentName")
+            
+            addPerformanceEvent(
+                "Trace Segment Start", "method", "I",
+                mapOf("segment" to traceSegmentIndex, "file" to segmentName)
+            )
+        } catch (e: Exception) {
+            fileLogger.e(TAG, "세그먼트 시작 실패: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * 트레이스 세그먼트 회전 체크
+     */
+    private fun checkAndRotateTraceSegment() {
+        if (!methodTracingActive) return
+        val elapsed = System.currentTimeMillis() - lastSegmentStartMs
+        if (elapsed < ROTATION_INTERVAL_MS) return
+
+        // 현재 세그먼트 저장
+        saveCurrentSegment()
+
+        // 다음 세그먼트 시작
+        segmentIndex++
+        startMethodTracingForPerfetto()
+    }
+
+    private fun saveCurrentSegment() {
+        try {
+            if (methodTracingActive) {
+                try { Debug.stopMethodTracing() } catch (e: Exception) {
+                    fileLogger.w(TAG, "세그먼트 stop 실패: ${e.message}")
+                }
+                methodTracingActive = false
+            }
+
+            // I/O 플러시 대기
+            Thread.sleep(500)
+
+            val tempName = tempMethodTraceFileName ?: return
+            val tempTrace = File(context.cacheDir, "$tempName.trace")
+            if (!tempTrace.exists() || tempTrace.length() <= 0L) {
+                fileLogger.w(TAG, "임시 세그먼트 파일이 없음/0B: ${tempTrace.absolutePath}")
+                return
+            }
+
+            // 최종 파일명: trace_seg_<index>_<ts>.trace
+            val saveDir = getSaveDirectory()
+            val finalSeg = File(saveDir, "${tempTrace.name}") // 같은 이름으로 보존
+            tempTrace.inputStream().use { input ->
+                finalSeg.outputStream().use { output -> input.copyTo(output) }
+            }
+            runCatching { tempTrace.delete() }
+
+            segmentFiles += finalSeg
+            fileLogger.i(TAG, "✅ 세그먼트 저장: ${finalSeg.name} (${finalSeg.length()} bytes)")
+
+            addPerformanceEvent(
+                "Method Segment Saved", "method", "I",
+                mapOf("segment_index" to segmentIndex, "file" to finalSeg.absolutePath, "bytes" to finalSeg.length())
+            )
+        } catch (e: Exception) {
+            fileLogger.e(TAG, "세그먼트 저장 실패: ${e.message}", e)
+        }
+    }
+
+
+    /**
+     * 현재 세그먼트를 최종 위치로 저장
+     */
+/*
+    private fun saveCurrentSegment() {
+        try {
+            val segmentFile = File(getSaveDirectory(), "trace_seg_${traceSegmentIndex-1}_${System.currentTimeMillis()}.trace")
+            val tempName = tempMethodTraceFileName
+            val tempTrace = if (tempName != null) File(context.cacheDir, "$tempName.trace") else null
+            
+            if (tempTrace != null && tempTrace.exists() && tempTrace.length() > 0) {
+                tempTrace.copyTo(segmentFile, overwrite = true)
+                traceSegmentFiles.add(segmentFile)
+                fileLogger.i(TAG, "💾 세그먼트 저장: ${segmentFile.name} (${segmentFile.length()} bytes)")
+                tempTrace.delete()
+            }
+        } catch (e: Exception) {
+            fileLogger.e(TAG, "세그먼트 저장 실패: ${e.message}", e)
+        }
+    }
+*/
 
     /**
      * 실시간 성능 데이터 수집
@@ -293,55 +425,57 @@ class PerfettoTracer private constructor(
             addPerformanceEvent("System Trace End", "system", "E")
             addPerformanceEvent("Method Tracing End", "method", "E")
 
-            // 메서드 트레이스 중지 + 플러시 대기
-            if (methodTracingActive) {
-                fileLogger.i(TAG, "📊 메서드 추적 중지...")
-                try { Debug.stopMethodTracing() } catch (e: Exception) {
-                    fileLogger.e(TAG, "stopMethodTracing 실패: ${e.message}", e)
-                }
-                methodTracingActive = false
+            // 회전 타이머 중지
+            rotationJob?.cancel()
+            rotationJob = null
 
-                // 파일 쓰기 플러시 여유 (단말별 I/O 지연 흡수)
-                Thread.sleep(1500)
-
-                // 임시 파일 → 최종 경로로 복사 (0바이트/미생성 예외 처리 포함)
-                val finalFile = methodTraceFile!!
-                val tempName = tempMethodTraceFileName
-                val tempTrace = if (tempName != null) File(context.cacheDir, "$tempName.trace") else null
-
-                if (tempTrace != null && tempTrace.exists() && tempTrace.length() > 0L) {
-                    tempTrace.inputStream().use { input ->
-                        finalFile.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    fileLogger.i(TAG, "✅ 메서드 트레이스 복사 완료: ${finalFile.absolutePath} (${finalFile.length()} bytes)")
-                    runCatching { tempTrace.delete() }
-                } else {
-                    // 혹시 다른 기본 위치에 생성된 경우까지 탐색
-                    fileLogger.w(TAG, "임시 trace 직접 복사 실패")
-                    // 빈 파일 생성
-                    methodTraceFile?.writeText("Method trace failed to generate")
-                }
-            } else {
-                fileLogger.w(TAG, "메서드 추적이 활성 상태가 아니었습니다")
-            }
+            // 진행 중 세그먼트 저장
+            saveCurrentSegment()
 
             // 시스템 섹션 종료
-            Trace.endSection()
+            runCatching { Trace.endSection() }
             isTracing = false
 
-            // Perfetto(Chrome trace 포맷) 파일 생성
+            // Perfetto(Chrome trace) 저장
             generatePerfettoTraceFile()
 
+            // 세그먼트 메타데이터(인덱스) 남기기: methodTraceFile에 JSON 텍스트 기록
+            writeTraceIndexMetadata()
+
             fileLogger.i(TAG, "✅ Perfetto 추적 완료")
-            fileLogger.i(TAG, "📁 최종 Perfetto 파일: ${perfettoTraceFile?.absolutePath}")
-            fileLogger.i(TAG, "📁 최종 메서드 파일: ${methodTraceFile?.absolutePath}")
-            fileLogger.i(TAG, "📊 수집 이벤트: ${performanceEvents.size + eventsWrittenToDisk}개")
+            fileLogger.i(TAG, "📁 Perfetto 파일: ${perfettoTraceFile?.absolutePath}")
+            fileLogger.i(TAG, "📁 메서드(인덱스) 파일: ${methodTraceFile?.absolutePath}")
+            fileLogger.i(TAG, "📦 세그먼트 ${segmentFiles.size}개")
 
             return perfettoTraceFile?.absolutePath
         } catch (e: Exception) {
             fileLogger.e(TAG, "Perfetto 추적 중지 실패: ${e.message}", e)
             isTracing = false
             return null
+        }
+    }
+
+    // 세그먼트 파일 목록/정보를 JSON으로 만들어 methodTraceFile(.trace)에 기록(가독성 위해 .json 쓰려면 파일명만 바꿔도 됨)
+    private fun writeTraceIndexMetadata() {
+        try {
+            val saveDir = getSaveDirectory()
+            val idxJson = buildString {
+                append("{\n  \"type\":\"method_trace_index\",\n")
+                append("  \"created\":\"${Date()}\",\n")
+                append("  \"segments\":[\n")
+                segmentFiles.forEachIndexed { i, f ->
+                    append("    {\"index\":$i, \"name\":\"${f.name}\", \"bytes\":${f.length()}, \"path\":\"${f.absolutePath}\"}")
+                    if (i < segmentFiles.lastIndex) append(",")
+                    append("\n")
+                }
+                append("  ]\n}")
+            }
+
+            // 인덱스는 기존 methodTraceFile 경로에 텍스트로 기록 (확장자는 .trace지만 '인덱스 텍스트' 용도)
+            methodTraceFile?.writeText(idxJson)
+            fileLogger.i(TAG, "📄 세그먼트 인덱스 작성: ${methodTraceFile?.absolutePath}")
+        } catch (e: Exception) {
+            fileLogger.e(TAG, "세그먼트 인덱스 작성 실패: ${e.message}", e)
         }
     }
 
@@ -422,6 +556,54 @@ class PerfettoTracer private constructor(
         }
     }
 
+    /**
+     * 모든 트레이스 세그먼트를 메타데이터 파일로 병합
+     */
+    private fun mergeTraceSegments() {
+        try {
+            if (traceSegmentFiles.isEmpty()) {
+                fileLogger.w(TAG, "병합할 세그먼트가 없음")
+                return
+            }
+            
+            // 메타데이터 파일 생성 (세그먼트 목록 및 정보)
+            val metaFile = File(getSaveDirectory(), "trace_metadata_${System.currentTimeMillis()}.json")
+            val metadata = buildString {
+                appendLine("{")
+                appendLine("  \"trace_session\": {")
+                appendLine("    \"start_time\": $startTime,")
+                appendLine("    \"end_time\": ${System.currentTimeMillis()},")
+                appendLine("    \"duration_ms\": ${System.currentTimeMillis() - startTime},")
+                appendLine("    \"segment_count\": ${traceSegmentFiles.size},")
+                appendLine("    \"segments\": [")
+                
+                traceSegmentFiles.forEachIndexed { index, file ->
+                    append("      {")
+                    append("\"index\": $index, ")
+                    append("\"file\": \"${file.name}\", ")
+                    append("\"size\": ${file.length()}, ")
+                    append("\"path\": \"${file.absolutePath}\"")
+                    append("}")
+                    if (index < traceSegmentFiles.size - 1) appendLine(",")
+                    else appendLine()
+                }
+                
+                appendLine("    ]")
+                appendLine("  }")
+                appendLine("}")
+            }
+            
+            metaFile.writeText(metadata)
+            fileLogger.i(TAG, "📋 트레이스 메타데이터 저장: ${metaFile.absolutePath}")
+            
+            // 원본 methodTraceFile도 메타데이터로 대체
+            methodTraceFile?.writeText(metadata)
+            
+        } catch (e: Exception) {
+            fileLogger.e(TAG, "세그먼트 병합 실패: ${e.message}", e)
+        }
+    }
+    
     /**
      * Documents/save/ 디렉토리 반환
      */
