@@ -40,6 +40,8 @@ class PerfettoTracer private constructor(
     private var perfettoTraceFile: File? = null
     private var methodTraceFile: File? = null
     private var startTime: Long = 0
+    private var methodTracingActive = false
+    private var tempMethodTraceFileName: String? = null
     
     // 순환 버퍼로 메모리 사용량 최적화 (50,000개 제한)
     private val performanceEvents = mutableListOf<PerformanceEvent>()
@@ -110,13 +112,28 @@ class PerfettoTracer private constructor(
         try {
             if (methodTraceFile == null) return
 
-            // 대용량 버퍼 (128MB) - 전체 앱 실행 기간용
-            Debug.startMethodTracing(methodTraceFile!!.absolutePath, 128 * 1024 * 1024)
-            fileLogger.i(TAG, "📊 메서드 추적 시작: ${methodTraceFile!!.absolutePath}")
+            // 중복 방지
+            if (methodTracingActive) {
+                fileLogger.w(TAG, "이미 메서드 트레이싱 활성 상태, 먼저 중지합니다")
+                try { Debug.stopMethodTracing() } catch (_: Exception) {}
+                methodTracingActive = false
+            }
 
-            addPerformanceEvent("Method Tracing Start", "method", "B")
+            // 임시 파일(내부 저장소). 주의: startMethodTracing 은 확장자 없이 "베이스 경로"를 줘야 합니다.
+            tempMethodTraceFileName = "temp_method_trace_${System.currentTimeMillis()}"
+            val tempBase = File(context.cacheDir, tempMethodTraceFileName!!).absolutePath
+
+            fileLogger.i(TAG, "📊 메서드 추적 시작 (임시): $tempBase.trace")
+            Debug.startMethodTracing(tempBase, 64 * 1024 * 1024) // 64MB 버퍼
+            methodTracingActive = true
+
+            addPerformanceEvent(
+                "Method Tracing Start", "method", "B",
+                mapOf("temp_base" to tempBase, "final_file" to methodTraceFile!!.absolutePath)
+            )
         } catch (e: Exception) {
-            fileLogger.e(TAG, "메서드 추적 실패: ${e.message}", e)
+            fileLogger.e(TAG, "메서드 추적 시작 실패: ${e.message}", e)
+            methodTracingActive = false
         }
     }
 
@@ -273,34 +290,54 @@ class PerfettoTracer private constructor(
         }
 
         try {
-            // 종료 이벤트 추가
             addPerformanceEvent("System Trace End", "system", "E")
             addPerformanceEvent("Method Tracing End", "method", "E")
 
-            // 메서드 추적 중지
-            try {
-                Debug.stopMethodTracing()
-                fileLogger.i(TAG, "📊 메서드 추적 중지 완료")
-            } catch (e: Exception) {
-                fileLogger.e(TAG, "메서드 추적 중지 실패: ${e.message}", e)
+            // 메서드 트레이스 중지 + 플러시 대기
+            if (methodTracingActive) {
+                fileLogger.i(TAG, "📊 메서드 추적 중지...")
+                try { Debug.stopMethodTracing() } catch (e: Exception) {
+                    fileLogger.e(TAG, "stopMethodTracing 실패: ${e.message}", e)
+                }
+                methodTracingActive = false
+
+                // 파일 쓰기 플러시 여유 (단말별 I/O 지연 흡수)
+                Thread.sleep(1500)
+
+                // 임시 파일 → 최종 경로로 복사 (0바이트/미생성 예외 처리 포함)
+                val finalFile = methodTraceFile!!
+                val tempName = tempMethodTraceFileName
+                val tempTrace = if (tempName != null) File(context.cacheDir, "$tempName.trace") else null
+
+                if (tempTrace != null && tempTrace.exists() && tempTrace.length() > 0L) {
+                    tempTrace.inputStream().use { input ->
+                        finalFile.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    fileLogger.i(TAG, "✅ 메서드 트레이스 복사 완료: ${finalFile.absolutePath} (${finalFile.length()} bytes)")
+                    runCatching { tempTrace.delete() }
+                } else {
+                    // 혹시 다른 기본 위치에 생성된 경우까지 탐색
+                    fileLogger.w(TAG, "임시 trace 직접 복사 실패")
+                    // 빈 파일 생성
+                    methodTraceFile?.writeText("Method trace failed to generate")
+                }
+            } else {
+                fileLogger.w(TAG, "메서드 추적이 활성 상태가 아니었습니다")
             }
 
-            // 시스템 추적 중지
+            // 시스템 섹션 종료
             Trace.endSection()
-
             isTracing = false
 
-            // 추적 데이터 수집 및 파일 생성
+            // Perfetto(Chrome trace 포맷) 파일 생성
             generatePerfettoTraceFile()
 
-            val traceFilePath = perfettoTraceFile?.absolutePath
             fileLogger.i(TAG, "✅ Perfetto 추적 완료")
-            fileLogger.i(TAG, "📁 최종 Perfetto 파일: $traceFilePath")
+            fileLogger.i(TAG, "📁 최종 Perfetto 파일: ${perfettoTraceFile?.absolutePath}")
             fileLogger.i(TAG, "📁 최종 메서드 파일: ${methodTraceFile?.absolutePath}")
-            fileLogger.i(TAG, "📊 수집된 성능 이벤트: ${performanceEvents.size}개 (총 처리: ${performanceEvents.size + eventsWrittenToDisk}개)")
+            fileLogger.i(TAG, "📊 수집 이벤트: ${performanceEvents.size + eventsWrittenToDisk}개")
 
-            return traceFilePath
-
+            return perfettoTraceFile?.absolutePath
         } catch (e: Exception) {
             fileLogger.e(TAG, "Perfetto 추적 중지 실패: ${e.message}", e)
             isTracing = false
@@ -390,30 +427,14 @@ class PerfettoTracer private constructor(
      */
     private fun getSaveDirectory(): File {
         return try {
-            // Documents/save 폴더 사용 - 디버깅용 전체 기간 트레이스
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val documentsDir = File(
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
-                    "save"
-                )
-                if (!documentsDir.exists()) {
-                    documentsDir.mkdirs()
-                }
-                documentsDir
-            } else {
-                val saveDir = File(Environment.getExternalStorageDirectory(),
-                    "Documents/save")
-                if (!saveDir.exists()) {
-                    saveDir.mkdirs()
-                }
-                saveDir
-            }
+            // Q+에서는 공용 Documents 대신 앱 스코프 Documents/save 사용 (권장)
+            val base = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+                ?: context.getExternalFilesDir(null)
+            File(base, "save").apply { if (!exists()) mkdirs() }
         } catch (e: Exception) {
             fileLogger.e(TAG, "save 디렉토리 생성 실패: ${e.message}", e)
-            // 폴백: 앱 내부 저장소
-            File(context.getExternalFilesDir(null), "save").apply {
-                if (!exists()) mkdirs()
-            }
+            // 최후 폴백: 내부 저장소
+            File(context.filesDir, "save").apply { if (!exists()) mkdirs() }
         }
     }
 
