@@ -565,8 +565,8 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                     val context = if (isMp4Recording) "경고_FPS_드롭_MP4녹화중" else "경고_FPS_드롭"
                     fileLogger.w("MainActivity", "FPS ${FPS_WARNING_THRESHOLD} 이하 감지: ${String.format("%.1f", fps)}fps")
                     logDetailedSystemState(context + "_${String.format("%.1f", fps)}")
-                    
-                    launch {
+
+                    monitoringScope.launch {
                         delay(5000)
                         isLowFpsDetected.set(false)
                     }
