@@ -8,6 +8,11 @@ import java.io.BufferedReader
 import java.io.FileReader
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import java.util.concurrent.atomic.AtomicReference
 
 // 메모리 정보 데이터 클래스
 data class AppMemoryInfo(
@@ -53,6 +58,67 @@ class ResourceMonitor private constructor(private val context: Context) {
     private val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
     private val runtime = Runtime.getRuntime()
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+    
+    // 캐싱된 시스템 메모리 정보
+    private val cachedSystemMemoryInfo = AtomicReference<SystemMemoryInfo?>(null)
+    private val cachedCpuInfo = AtomicReference<CpuInfo?>(null)
+    private var lastSystemMemoryUpdateTime = 0L
+    private var lastCpuUpdateTime = 0L
+    private val CACHE_DURATION_MS = 1000L // 1초 캐싱
+    
+    // 백그라운드 업데이트를 위한 CoroutineScope
+    private val monitoringScope = CoroutineScope(Dispatchers.IO)
+    
+    init {
+        // 백그라운드에서 주기적으로 시스템 정보 업데이트
+        startBackgroundMonitoring()
+    }
+    
+    private fun startBackgroundMonitoring() {
+        monitoringScope.launch {
+            while (true) {
+                updateSystemMemoryCache()
+                updateCpuCache()
+                delay(CACHE_DURATION_MS)
+            }
+        }
+    }
+    
+    private fun updateSystemMemoryCache() {
+        try {
+            val memInfo = ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memInfo)
+            
+            val totalMemoryMB = memInfo.totalMem / (1024.0 * 1024.0)
+            val availableMemoryMB = memInfo.availMem / (1024.0 * 1024.0)
+            val usedMemoryMB = totalMemoryMB - availableMemoryMB
+            
+            cachedSystemMemoryInfo.set(SystemMemoryInfo(
+                totalMemoryMB = totalMemoryMB,
+                availableMemoryMB = availableMemoryMB,
+                usedMemoryMB = usedMemoryMB,
+                systemMemoryLow = memInfo.lowMemory
+            ))
+            lastSystemMemoryUpdateTime = System.currentTimeMillis()
+        } catch (e: Exception) {
+            Log.w(TAG, "시스템 메모리 캐싱 업데이트 실패: ${e.message}")
+        }
+    }
+    
+    private fun updateCpuCache() {
+        try {
+            val coreCount = Runtime.getRuntime().availableProcessors()
+            val cpuUsage = getCpuUsageInternal()
+            
+            cachedCpuInfo.set(CpuInfo(
+                usagePercent = cpuUsage,
+                coreCount = coreCount
+            ))
+            lastCpuUpdateTime = System.currentTimeMillis()
+        } catch (e: Exception) {
+            Log.w(TAG, "CPU 정보 캐싱 업데이트 실패: ${e.message}")
+        }
+    }
 
     /**
      * 앱 메모리 정보 수집
@@ -93,41 +159,47 @@ class ResourceMonitor private constructor(private val context: Context) {
     }
 
     /**
-     * 시스템 메모리 정보 수집
+     * 시스템 메모리 정보 수집 - 캐싱된 버전
      */
     fun getSystemMemoryInfo(): SystemMemoryInfo {
-        val memInfo = ActivityManager.MemoryInfo()
-        activityManager.getMemoryInfo(memInfo)
-
-        val totalMemoryMB = memInfo.totalMem / (1024.0 * 1024.0)
-        val availableMemoryMB = memInfo.availMem / (1024.0 * 1024.0)
-        val usedMemoryMB = totalMemoryMB - availableMemoryMB
-
-        return SystemMemoryInfo(
-            totalMemoryMB = totalMemoryMB,
-            availableMemoryMB = availableMemoryMB,
-            usedMemoryMB = usedMemoryMB,
-            systemMemoryLow = memInfo.lowMemory
+        // 캐시가 있고 유효하면 캐시 반환
+        val cached = cachedSystemMemoryInfo.get()
+        if (cached != null && (System.currentTimeMillis() - lastSystemMemoryUpdateTime) < CACHE_DURATION_MS) {
+            return cached
+        }
+        
+        // 캐시가 없거나 만료된 경우 즉시 업데이트 후 반환
+        updateSystemMemoryCache()
+        return cachedSystemMemoryInfo.get() ?: SystemMemoryInfo(
+            totalMemoryMB = 0.0,
+            availableMemoryMB = 0.0,
+            usedMemoryMB = 0.0,
+            systemMemoryLow = false
         )
     }
 
     /**
-     * CPU 정보 수집
+     * CPU 정보 수집 - 캐싱된 버전
      */
     fun getCpuInfo(): CpuInfo {
-        val coreCount = Runtime.getRuntime().availableProcessors()
-        val cpuUsage = getCpuUsage()
-
-        return CpuInfo(
-            usagePercent = cpuUsage,
-            coreCount = coreCount
+        // 캐시가 있고 유효하면 캐시 반환
+        val cached = cachedCpuInfo.get()
+        if (cached != null && (System.currentTimeMillis() - lastCpuUpdateTime) < CACHE_DURATION_MS) {
+            return cached
+        }
+        
+        // 캐시가 없거나 만료된 경우 즉시 업데이트 후 반환
+        updateCpuCache()
+        return cachedCpuInfo.get() ?: CpuInfo(
+            usagePercent = 0.0,
+            coreCount = Runtime.getRuntime().availableProcessors()
         )
     }
 
     /**
-     * CPU 사용률 계산 (근사치)
+     * CPU 사용률 계산 (근사치) - 내부 메서드
      */
-    private fun getCpuUsage(): Double {
+    private fun getCpuUsageInternal(): Double {
         return try {
             val reader = BufferedReader(FileReader("/proc/stat"))
             val line = reader.readLine()
