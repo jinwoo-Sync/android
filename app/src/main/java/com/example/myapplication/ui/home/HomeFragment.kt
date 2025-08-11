@@ -37,6 +37,7 @@ import kotlinx.coroutines.withContext
 import java.text.DecimalFormat
 import android.os.Handler
 import android.os.Looper
+import android.view.Choreographer
 
 /**
  * 공통 유틸리티 모음
@@ -76,6 +77,7 @@ class HomeFragment : Fragment() {
 
     // 현재 UI에 표시 중인 ManagedBitmap 참조
     private var currentManagedBitmap: ManagedBitmap? = null
+    private var lastGoodUiFrame: HomeViewModel.UiFrame? = null
 
     private var frameSkipCount = 0
     private var successfulFrameCount = 0
@@ -433,25 +435,55 @@ class HomeFragment : Fragment() {
     }
 
     private fun setupCameraFrameObserver() {
-        viewModel.cameraFrame.observe(viewLifecycleOwner) { sensorData ->
+        viewModel.cameraFrame.observe(viewLifecycleOwner) { uiFrame ->
             try {
-                //  이전 프레임 강제 해제
-                currentManagedBitmap?.release()
-                currentManagedBitmap = null
-
-                if (sensorData?.managedBitmap?.isValid() == true) {
-                    //  GLSurfaceView 순수 OpenGL 렌더링
-                    displayLatestFrameViaGLSurfaceView(sensorData)
-                } else {
-                    sensorData?.managedBitmap?.release()
-                    handleUIUpdateFailure()
-                }
+                renderSafeFrame(uiFrame)
             } catch (e: Exception) {
-                Log.e("HomeFragment", " GLSurfaceView Observer 오류: ${e.message}", e)
-                sensorData?.managedBitmap?.release()
-                currentManagedBitmap?.release()
-                currentManagedBitmap = null
+                Log.e("HomeFragment", "Frame observer 오류: ${e.message}", e)
+                uiFrame?.release()
             }
+        }
+    }
+    
+    /**
+     * 마지막 정상 프레임 유지로 깜빡임 방지
+     */
+    private fun renderSafeFrame(uiFrame: HomeViewModel.UiFrame?) {
+        if (uiFrame != null) {
+            // 이전 프레임 정리 (다음 프레임에 예약)
+            lastGoodUiFrame?.let { oldFrame ->
+                Choreographer.getInstance().postFrameCallback {
+                    oldFrame.release()
+                }
+            }
+            lastGoodUiFrame = uiFrame
+            
+            // GLSurfaceView에 렌더링
+            if (::glRenderer.isInitialized && isGLReady) {
+                displayFrameViaGL(uiFrame)
+            }
+        } else {
+            // null일 때 검은 화면 방지 - 마지막 프레임 유지
+            // 아무것도 하지 않음 (현재 이미지 유지)
+        }
+    }
+    
+    /**
+     * UiFrame을 GL에 안전하게 렌더링
+     */
+    private fun displayFrameViaGL(uiFrame: HomeViewModel.UiFrame) {
+        try {
+            if (!uiFrame.bitmap.isRecycled && uiFrame.bitmap.width > 0) {
+                // GL 렌더링
+                glRenderer.updateBitmap(uiFrame.bitmap)
+                binding.glSurfaceView.requestRender()
+                
+                successfulFrameCount++
+                Log.d("HomeFragment", "GL 렌더링 성공: frameId=${uiFrame.frameId}")
+            }
+        } catch (e: Exception) {
+            Log.e("HomeFragment", "GL 렌더링 실패: ${e.message}", e)
+            frameSkipCount++
         }
     }
 
@@ -637,6 +669,10 @@ class HomeFragment : Fragment() {
         
         // GLSurfaceView 정리
         clearCurrentDisplay()
+        
+        // 마지막 UiFrame 정리
+        lastGoodUiFrame?.release()
+        lastGoodUiFrame = null
 
         // 성능 통계
         val total = frameSkipCount + successfulFrameCount
