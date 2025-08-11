@@ -32,6 +32,7 @@ android {
         debug {
             isDebuggable = true
             //applicationIdSuffix = ".debug"
+            buildConfigField("boolean", "PERFETTO_TRACING_ENABLED", "false")
             // debug는 기본 debug signing 사용
         }
 
@@ -43,6 +44,17 @@ android {
                 "proguard-rules.pro"
             )
             signingConfig = signingConfigs.getByName("release") // 여기서만 적용
+            buildConfigField("boolean", "PERFETTO_TRACING_ENABLED", "false")
+        }
+
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = true
+            isDebuggable = true
+            applicationIdSuffix = ".benchmark"
+            buildConfigField("boolean", "PERFETTO_TRACING_ENABLED", "true")
+            matchingFallbacks.add("release")
         }
     }
 

@@ -54,7 +54,13 @@ class MainActivity : AppCompatActivity() {
     //  모니터링 시스템
     private lateinit var fileLogger: FileLogger
     private lateinit var resourceMonitor: ResourceMonitor
-    private lateinit var perfettoTracer: PerfettoTracer
+    private var perfettoTracer: PerfettoTracer? = null  // nullable로 변경
+
+    // Perfetto 활성화 여부 체크
+    private val isPerfettoEnabled: Boolean by lazy {
+        BuildConfig.PERFETTO_TRACING_ENABLED
+    }
+
     private val monitoringScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // FPS 모니터링 강화
@@ -67,7 +73,7 @@ class MainActivity : AppCompatActivity() {
     private val FPS_CRITICAL_THRESHOLD = 5 // FPS 5 이하 긴급 처리
     private val FPS_WARNING_THRESHOLD = 10 // FPS 10 이하 경고
     private var isEmergencyRecoveryActive = false
-    
+
     // FPS 모니터링을 위한 캐싱 변수
     private val _cachedFps = MutableStateFlow(60.0)
     private val cachedFps: StateFlow<Double> = _cachedFps
@@ -101,70 +107,68 @@ class MainActivity : AppCompatActivity() {
 
     // Perfetto 자동 추적 관련
     private var perfettoAutoTraceJob: Job? = null
-    // Perfetto 트레이싱은 앱 실행 전체 기간 동안 연속 동작 (제한 없음)
-    // private val PERFETTO_TRACE_DURATION = 60_000L // 제거됨
 
     // 응급 복구 변수
     private var emergencyRecoveryCount = 0
     private var lastRecoveryTime = 0L
     private var isTextUpdatesPaused = false
 
-override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
-    
-    //  Fragment가 필요로 하는 기본 객체들 먼저 초기화
-    initializeBasicObjects()
-    
-    // UI 설정
-    binding = ActivityMainBinding.inflate(layoutInflater)
-    setContentView(binding.root)
-    setupNavigation()
-    
-    // 나머지 무거운 초기화는 백그라운드에서
-    lifecycleScope.launch(Dispatchers.IO) {
-        initializeHeavySystemsInBackground()
-    }
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
 
-    // 하드웨어 가속 강제 활성화
-    window.setFlags(
-        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
-    )
-}
+        //  Fragment가 필요로 하는 기본 객체들 먼저 초기화
+        initializeBasicObjects()
 
-//  Fragment가 즉시 필요로 하는 객체들만 동기적으로 초기화
-private fun initializeBasicObjects() {
-    try {
-        val dataSynchronizer = DataSynchronizer()
-        bitmapPoolManager = BitmapPoolManager.getInstance(this)
-        sensorCollector = SensorCollector(this, bitmapPoolManager)
-        sensorCollector.setDataSynchronizer(dataSynchronizer)
-        homeRepository = HomeRepository(this, sensorCollector, dataSynchronizer, bitmapPoolManager)
-        
-        Log.d("MainActivity", " 기본 객체 초기화 완료")
-    } catch (e: Exception) {
-        Log.e("MainActivity", "기본 객체 초기화 실패: ${e.message}", e)
-    }
-}
+        // UI 설정
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        setupNavigation()
 
-//  무거운 모니터링 시스템들은 백그라운드에서
-private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatchers.IO) {
-    try {
-        initializeMonitoringSystem()
-        
-        withContext(Dispatchers.Main) {
-            startComprehensiveMonitoring()
-            startPerfettoAutoTracing()
-            checkPermissions()
-            requestBatteryOptimizationDisable()
-            checkLocationServiceEnabled()
+        // 나머지 무거운 초기화는 백그라운드에서
+        lifecycleScope.launch(Dispatchers.IO) {
+            initializeHeavySystemsInBackground()
         }
-        
-        Log.d("MainActivity", " 백그라운드 초기화 완료")
-    } catch (e: Exception) {
-        Log.e("MainActivity", "백그라운드 초기화 실패: ${e.message}", e)
+
+        // 하드웨어 가속 강제 활성화
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+        )
     }
-}
+
+    //  Fragment가 즉시 필요로 하는 객체들만 동기적으로 초기화
+    private fun initializeBasicObjects() {
+        try {
+            val dataSynchronizer = DataSynchronizer()
+            bitmapPoolManager = BitmapPoolManager.getInstance(this)
+            sensorCollector = SensorCollector(this, bitmapPoolManager)
+            sensorCollector.setDataSynchronizer(dataSynchronizer)
+            homeRepository = HomeRepository(this, sensorCollector, dataSynchronizer, bitmapPoolManager)
+
+            Log.d("MainActivity", " 기본 객체 초기화 완료")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "기본 객체 초기화 실패: ${e.message}", e)
+        }
+    }
+
+    //  무거운 모니터링 시스템들은 백그라운드에서
+    private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatchers.IO) {
+        try {
+            initializeMonitoringSystem()
+
+            withContext(Dispatchers.Main) {
+                startComprehensiveMonitoring()
+                startPerfettoAutoTracing()
+                checkPermissions()
+                requestBatteryOptimizationDisable()
+                checkLocationServiceEnabled()
+            }
+
+            Log.d("MainActivity", " 백그라운드 초기화 완료")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "백그라운드 초기화 실패: ${e.message}", e)
+        }
+    }
 
     /**
      *  모니터링 시스템 초기화
@@ -177,12 +181,21 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             fileLogger = FileLogger.getInstance(this)
             resourceMonitor = ResourceMonitor.getInstance(this)
             gpuMemoryMonitor = GpuMemoryMonitor.getInstance(this)
-            perfettoTracer = PerfettoTracer.getInstance(this)
+
+            // Perfetto 조건부 초기화
+            if (isPerfettoEnabled) {
+                perfettoTracer = PerfettoTracer.getInstance(this)
+                fileLogger.i("MainActivity", "✅ Perfetto 활성화")
+            } else {
+                perfettoTracer = null
+                fileLogger.i("MainActivity", "⚪ Perfetto 비활성화 (리소스 절약)")
+            }
 
             CrashHandler.setup(this)
 
-            fileLogger.i("MainActivity", " 완전한 모니터링 시스템 초기화 완료 - 세션: $sessionId")
-            fileLogger.i("MainActivity", " 로그 저장 위치: ${fileLogger.getLogDirectoryPath()}")
+            fileLogger.i("MainActivity", "✅ 완전한 모니터링 시스템 초기화 완료 - 세션: $sessionId")
+            fileLogger.i("MainActivity", "📊 Perfetto 활성화: $isPerfettoEnabled")
+            fileLogger.i("MainActivity", "💾 로그 저장 위치: ${fileLogger.getLogDirectoryPath()}")
 
         } catch (e: Exception) {
             Log.e("MainActivity", " 모니터링 시스템 초기화 실패: ${e.message}", e)
@@ -190,20 +203,22 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     }
 
     /**
-     * Perfetto 전체 앱 실행 기간 추적 시작
+     * Perfetto 전체 앱 실행 기간 추적 시작 (조건부)
      */
     private fun startPerfettoAutoTracing() {
+        if (!isPerfettoEnabled || perfettoTracer == null) {
+            Log.i("MainActivity", "⚪ Perfetto 추적 스킵됨")
+            return
+        }
+
         perfettoAutoTraceJob = lifecycleScope.launch {
             try {
-                // 앱 시작 3초 후 Perfetto 추적 시작 (디버깅용 전체 기간 연속 동작)
+                // 앱 시작 3초 후 Perfetto 추적 시작
                 delay(3_000)
 
-                val traceFilePath = perfettoTracer.startPerfettoTrace("FullAppTrace_$sessionId")
+                val traceFilePath = perfettoTracer!!.startPerfettoTrace("FullAppTrace_$sessionId")
                 fileLogger.i("MainActivity", "🎯 전체 앱 실행 Perfetto 추적 시작: $traceFilePath")
                 fileLogger.i("MainActivity", "🔄 연속 디버깅 모드: 앱 종료까지 모든 성능 데이터 기록")
-
-                // 앱 실행 전체 기간 동안 지속 (제한 없이 연속 동작)
-                // 자동 중지 제거 - onDestroy에서만 중지
 
             } catch (e: Exception) {
                 fileLogger.e("MainActivity", "전체 앱 Perfetto 추적 실패: ${e.message}", e)
@@ -211,21 +226,20 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
         }
     }
 
-    // 지속적 추적 제거 - 이제 전체 앱 실행 기간 동안 단일 트레이스로 연속 동작
-    // private fun startContinuousPerfettoTracing() - 삭제됨
-
     /**
-     * Perfetto 추적 중지 (앱 종료 시에만 호출)
+     * Perfetto 추적 중지 (조건부)
      */
     private fun stopPerfettoTracing() {
+        if (!isPerfettoEnabled || perfettoTracer == null) return
+
         lifecycleScope.launch {
             try {
-                val finalTracePath = perfettoTracer.stopPerfettoTrace()
+                val finalTracePath = perfettoTracer!!.stopPerfettoTrace()
                 fileLogger.i("MainActivity", "🎯 전체 앱 Perfetto 추적 완료: $finalTracePath")
-                fileLogger.i("MainActivity", "📊 수집된 전체 이벤트: ${perfettoTracer.getEventCount()}개")
+                fileLogger.i("MainActivity", "📊 수집된 전체 이벤트: ${perfettoTracer!!.getEventCount()}개")
 
                 // 모든 추적 파일 경로 출력
-                val allTraceFiles = perfettoTracer.getAllTraceFiles()
+                val allTraceFiles = perfettoTracer!!.getAllTraceFiles()
                 fileLogger.i("MainActivity", "📁 Documents/save/에 저장된 추적 파일들:")
                 allTraceFiles.forEach { filePath ->
                     fileLogger.i("MainActivity", "  - $filePath")
@@ -238,12 +252,17 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     }
 
     /**
-     * 성능 문제 발생 시 즉시 힙 덤프 생성
+     * 성능 문제 발생 시 즉시 힙 덤프 생성 (조건부)
      */
     private fun generateEmergencyHeapDump(reason: String) {
+        if (!isPerfettoEnabled || perfettoTracer == null) {
+            fileLogger.w("MainActivity", "⚪ 힙 덤프 스킵됨 - Perfetto 비활성화")
+            return
+        }
+
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val heapDumpPath = perfettoTracer.generateHeapDump("Emergency_$reason")
+                val heapDumpPath = perfettoTracer!!.generateHeapDump("Emergency_$reason")
                 if (heapDumpPath != null) {
                     fileLogger.e("MainActivity", "🚨 응급 힙 덤프 생성: $heapDumpPath")
                 } else {
@@ -296,7 +315,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     }
 
     /**
-     * LeakCanary 통합 시작
+     * LeakCanary 통합 시작 (Perfetto 조건부 포함)
      */
     private fun startLeakCanaryIntegration() {
         try {
@@ -311,8 +330,10 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             // HomeRepository 감시
             leakCanaryIntegration.watchObject(homeRepository, "HomeRepository")
 
-            // PerfettoTracer 감시
-            leakCanaryIntegration.watchObject(perfettoTracer, "PerfettoTracer")
+            // PerfettoTracer 조건부 감시
+            if (isPerfettoEnabled && perfettoTracer != null) {
+                leakCanaryIntegration.watchObject(perfettoTracer!!, "PerfettoTracer")
+            }
 
             fileLogger.i("MainActivity", "✅ LeakCanary 통합 완료")
         } catch (e: Exception) {
@@ -326,22 +347,22 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     private fun startGpuMemoryMonitoring() {
         try {
             gpuMemoryMonitor.startGpuMemoryMonitoring()
-            fileLogger.i("MainActivity", " GPU 메모리 모니터링 시작")
+            fileLogger.i("MainActivity", "✅ GPU 메모리 모니터링 시작")
         } catch (e: Exception) {
             fileLogger.e("MainActivity", "GPU 메모리 모니터링 시작 실패: ${e.message}", e)
         }
     }
 
     /**
-     *  BitmapPool 전용 모니터링 (5초마다)
+     *  BitmapPool 전용 모니터링 (10초마다)
      */
     private fun startBitmapPoolMonitoring() {
         monitoringScope.launch {
-            fileLogger.i("MainActivity", " 최적화된 BitmapPool 모니터링 시작 (10초 간격)")
+            fileLogger.i("MainActivity", "✅ 최적화된 BitmapPool 모니터링 시작 (10초 간격)")
 
             while (isActive) {
                 try {
-                    delay(10_000) // 3초 → 10초로 변경
+                    delay(10_000) // 10초로 변경
 
                     val currentTime = System.currentTimeMillis()
                     val poolHealthStatus = bitmapPoolManager.advancedTaggedBitmapPool.getPoolHealthStatus()
@@ -350,7 +371,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                     when (poolHealthStatus.healthLevel) {
                         HealthLevel.CRITICAL -> {
                             if (!isPoolCritical.getAndSet(true)) {
-                                fileLogger.e("MainActivity", " BitmapPool CRITICAL - 즉시 응급 복구!")
+                                fileLogger.e("MainActivity", "🚨 BitmapPool CRITICAL - 즉시 응급 복구!")
                                 logCriticalPoolState(poolHealthStatus, poolDetailStatus)
                                 generateEmergencyHeapDump("CriticalBitmapPool")
 
@@ -360,28 +381,28 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                             }
                         }
                         HealthLevel.WARNING -> {
-                            fileLogger.w("MainActivity", " BitmapPool WARNING - 예방적 정리: ${poolHealthStatus.recommendation}")
+                            fileLogger.w("MainActivity", "⚠️ BitmapPool WARNING - 예방적 정리: ${poolHealthStatus.recommendation}")
 
                             monitoringScope.launch {
-                                delay(2000) // 1초 → 2초로 늘림
+                                delay(2000)
                                 try {
                                     bitmapPoolManager.advancedTaggedBitmapPool.forceCleanupStaleReferences()
-                                    fileLogger.i("MainActivity", " 예방적 정리 완료")
+                                    fileLogger.i("MainActivity", "✅ 예방적 정리 완료")
                                 } catch (e: Exception) {
-                                    fileLogger.e("MainActivity", " 예방적 정리 실패: ${e.message}", e)
+                                    fileLogger.e("MainActivity", "❌ 예방적 정리 실패: ${e.message}", e)
                                 }
                             }
                         }
                         HealthLevel.DEGRADED -> {
-                            fileLogger.w("MainActivity", " BitmapPool DEGRADED - Stale: ${poolHealthStatus.staleSlots}개")
+                            fileLogger.w("MainActivity", "⚠️ BitmapPool DEGRADED - Stale: ${poolHealthStatus.staleSlots}개")
 
-                            if (poolHealthStatus.staleSlots > 5) { // 3 → 5로 변경
+                            if (poolHealthStatus.staleSlots > 5) {
                                 bitmapPoolManager.advancedTaggedBitmapPool.forceCleanupStaleReferences()
                             }
                         }
                         HealthLevel.HEALTHY -> {
                             if (isPoolCritical.getAndSet(false)) {
-                                fileLogger.i("MainActivity", " BitmapPool 상태 완전 회복: HEALTHY")
+                                fileLogger.i("MainActivity", "✅ BitmapPool 상태 완전 회복: HEALTHY")
                             }
                         }
                     }
@@ -415,7 +436,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                             mp4RecordingStartTime = System.currentTimeMillis()
                             mp4RecordingFpsDrops = 0
 
-                            fileLogger.i("MainActivity", " .mp4 녹화 시작 ")
+                            fileLogger.i("MainActivity", "🎥 .mp4 녹화 시작")
                             fileLogger.i("MainActivity", "세션 ID: $currentSessionId")
                             logMp4RecordingStart()
 
@@ -423,7 +444,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                             // 녹화 종료
                             if (isMp4Recording) {
                                 val recordingDuration = System.currentTimeMillis() - mp4RecordingStartTime
-                                fileLogger.i("MainActivity", " .mp4 녹화 종료 ")
+                                fileLogger.i("MainActivity", "⏹️ .mp4 녹화 종료")
                                 fileLogger.i("MainActivity", "세션 ID: $currentSessionId")
                                 logMp4RecordingEnd(recordingDuration)
                             }
@@ -443,10 +464,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
      */
     private fun checkIfMp4Recording(): Boolean {
         return try {
-            // HomeRepository가 초기화되었는지 확인
             if (::homeRepository.isInitialized) {
-                // LoggerManager의 상태를 간접적으로 확인
-                // 실제 구현에서는 HomeRepository에 isRecording() 메서드 추가 필요
                 val syncStatus = homeRepository.getSyncStatus()
                 syncStatus.contains("로깅") || syncStatus.contains("저장")
             } else {
@@ -464,7 +482,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
         lastFpsTime = System.currentTimeMillis()
         frameCount = 0
         consecutiveLowFpsCount = 0
-        
+
         // 백그라운드에서 FPS 계산 및 캐싱
         monitoringScope.launch {
             while (true) {
@@ -476,10 +494,10 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                     _cachedFps.value = fps
                     currentFps.set(fps.toLong())
                     lastFpsUpdateTime = currentTime
-                    
+
                     // FPS 기반 제어는 백그라운드에서 처리
                     handleCachedFpsBasedControl(fps)
-                    
+
                     lastFpsTime = currentTime
                     frameCount = 0
                 }
@@ -499,9 +517,9 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
         }
 
         Choreographer.getInstance().postFrameCallback(fpsMonitor!!)
-        fileLogger.i("MainActivity", "실시간 FPS 모니터링 시작 (최적화됨)")
+        fileLogger.i("MainActivity", "✅ 실시간 FPS 모니터링 시작 (최적화됨)")
     }
-    
+
     /**
      * 캐싱된 FPS 기반 제어 (백그라운드에서 처리)
      */
@@ -510,22 +528,22 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
         withContext(Dispatchers.Main) {
             handleFpsBasedTextViewControl(fps)
         }
-        
+
         // .mp4 녹화 중 FPS 드롭 특별 추적
         if (isMp4Recording && fps <= 10.0) {
             mp4RecordingFpsDrops++
             fileLogger.w("MainActivity", ".mp4 녹화 중 FPS 드롭: ${String.format("%.1f", fps)}fps (총 ${mp4RecordingFpsDrops}회)")
             logMp4FpsDropState(fps)
         }
-        
+
         // FPS 기반 복구 로직
         when {
             fps < FPS_CRITICAL_THRESHOLD -> {
                 consecutiveLowFpsCount++
                 if (!isEmergencyRecoveryActive) {
                     isEmergencyRecoveryActive = true
-                    fileLogger.e("MainActivity", "FPS ${FPS_CRITICAL_THRESHOLD} 이하 감지: ${String.format("%.1f", fps)}fps")
-                    
+                    fileLogger.e("MainActivity", "🚨 FPS ${FPS_CRITICAL_THRESHOLD} 이하 감지: ${String.format("%.1f", fps)}fps")
+
                     withContext(Dispatchers.Main) {
                         pauseTextViewUpdates()
                     }
@@ -535,7 +553,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             fps < FPS_WARNING_THRESHOLD -> {
                 if (!isLowFpsDetected.getAndSet(true)) {
                     val context = if (isMp4Recording) "경고_FPS_드롭_MP4녹화중" else "경고_FPS_드롭"
-                    fileLogger.w("MainActivity", "FPS ${FPS_WARNING_THRESHOLD} 이하 감지: ${String.format("%.1f", fps)}fps")
+                    fileLogger.w("MainActivity", "⚠️ FPS ${FPS_WARNING_THRESHOLD} 이하 감지: ${String.format("%.1f", fps)}fps")
                     logDetailedSystemState(context + "_${String.format("%.1f", fps)}")
 
                     monitoringScope.launch {
@@ -548,7 +566,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                 consecutiveLowFpsCount = 0
                 if (isEmergencyRecoveryActive) {
                     isEmergencyRecoveryActive = false
-                    fileLogger.i("MainActivity", "FPS 회복: ${String.format("%.1f", fps)}fps")
+                    fileLogger.i("MainActivity", "✅ FPS 회복: ${String.format("%.1f", fps)}fps")
                     withContext(Dispatchers.Main) {
                         resumeTextViewUpdates()
                     }
@@ -582,7 +600,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             fileLogger.i("MainActivity", "   가용 힙: ${String.format("%.1f", appMemory.availableHeapMB)} MB")
 
             fileLogger.i("MainActivity", "현재 FPS: ${currentFps.get()}fps")
-            fileLogger.i("MainActivity", " ========================================================")
+            fileLogger.i("MainActivity", "========================================================")
 
         } catch (e: Exception) {
             fileLogger.e("MainActivity", ".mp4 녹화 시작 로깅 실패: ${e.message}", e)
@@ -594,14 +612,13 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
      */
     private fun logMp4RecordingEnd(duration: Long) {
         try {
-            fileLogger.i("MainActivity", " ==================== .mp4 녹화 종료 상태 ====================")
+            fileLogger.i("MainActivity", "==================== .mp4 녹화 종료 상태 ====================")
             fileLogger.i("MainActivity", "녹화 종료 시간: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}")
             fileLogger.i("MainActivity", "총 녹화 시간: ${duration / 1000}초 (${duration / 60000}분)")
             fileLogger.i("MainActivity", "녹화 중 FPS 드롭 횟수: $mp4RecordingFpsDrops")
 
             // 종료 시 BitmapPool 상태
             val poolHealth = bitmapPoolManager.advancedTaggedBitmapPool.getPoolHealthStatus()
-            val poolDetail = bitmapPoolManager.getPoolDetailedStatus()
             fileLogger.i("MainActivity", "녹화 종료 시 BitmapPool 상태:")
             fileLogger.i("MainActivity", "   Health: ${poolHealth.healthLevel}")
             fileLogger.i("MainActivity", "   Available: ${poolHealth.availableSlots}/${poolHealth.totalSlots}")
@@ -619,15 +636,15 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
 
             //  분석 및 권장사항
             if (mp4RecordingFpsDrops > 5) {
-                fileLogger.w("MainActivity", " 녹화 중 잦은 FPS 드롭 감지 (${mp4RecordingFpsDrops}회)")
+                fileLogger.w("MainActivity", "⚠️ 녹화 중 잦은 FPS 드롭 감지 (${mp4RecordingFpsDrops}회)")
                 fileLogger.w("MainActivity", "권장사항: BitmapPool 크기 증가 또는 프레임 스킵 간격 조정")
             }
 
             if (poolHealth.healthLevel != HealthLevel.HEALTHY) {
-                fileLogger.w("MainActivity", " 녹화 종료 시 BitmapPool 상태 불량: ${poolHealth.healthLevel}")
+                fileLogger.w("MainActivity", "⚠️ 녹화 종료 시 BitmapPool 상태 불량: ${poolHealth.healthLevel}")
             }
 
-            fileLogger.i("MainActivity", " ========================================================")
+            fileLogger.i("MainActivity", "========================================================")
 
         } catch (e: Exception) {
             fileLogger.e("MainActivity", ".mp4 녹화 종료 로깅 실패: ${e.message}", e)
@@ -641,7 +658,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
         try {
             val recordingDuration = System.currentTimeMillis() - mp4RecordingStartTime
 
-            fileLogger.w("MainActivity", " .mp4 녹화 중 FPS 드롭 상세 분석 ")
+            fileLogger.w("MainActivity", "⚠️ .mp4 녹화 중 FPS 드롭 상세 분석")
             fileLogger.w("MainActivity", "드롭 발생 시간: ${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}")
             fileLogger.w("MainActivity", "녹화 경과 시간: ${recordingDuration / 1000}초")
             fileLogger.w("MainActivity", "현재 FPS: ${String.format("%.1f", fps)}fps")
@@ -672,7 +689,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
      */
     private fun logCriticalPoolState(healthStatus: PoolHealthStatus, detailStatus: String) {
         try {
-            fileLogger.e("MainActivity", " BitmapPool CRITICAL 상태 ")
+            fileLogger.e("MainActivity", " BitmapPool CRITICAL 상태")
             fileLogger.e("MainActivity", "Health Level: ${healthStatus.healthLevel}")
             fileLogger.e("MainActivity", "Available Slots: ${healthStatus.availableSlots}/${healthStatus.totalSlots}")
             fileLogger.e("MainActivity", "Total References: ${healthStatus.totalReferences}")
@@ -696,53 +713,62 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     }
 
     /**
-     * Pool 응급 복구
+     * Pool 응급 복구 (Perfetto 조건부)
      */
     private suspend fun performPoolEmergencyRecovery(reason: String) = withContext(Dispatchers.IO) {
         try {
-            fileLogger.w("MainActivity", "강화된 응급 복구 시작: $reason")
+            fileLogger.w("MainActivity", "🔧 강화된 응급 복구 시작: $reason")
 
-            // suspend 함수용 traceSectionAsync 사용
-            perfettoTracer.traceSectionAsync("EmergencyRecovery") {
-                // 1단계: UI 안전 클리어
-                val uiJob = launch(Dispatchers.Main) {
-                    try {
-                        Log.w("MainActivity", "1단계: UI 프레임 안전 클리어 요청")
-                    } catch (e: Exception) {
-                        fileLogger.e("MainActivity", "UI 클리어 실패: ${e.message}", e)
-                    }
+            // Perfetto 활성화된 경우에만 traceSectionAsync 사용
+            if (isPerfettoEnabled && perfettoTracer != null) {
+                perfettoTracer!!.traceSectionAsync("EmergencyRecovery") {
+                    performRecoverySteps()
                 }
-                uiJob.join()
-                delay(200)
-
-                // 2단계: Native 메모리 적극적 해제
-                releaseNativeMemory()
-                delay(500)
-
-                // 3단계: BitmapPool 응급 리셋
-                try {
-                    bitmapPoolManager.performEmergencyReset()
-                    delay(500)
-                    fileLogger.w("MainActivity", "3단계: BitmapPool 응급 리셋 완료")
-                } catch (e: Exception) {
-                    fileLogger.e("MainActivity", "BitmapPool 리셋 실패: ${e.message}", e)
-                }
-
-                // 4단계: 상태 재확인
-                val poolHealth = bitmapPoolManager.advancedTaggedBitmapPool.getPoolHealthStatus()
-                val appMemory = resourceMonitor.getAppMemoryInfo()
-
-                fileLogger.w("MainActivity", "복구 결과:")
-                fileLogger.w("MainActivity", "  Pool: ${poolHealth.healthLevel}, Available: ${poolHealth.availableSlots}/${poolHealth.totalSlots}")
-                fileLogger.w("MainActivity", "  힙 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
-                fileLogger.w("MainActivity", "  가용 힙: ${String.format("%.1f", appMemory.availableHeapMB)} MB")
+            } else {
+                // Perfetto 없이 복구 수행
+                performRecoverySteps()
             }
 
-            fileLogger.w("MainActivity", "강화된 응급 복구 완료: $reason")
+            fileLogger.w("MainActivity", "✅ 강화된 응급 복구 완료: $reason")
 
         } catch (e: Exception) {
             fileLogger.e("MainActivity", "응급 복구 실패: ${e.message}", e)
         }
+    }
+
+    private suspend fun performRecoverySteps() = withContext(Dispatchers.IO) {
+        // 1단계: UI 안전 클리어
+        val uiJob = launch(Dispatchers.Main) {
+            try {
+                Log.w("MainActivity", "1단계: UI 프레임 안전 클리어 요청")
+            } catch (e: Exception) {
+                fileLogger.e("MainActivity", "UI 클리어 실패: ${e.message}", e)
+            }
+        }
+        uiJob.join()
+        delay(200)
+
+        // 2단계: Native 메모리 적극적 해제
+        releaseNativeMemory()
+        delay(500)
+
+        // 3단계: BitmapPool 응급 리셋
+        try {
+            bitmapPoolManager.performEmergencyReset()
+            delay(500)
+            fileLogger.w("MainActivity", "3단계: BitmapPool 응급 리셋 완료")
+        } catch (e: Exception) {
+            fileLogger.e("MainActivity", "BitmapPool 리셋 실패: ${e.message}", e)
+        }
+
+        // 4단계: 상태 재확인
+        val poolHealth = bitmapPoolManager.advancedTaggedBitmapPool.getPoolHealthStatus()
+        val appMemory = resourceMonitor.getAppMemoryInfo()
+
+        fileLogger.w("MainActivity", "복구 결과:")
+        fileLogger.w("MainActivity", "  Pool: ${poolHealth.healthLevel}, Available: ${poolHealth.availableSlots}/${poolHealth.totalSlots}")
+        fileLogger.w("MainActivity", "  힙 사용률: ${String.format("%.1f", appMemory.heapUsagePercent)}%")
+        fileLogger.w("MainActivity", "  가용 힙: ${String.format("%.1f", appMemory.availableHeapMB)} MB")
     }
 
     private suspend fun releaseNativeMemory() = withContext(Dispatchers.IO) {
@@ -752,9 +778,9 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
 
             // 강제 GC 더 적극적으로
             System.gc()
-            delay(300L) // Thread.sleep 대신 delay 사용
+            delay(300L)
             System.runFinalization()
-            delay(200)  // Thread.sleep 대신 delay 사용
+            delay(200)
             System.gc() // 한 번 더
 
             // Native 힙 정리 요청
@@ -778,7 +804,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     }
 
     /**
-     *  응급 복구 (일반적인 응급 상황용)
+     *  응급 복구 (일반적인 응급 상황용) - Perfetto 조건부
      */
     private suspend fun performEmergencyRecovery(reason: String) = withContext(Dispatchers.IO) {
         val currentTime = System.currentTimeMillis()
@@ -799,54 +825,63 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
         lastRecoveryTime = currentTime
 
         try {
-            fileLogger.w("MainActivity", " 제한된 응급 복구 시작: $reason (${emergencyRecoveryCount}회)")
+            fileLogger.w("MainActivity", "🔧 제한된 응급 복구 시작: $reason (${emergencyRecoveryCount}회)")
 
-            // suspend 함수용 traceSectionAsync 사용
-            perfettoTracer.traceSectionAsync("EmergencyRecovery") {
-                val preGpuInfo = gpuMemoryMonitor.getCurrentGpuInfo()
-                if (preGpuInfo != null) {
-                    fileLogger.w("MainActivity", "복구 전 GPU: Graphics=${String.format("%.1f", preGpuInfo.graphicsMemoryMB)}MB")
+            // Perfetto 활성화된 경우에만 traceSectionAsync 사용
+            if (isPerfettoEnabled && perfettoTracer != null) {
+                perfettoTracer!!.traceSectionAsync("EmergencyRecovery") {
+                    performLimitedRecoverySteps()
                 }
-
-                val uiJob = launch(Dispatchers.Main.immediate) {
-                    try {
-                        Log.w("MainActivity", "UI 프레임 강제 클리어")
-                    } catch (e: Exception) {
-                        Log.e("MainActivity", "UI 클리어 실패: ${e.message}")
-                    }
-                }
-                uiJob.join()
-                delay(100)
-
-                try {
-                    bitmapPoolManager.advancedTaggedBitmapPool.forceCleanupStaleReferences()
-                    delay(200)
-                } catch (e: Exception) {
-                    Log.e("MainActivity", "풀 정리 실패: ${e.message}")
-                }
-
-                System.gc()
-                delay(100)
-
-                delay(1000)
-                val postGpuInfo = gpuMemoryMonitor.getCurrentGpuInfo()
-                if (postGpuInfo != null && preGpuInfo != null) {
-                    val memoryReduction = preGpuInfo.graphicsMemoryMB - postGpuInfo.graphicsMemoryMB
-                    fileLogger.w("MainActivity", "복구 후 GPU: Graphics=${String.format("%.1f", postGpuInfo.graphicsMemoryMB)}MB")
-                    fileLogger.w("MainActivity", "GPU 메모리 복구: ${String.format("%.1f", memoryReduction)}MB 감소")
-                }
+            } else {
+                // Perfetto 없이 복구 수행
+                performLimitedRecoverySteps()
             }
 
-            fileLogger.w("MainActivity", " 제한된 응급 복구 완료")
+            fileLogger.w("MainActivity", "✅ 제한된 응급 복구 완료")
 
         } catch (e: Exception) {
             Log.e("MainActivity", "응급 복구 실패: ${e.message}", e)
         }
     }
 
+    private suspend fun performLimitedRecoverySteps() = withContext(Dispatchers.IO) {
+        val preGpuInfo = gpuMemoryMonitor.getCurrentGpuInfo()
+        if (preGpuInfo != null) {
+            fileLogger.w("MainActivity", "복구 전 GPU: Graphics=${String.format("%.1f", preGpuInfo.graphicsMemoryMB)}MB")
+        }
+
+        val uiJob = launch(Dispatchers.Main.immediate) {
+            try {
+                Log.w("MainActivity", "UI 프레임 강제 클리어")
+            } catch (e: Exception) {
+                Log.e("MainActivity", "UI 클리어 실패: ${e.message}")
+            }
+        }
+        uiJob.join()
+        delay(100)
+
+        try {
+            bitmapPoolManager.advancedTaggedBitmapPool.forceCleanupStaleReferences()
+            delay(200)
+        } catch (e: Exception) {
+            Log.e("MainActivity", "풀 정리 실패: ${e.message}")
+        }
+
+        System.gc()
+        delay(100)
+
+        delay(1000)
+        val postGpuInfo = gpuMemoryMonitor.getCurrentGpuInfo()
+        if (postGpuInfo != null && preGpuInfo != null) {
+            val memoryReduction = preGpuInfo.graphicsMemoryMB - postGpuInfo.graphicsMemoryMB
+            fileLogger.w("MainActivity", "복구 후 GPU: Graphics=${String.format("%.1f", postGpuInfo.graphicsMemoryMB)}MB")
+            fileLogger.w("MainActivity", "GPU 메모리 복구: ${String.format("%.1f", memoryReduction)}MB 감소")
+        }
+    }
+
     private suspend fun performDeepRecovery() = withContext(Dispatchers.IO) {
         try {
-            fileLogger.e("MainActivity", " 심층 복구 시작 - 10회 이상 복구 실패")
+            fileLogger.e("MainActivity", "🚨 심층 복구 시작 - 10회 이상 복구 실패")
 
             // 모든 모니터링 중단
             perfettoAutoTraceJob?.cancel()
@@ -867,7 +902,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             }
 
             emergencyRecoveryCount = 0
-            fileLogger.e("MainActivity", " 심층 복구 완료")
+            fileLogger.e("MainActivity", "✅ 심층 복구 완료")
 
         } catch (e: Exception) {
             fileLogger.e("MainActivity", "심층 복구 실패: ${e.message}", e)
@@ -879,7 +914,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
      */
     private fun startPeriodicMonitoring() {
         monitoringScope.launch {
-            fileLogger.i("MainActivity", " 정기 모니터링 시작 (30초 간격, BitmapPool 포함)")
+            fileLogger.i("MainActivity", "✅ 정기 모니터링 시작 (30초 간격, BitmapPool 포함)")
 
             while (isActive) {
                 try {
@@ -904,7 +939,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             val uptime = currentTime - appStartTime
             val currentFpsValue = currentFps.get()
 
-            fileLogger.e("MainActivity", " 치명적 시스템 상태 - $context ")
+            fileLogger.e("MainActivity", "🚨 치명적 시스템 상태 - $context")
             fileLogger.e("MainActivity", "타임스탬프: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(currentTime))}")
             fileLogger.e("MainActivity", "앱 실행 시간: ${uptime / 1000}초")
             fileLogger.e("MainActivity", "현재 FPS: ${currentFpsValue}fps")
@@ -936,8 +971,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             fileLogger.e("MainActivity", "가용 힙: ${String.format("%.1f", appMemory.availableHeapMB)} MB")
             fileLogger.e("MainActivity", "메모리 압박: ${appMemory.memoryPressureLevel}")
 
-            fileLogger.e("MainActivity", " 치명적 상태 로깅 완료 - $context ")
-            fileLogger.e("MainActivity", "")
+            fileLogger.e("MainActivity", "🚨 치명적 상태 로깅 완료 - $context")
 
         } catch (e: Exception) {
             fileLogger.e("MainActivity", "치명적 상태 로깅 실패: ${e.message}", e)
@@ -945,7 +979,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     }
 
     /**
-     *  상세한 시스템 상태 로깅 (BitmapPool 상태 포함)
+     *  상세한 시스템 상태 로깅 (BitmapPool 상태 포함) - Perfetto 조건부
      */
     private fun logDetailedSystemState(context: String) {
         try {
@@ -953,7 +987,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             val uptime = currentTime - appStartTime
             val currentFpsValue = currentFps.get()
 
-            fileLogger.i("MainActivity", " 상세 시스템 상태 (GPU 포함) - $context")
+            fileLogger.i("MainActivity", "📊 상세 시스템 상태 (GPU 포함) - $context")
             fileLogger.i("MainActivity", "타임스탬프: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(currentTime))}")
             fileLogger.i("MainActivity", "앱 실행 시간: ${uptime / 1000}초")
             fileLogger.i("MainActivity", "현재 FPS: ${currentFpsValue}fps")
@@ -978,10 +1012,10 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             fileLogger.i("MainActivity", "Pool Stale: ${poolHealth.staleSlots}")
             fileLogger.i("MainActivity", "Pool Recommendation: ${poolHealth.recommendation}")
 
-            //  GPU 상세 상태 (새로 추가)
+            //  GPU 상세 상태
             val gpuInfo = gpuMemoryMonitor.getCurrentGpuInfo()
             if (gpuInfo != null) {
-                fileLogger.i("MainActivity", "===  GPU 상세 상태  ===")
+                fileLogger.i("MainActivity", "=== GPU 상세 상태 ===")
                 fileLogger.i("MainActivity", "Graphics Memory: ${String.format("%.1f", gpuInfo.graphicsMemoryMB)} MB")
                 fileLogger.i("MainActivity", "GL Memory: ${String.format("%.1f", gpuInfo.glMemoryMB)} MB")
                 fileLogger.i("MainActivity", "Texture Memory: ${String.format("%.1f", gpuInfo.textureMemoryMB)} MB")
@@ -991,25 +1025,30 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                 fileLogger.i("MainActivity", "Surface Buffers: ${gpuInfo.surfaceBufferCount}")
 
                 if (gpuMemoryMonitor.isGpuMemoryLeakDetected()) {
-                    fileLogger.w("MainActivity", " GPU 메모리 누수 의심")
+                    fileLogger.w("MainActivity", "⚠️ GPU 메모리 누수 의심")
                 }
             }
 
-            // Perfetto 추적 상태
-            fileLogger.i("MainActivity", "=== Perfetto 추적 상태 ===")
-            fileLogger.i("MainActivity", "추적 활성: ${perfettoTracer.isTracing()}")
-            fileLogger.i("MainActivity", "수집된 이벤트: ${perfettoTracer.getEventCount()}개")
+            // Perfetto 추적 상태 (조건부)
+            if (isPerfettoEnabled && perfettoTracer != null) {
+                fileLogger.i("MainActivity", "=== Perfetto 추적 상태 ===")
+                fileLogger.i("MainActivity", "추적 활성: ${perfettoTracer!!.isTracing()}")
+                fileLogger.i("MainActivity", "수집된 이벤트: ${perfettoTracer!!.getEventCount()}개")
+            } else {
+                fileLogger.i("MainActivity", "=== Perfetto 상태 ===")
+                fileLogger.i("MainActivity", "Perfetto 비활성화됨 (리소스 절약)")
+            }
 
             // 메모리 경고 확인
             val warnings = resourceMonitor.checkAppMemoryWarnings()
             if (warnings.isNotEmpty()) {
-                fileLogger.w("MainActivity", " 메모리 경고 감지")
+                fileLogger.w("MainActivity", "⚠️ 메모리 경고 감지")
                 warnings.forEach { warning ->
                     fileLogger.w("MainActivity", "   $warning")
                 }
             }
 
-            fileLogger.i("MainActivity", " 상태 로깅 완료 - $context")
+            fileLogger.i("MainActivity", "✅ 상태 로깅 완료 - $context")
 
         } catch (e: Exception) {
             fileLogger.e("MainActivity", "상세 상태 + GPU 로깅 실패: ${e.message}", e)
@@ -1017,12 +1056,12 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     }
 
     /**
-     * 초기 시스템 상태 저장
+     * 초기 시스템 상태 저장 (Perfetto 조건부)
      */
     private fun logInitialSystemState() {
         monitoringScope.launch {
             try {
-                fileLogger.i("MainActivity", "=".repeat(80))
+                fileLogger.i("MainActivity", "================================================================================")
                 fileLogger.i("MainActivity", "🚀🚀🚀 앱 시작 - 초기 시스템 상태 🚀🚀🚀")
                 fileLogger.i("MainActivity", "세션 ID: $sessionId")
                 fileLogger.i("MainActivity", "시작 시간: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(appStartTime))}")
@@ -1030,21 +1069,25 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
                 fileLogger.i("MainActivity", "기기 모델: ${Build.MANUFACTURER} ${Build.MODEL}")
                 fileLogger.i("MainActivity", "앱 버전: ${packageManager.getPackageInfo(packageName, 0).versionName}")
 
-                // Documents/save/ 폴더 정보
-                val traceFiles = perfettoTracer.getAllTraceFiles()
-                fileLogger.i("MainActivity", "Documents/save/ 저장 위치 확인:")
-                if (traceFiles.isNotEmpty()) {
-                    fileLogger.i("MainActivity", "기존 추적 파일들:")
-                    traceFiles.forEach { filePath ->
-                        fileLogger.i("MainActivity", "  - $filePath")
+                // Documents/save/ 폴더 정보 (조건부)
+                if (isPerfettoEnabled && perfettoTracer != null) {
+                    val traceFiles = perfettoTracer!!.getAllTraceFiles()
+                    fileLogger.i("MainActivity", "Documents/save/ 저장 위치 확인:")
+                    if (traceFiles.isNotEmpty()) {
+                        fileLogger.i("MainActivity", "기존 추적 파일들:")
+                        traceFiles.forEach { filePath ->
+                            fileLogger.i("MainActivity", "  - $filePath")
+                        }
+                    } else {
+                        fileLogger.i("MainActivity", "Documents/save/ 폴더 새로 생성됨")
                     }
                 } else {
-                    fileLogger.i("MainActivity", "Documents/save/ 폴더 새로 생성됨")
+                    fileLogger.i("MainActivity", "Perfetto 비활성화 - 추적 파일 없음")
                 }
 
                 resourceMonitor.logAppResourceStatus("MainActivity", "앱_시작_초기_상태")
                 fileLogger.i("MainActivity", "BitmapPool 초기 상태: ${bitmapPoolManager.getPoolDetailedStatus()}")
-                fileLogger.i("MainActivity", "=".repeat(80))
+                fileLogger.i("MainActivity", "================================================================================")
             } catch (e: Exception) {
                 fileLogger.e("MainActivity", "초기 상태 로깅 실패: ${e.message}", e)
             }
@@ -1052,7 +1095,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     }
 
     /**
-     * 앱 종료 시 최종 상태 저장
+     * 앱 종료 시 최종 상태 저장 (Perfetto 조건부)
      */
     private fun logFinalSystemState() {
         try {
@@ -1065,17 +1108,21 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             fileLogger.i("MainActivity", "종료 시간: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(endTime))}")
             fileLogger.i("MainActivity", "최종 FPS: ${currentFps.get()}fps")
 
-            // 최종 Perfetto 추적 파일 목록
-            val finalTraceFiles = perfettoTracer.getAllTraceFiles()
-            fileLogger.i("MainActivity", "🎯 Documents/save/에 저장된 최종 추적 파일들:")
-            finalTraceFiles.forEach { filePath ->
-                val file = java.io.File(filePath)
-                fileLogger.i("MainActivity", "  - ${file.name} (${file.length() / 1024}KB)")
+            // 최종 Perfetto 추적 파일 목록 (조건부)
+            if (isPerfettoEnabled && perfettoTracer != null) {
+                val finalTraceFiles = perfettoTracer!!.getAllTraceFiles()
+                fileLogger.i("MainActivity", "🎯 Documents/save/에 저장된 최종 추적 파일들:")
+                finalTraceFiles.forEach { filePath ->
+                    val file = java.io.File(filePath)
+                    fileLogger.i("MainActivity", "  - ${file.name} (${file.length() / 1024}KB)")
+                }
+            } else {
+                fileLogger.i("MainActivity", "Perfetto 비활성화 - 추적 파일 없음")
             }
 
             resourceMonitor.logAppResourceStatus("MainActivity", "앱_종료_최종_상태")
             fileLogger.i("MainActivity", "🏁🏁🏁 세션 종료 완료 🏁🏁🏁")
-            fileLogger.i("MainActivity", "=".repeat(80))
+            fileLogger.i("MainActivity", "================================================================================")
             Thread.sleep(1000)
         } catch (e: Exception) {
             Log.e("MainActivity", "최종 상태 로깅 실패: ${e.message}", e)
@@ -1238,15 +1285,15 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
 
         // 응급 종료 방지
         if (emergencyShutdownPrevention.compareAndSet(false, true)) {
-            Log.w("MainActivity", " 응급 종료 방지 프로토콜 활성화")
+            Log.w("MainActivity", "🚨 응급 종료 방지 프로토콜 활성화")
 
             runBlocking {
                 try {
-                    // Perfetto 추적 즉시 중지
-                    stopPerfettoTracing()
-
-                    // 최종 힙 덤프 생성
-                    perfettoTracer.generateHeapDump("AppShutdown")
+                    // Perfetto 조건부 중지
+                    if (isPerfettoEnabled) {
+                        stopPerfettoTracing()
+                        perfettoTracer?.generateHeapDump("AppShutdown")
+                    }
 
                     // 모든 리소스 강제 정리
                     bitmapPoolManager.performEmergencyReset()
@@ -1270,7 +1317,6 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
         if (::sensorCollector.isInitialized) {
             sensorCollector.stopSensorStreaming()
             sensorCollector.closeCamera()
-            // 🎯 추가: SensorCollector 정리
             sensorCollector.cleanup()
         }
 
@@ -1291,9 +1337,11 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             }
             fpsMonitor = null
 
-            // Perfetto 자동 추적 중지
+            // Perfetto 자동 추적 중지 (조건부)
             perfettoAutoTraceJob?.cancel()
-            perfettoTracer.cleanup()
+            if (isPerfettoEnabled && perfettoTracer != null) {
+                perfettoTracer!!.cleanup()
+            }
 
             monitoringScope.cancel()
             fileLogger.stopFileLogging()
@@ -1317,7 +1365,7 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             bitmapPoolManager.shutdown()
         }
 
-        Log.d("MainActivity", " Documents/save/ Perfetto 추적과 함께 Activity 정리 완료")
+        Log.d("MainActivity", "✅ Documents/save/ Perfetto 추적과 함께 Activity 정리 완료")
     }
 
     /**
@@ -1333,73 +1381,73 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
             }
         }
     }
-    
+
     /**
      * TextView 업데이트 일시정지
      */
     private fun pauseTextViewUpdates() {
         isTextUpdatesPaused = true
-        
+
         // HomeFragment의 pauseTextUpdates() 호출
         val navController = findNavController(R.id.nav_host_fragment_activity_main)
         val currentFragment = supportFragmentManager.primaryNavigationFragment?.childFragmentManager?.fragments?.firstOrNull()
         if (currentFragment is com.example.myapplication.ui.home.HomeFragment) {
             currentFragment.pauseTextUpdates()
         }
-        
+
         fileLogger.w("MainActivity", "TextView 업데이트 일시정지")
     }
-    
+
     /**
      * TextView 업데이트 재개
      */
     private fun resumeTextViewUpdates() {
         isTextUpdatesPaused = false
-        
+
         // HomeFragment의 resumeTextUpdates() 호출
         val navController = findNavController(R.id.nav_host_fragment_activity_main)
         val currentFragment = supportFragmentManager.primaryNavigationFragment?.childFragmentManager?.fragments?.firstOrNull()
         if (currentFragment is com.example.myapplication.ui.home.HomeFragment) {
             currentFragment.resumeTextUpdates()
         }
-        
+
         fileLogger.i("MainActivity", "TextView 업데이트 재개")
     }
-    
+
     /**
      * TextView 관련 긴급 복구
      */
     private suspend fun performTextViewEmergencyRecovery(fps: Double) = withContext(Dispatchers.IO) {
         try {
-            fileLogger.w("MainActivity", "TextView 긴급 복구 시작 - FPS: ${String.format("%.1f", fps)}")
-            
+            fileLogger.w("MainActivity", "🔧 TextView 긴급 복구 시작 - FPS: ${String.format("%.1f", fps)}")
+
             // 1. requestLayout 호출
             withContext(Dispatchers.Main) {
                 window.decorView.requestLayout()
             }
             delay(100)
-            
+
             // 2. GC 호출
             System.gc()
             delay(200)
             System.runFinalization()
             delay(200)
-            
+
             // 3. BitmapPool 정리
             bitmapPoolManager.advancedTaggedBitmapPool.forceCleanupStaleReferences()
             delay(300)
-            
+
             // 4. TextView 업데이트 재개
             withContext(Dispatchers.Main) {
                 resumeTextViewUpdates()
             }
-            
+
             // 5. 복구 완료 플래그 리셋
             isEmergencyRecoveryActive = false
             consecutiveLowFpsCount = 0
-            
-            fileLogger.i("MainActivity", "TextView 긴급 복구 완료")
-            
+
+            fileLogger.i("MainActivity", "✅ TextView 긴급 복구 완료")
+
         } catch (e: Exception) {
             fileLogger.e("MainActivity", "TextView 긴급 복구 실패: ${e.message}", e)
             isEmergencyRecoveryActive = false
