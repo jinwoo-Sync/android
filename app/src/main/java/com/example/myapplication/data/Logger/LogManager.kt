@@ -41,11 +41,11 @@ class LoggerManager private constructor(
         private const val BATCH_TIMEOUT_MS = 4000L
         private const val MAX_FRAME_BUFFER = 45
 
-        //  비디오 전용 설정 (새로 추가)
-        private const val MAX_VIDEO_FRAME_BUFFER = 1800  // 15fps * 120초 = 2분분량
-        private const val VIDEO_BATCH_SIZE = 45          // 3초분 배치 처리
-        private const val VIDEO_BATCH_TIMEOUT_MS = 1500L // 1.5초 타임아웃
-        private const val VIDEO_PROCESSING_INTERVAL = 150L // 150ms마다 체크
+        //  비디오 전용 설정 - 무결성 보장을 위한 확장
+        private const val MAX_VIDEO_FRAME_BUFFER = 3600  // 15fps * 240초 = 4분분량 (무결성 보장)
+        private const val VIDEO_BATCH_SIZE = 30          // 2초분 배치 처리 (안정적)
+        private const val VIDEO_BATCH_TIMEOUT_MS = 1000L // 1초 타임아웃 (빠른 처리)
+        private const val VIDEO_PROCESSING_INTERVAL = 100L // 100ms마다 체크 (더 자주)
 
         private const val MAX_GPS_QUEUE = 100
         private const val MAX_IMU_QUEUE = 5000
@@ -288,18 +288,33 @@ class LoggerManager private constructor(
         }
     }
 
-    //  비동기 비디오 프레임 처리 함수 추가
+    //  비동기 비디오 프레임 처리 함수 추가 - 무결성 보장
     private suspend fun processVideoFrameAsync(originalBitmap: Bitmap, data: SensorData) {
         try {
-            // 메모리 압박 체크
+            // 무결성 우선: 메모리 압박 시에도 프레임 절대 드롭하지 않음
+            // 대신 오래된 프레임만 정리하고 현재 프레임은 반드시 처리
             if (memoryMonitor.isMemoryPressureHigh()) {
-                clearOldVideoFrames(100)
-                return
+                Log.w(TAG, "🚨 메모리 압박 - 오래된 프레임 정리 (현재 프레임은 보장)")
+                clearOldVideoFrames(200) // 더 많이 정리
+                // early return 제거 - 현재 프레임은 반드시 처리
             }
 
-            // 안전한 비트맵 복사
-            val videoBitmap = withContext(Dispatchers.Default) {
-                originalBitmap.copy(originalBitmap.config ?: Bitmap.Config.ARGB_8888, false)
+            // 안전한 비트맵 복사 - 실패 시 재시도
+            var videoBitmap: Bitmap? = null
+            var retryCount = 0
+            while (videoBitmap == null && retryCount < 3) {
+                videoBitmap = try {
+                    withContext(Dispatchers.Default) {
+                        originalBitmap.copy(originalBitmap.config ?: Bitmap.Config.RGB_565, false) // 메모리 절약
+                    }
+                } catch (e: OutOfMemoryError) {
+                    Log.w(TAG, "🔄 비트맵 복사 재시도 ${retryCount + 1}/3: ${e.message}")
+                    clearOldVideoFrames(300)
+                    System.gc()
+                    delay(50)
+                    retryCount++
+                    null
+                }
             }
 
             if (videoBitmap != null) {
@@ -316,11 +331,17 @@ class LoggerManager private constructor(
                 val frameNum = videoFrameCounter.incrementAndGet()
                 Log.d(TAG, "비디오 프레임 비동기 추가: #$frameNum, seq=$sequenceNum, 큐=${videoFrameQueue.size()}")
 
-                // 큐 상태 경고
+                // 큐 상태 모니터링 및 적극적 처리
                 val queuePercent = (videoFrameQueue.size() * 100 / MAX_VIDEO_FRAME_BUFFER)
-                if (queuePercent > 80) {
-                    Log.w(TAG, "️ 비디오 큐 사용률 높음: ${queuePercent}% (${videoFrameQueue.size()}/${MAX_VIDEO_FRAME_BUFFER})")
+                if (queuePercent > 70) {
+                    Log.w(TAG, "🚨 비디오 큐 사용률 높음: ${queuePercent}% (${videoFrameQueue.size()}/${MAX_VIDEO_FRAME_BUFFER}) - 즉시 처리 트리거")
+                    // 즉시 처리 트리거 (무결성 보장)
+                    videoProcessingScope.launch {
+                        processVideoFrames("큐 사용률 높음 - 무결성 보장")
+                    }
                 }
+                
+                Log.v(TAG, "📹 프레임 추가 성공: seq=$sequenceNum, 큐=${videoFrameQueue.size()}/${MAX_VIDEO_FRAME_BUFFER}")
             }
         } catch (e: Exception) {
             Log.e(TAG, "비동기 비디오 처리 실패: ${e.message}")

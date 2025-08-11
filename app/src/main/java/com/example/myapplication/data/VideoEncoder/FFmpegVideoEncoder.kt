@@ -128,7 +128,7 @@ class SimpleVideoEncoder(private val context: Context) {
         if (!isRecording.get()) return false
 
         return try {
-            val inputBufferIndex = mediaCodec!!.dequeueInputBuffer(5000) // 타임아웃 단축
+            val inputBufferIndex = mediaCodec!!.dequeueInputBuffer(20000) // 20초 타임아웃 - 무결성 보장
             if (inputBufferIndex >= 0) {
                 // 즉시 처리 방식으로 변경 - 메모리 누수 방지
                 val yuvData = convertBitmapDirectly(bitmap)

@@ -1230,12 +1230,17 @@ class SensorCollector(
         managedBitmap: ManagedBitmap,
         callback: (SensorData?) -> Unit
     ) {
-        // Channel(CONFLATED/ capacity=1)로 최신 프레임만 유지
-        val result = frameChannel.trySend(managedBitmap to callback)
-        if (!result.isSuccess) {
-            // 드롭 시 누수 방지
-            try { managedBitmap.release() } catch (_: Exception) {}
-            Log.d(TAG, "Frame dropped due to backpressure (released)")
+        // 무결성 보장: 프레임 절대 드롭하지 않음
+        // 블로킹 방식으로 변경하여 모든 프레임 보장
+        sensorScope.launch(Dispatchers.IO) {
+            try {
+                // 블로킹 send로 프레임 누락 방지
+                frameChannel.send(managedBitmap to callback)
+                Log.v(TAG, "✅ Frame guaranteed delivery: ${managedBitmap.hashCode()}")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Frame delivery failed: ${e.message}")
+                try { managedBitmap.release() } catch (_: Exception) {}
+            }
         }
     }
     
