@@ -203,16 +203,53 @@ class SensorCollector(
     private val frameProcessingStats = AtomicInteger(0)
 
     private val deepLearningAdaptiveManager = DeepLearningAdaptiveManager()
-    
-    // 프레임 처리를 위한 actor 채널 (DROP_OLDEST 정책)
-    private val frameProcessingActor = sensorScope.actor<Pair<ManagedBitmap, (SensorData?) -> Unit>>(
-        context = Dispatchers.Default.limitedParallelism(4),
-        capacity = Channel.CONFLATED // 최신 프레임만 유지
-    ) {
-        for ((bitmap, callback) in channel) {
-            processFrameInBackground(bitmap, callback)
+
+    // Create bounded thread pool for sensor processing (6 threads max)
+    private val sensorThreadPoolExecutor = Executors.newFixedThreadPool(6) { r ->
+        Thread(r, "SensorProcessor-${System.currentTimeMillis()}").apply {
+            priority = Thread.NORM_PRIORITY
         }
     }
+
+    private val sensorThreadPool = sensorThreadPoolExecutor.asCoroutineDispatcher()
+
+    // 이미지 전용 스레드 풀 (코어수 기반 6~8)
+    private val imageExecutor = Executors.newFixedThreadPool(
+        Runtime.getRuntime().availableProcessors().coerceAtMost(8)
+    ) { r ->
+        Thread(r, "ImageProcessor-${System.currentTimeMillis()}").apply {
+            priority = Thread.NORM_PRIORITY + 1 // 약간 높은 우선순위
+        }
+    }
+    private val imageDispatcher = imageExecutor.asCoroutineDispatcher()
+
+    // Dedicated scope for sensor processing with bounded thread pool
+    private val sensorScope = CoroutineScope(sensorThreadPool + SupervisorJob())
+    
+    // 이미지 전용 스코프
+    private val imageScope = CoroutineScope(imageDispatcher + SupervisorJob())
+
+    // Keep IO scope for general background work
+    private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+
+    // 프레임 처리를 위한 actor - 이미지 전용 디스패처 사용
+    private val frameChannel =
+        Channel<Pair<ManagedBitmap, (SensorData?) -> Unit>>(capacity = 1)
+
+    // 2) 소비 코루틴 (imageScope에서 실행)
+    private val frameConsumerJob = imageScope.launch {
+        for (pair in frameChannel) {           // suspend for-loop (hasNext 에러 사라짐)
+            val managed = pair.first
+            val cb = pair.second
+            try {
+                processFrameInBackground(managed, cb) // 기존 처리 호출
+            } finally {
+                // 여기서 release() 하지 않음 — UI가 그린 뒤 release 콜백에서 처리
+            }
+        }
+    }
+
     private var currentDetectionStrategy =
         deepLearningAdaptiveManager.getCurrentDetectionStrategy(60L)
 
@@ -299,20 +336,6 @@ class SensorCollector(
     private var imuCallback: ((SensorData_String) -> Unit)? = null
     private var gnssCallback: ((SensorData_String) -> Unit)? = null
     private var detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
-
-    // Create bounded thread pool for sensor processing (4 threads max)
-    private val sensorThreadPoolExecutor = Executors.newFixedThreadPool(4) { r ->
-        Thread(r, "SensorProcessor-${System.currentTimeMillis()}").apply {
-            priority = Thread.NORM_PRIORITY
-        }
-    }
-    private val sensorThreadPool = sensorThreadPoolExecutor.asCoroutineDispatcher()
-    
-    // Dedicated scope for sensor processing with bounded thread pool
-    private val sensorScope = CoroutineScope(sensorThreadPool + SupervisorJob())
-    
-    // Keep IO scope for general background work
-    private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
         Log.d(TAG, "🎯 SensorCollector with BitmapPoolManager 초기화 완료")
@@ -1207,12 +1230,17 @@ class SensorCollector(
         managedBitmap: ManagedBitmap,
         callback: (SensorData?) -> Unit
     ) {
-        // Actor로 프레임 전송 (DROP_OLDEST 자동 처리)
-        frameProcessingActor.trySend(managedBitmap to callback)
+        // Channel(CONFLATED/ capacity=1)로 최신 프레임만 유지
+        val result = frameChannel.trySend(managedBitmap to callback)
+        if (!result.isSuccess) {
+            // 드롭 시 누수 방지
+            try { managedBitmap.release() } catch (_: Exception) {}
+            Log.d(TAG, "Frame dropped due to backpressure (released)")
+        }
     }
     
     /**
-     * 백그라운드에서 프레임 처리 - 최적화된 버전
+     * 백그라운드에서 프레임 처리 - 소유권 안전 전달
      */
     private suspend fun processFrameInBackground(
         managedBitmap: ManagedBitmap,
@@ -1227,12 +1255,13 @@ class SensorCollector(
             // ManagedBitmap 유효성 검증
             if (!managedBitmap.isValid() || managedBitmap.bitmap.isRecycled) {
                 Log.w(TAG, "무효한 ManagedBitmap 감지 - 프레임 스킵: frameId=$frameId")
+                managedBitmap.release()
                 return
             }
 
-            // LoggerManager 처리 (비동기 방식으로 변경)
+            // LoggerManager 처리 (비동기 방식으로 변경) - IO 디스패처 사용
             if (::dataSynchronizer.isInitialized) {
-                sensorScope.launch(Dispatchers.IO) {
+                coroutineScope.launch {
                     try {
                         val sensorData = SensorData(
                             value = "TaggedFrame: $frameId",
@@ -1249,14 +1278,14 @@ class SensorCollector(
                 }
             }
 
-            // UI로 메인 스레드에서 전달 (참조만 전달)
+            // UI로 메인 스레드에서 전달 - 소유권은 전달하지 말고 참조만
             withContext(Dispatchers.Main.immediate) {
                 if (managedBitmap.isValid() && !managedBitmap.bitmap.isRecycled) {
                     callback(
                         SensorData(
                             value = "Advanced Tagged Frame: $frameId",
                             bitmap = managedBitmap.bitmap,
-                            managedBitmap = managedBitmap,
+                            managedBitmap = managedBitmap, // 소유권 전달
                             timestamp = systemTime,
                             monoTimestamp = System.nanoTime(),
                             frameId = frameId
@@ -1264,6 +1293,7 @@ class SensorCollector(
                     )
                     Log.d(TAG, "✅ Frame delivered: frameId=$frameId")
                 } else {
+                    managedBitmap.release()
                     callback(null)
                 }
             }
@@ -1278,17 +1308,10 @@ class SensorCollector(
             
         } catch (e: Exception) {
             Log.e(TAG, "Frame processing error: ${e.message}", e)
+            managedBitmap.release()
             callback(null)
-        } finally {
-            // 리소스 해제는 finally에서 보장
-            if (!managedBitmap.isValid() || managedBitmap.bitmap.isRecycled) {
-                try {
-                    managedBitmap.release()
-                } catch (e: Exception) {
-                    Log.w(TAG, "ManagedBitmap release failed: ${e.message}")
-                }
-            }
         }
+        // finally 블록 제거 - 소유권을 UI에 전달했기 때문
     }
 
     private fun handleSelectiveDetection(managedBitmap: ManagedBitmap, frameId: Long) {
@@ -1397,10 +1420,13 @@ class SensorCollector(
         try {
             isSessionActive.set(false)
             cameraOpenCloseLock.acquire()
-            
-            // Actor 채널 종료
-            frameProcessingActor.close()
 
+            // actor 대신 channel/consumer 정리
+            try { frameChannel.close() } catch (_: Exception) {}
+            try { frameConsumerJob.cancel() } catch (_: Exception) {}
+
+            // 여기서는 executor를 종료하지 않습니다.
+            // (다시 start할 수 있도록 유지: 실제 종료는 stopCameraStreaming()/cleanup()에서)
             cleanupCameraResources()
             isStreaming.set(false)
 

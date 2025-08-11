@@ -2,7 +2,6 @@ package com.example.myapplication.ui.home
 
 import android.content.Context
 import android.util.Log
-import android.view.Choreographer
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
@@ -21,6 +20,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.sample
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
+import android.graphics.Bitmap
+import android.view.Choreographer
 
 class HomeViewModel(
     private val sensorCollector: SensorCollector,
@@ -28,19 +29,20 @@ class HomeViewModel(
 ) : ViewModel() {
     private val TAG = "HomeViewModel"
 
-    //  SensorData 전체를 전달하도록 수정 (frameId 포함)
-    private val _cameraFrame = MutableLiveData<SensorData?>()
-    val cameraFrame: LiveData<SensorData?> = _cameraFrame
+    // UiFrame DTO for safe bitmap ownership transfer
+    data class UiFrame(
+        val bitmap: Bitmap,
+        val frameId: Long,
+        val timestamp: Long,
+        val release: () -> Unit  // UI가 그린 후 호출
+    )
     
-    // 프레임 처리를 위한 actor 채널 (DROP_OLDEST 정책)
-    private val frameProcessingActor = viewModelScope.actor<SensorData?>(
-        context = Dispatchers.Default.limitedParallelism(4),
-        capacity = Channel.CONFLATED // 최신 프레임만 유지
-    ) {
-        for (frame in channel) {
-            processFrameInBackground(frame)
-        }
-    }
+    //  UiFrame 전달로 변경
+    private val _cameraFrame = MutableLiveData<UiFrame?>()
+    val cameraFrame: LiveData<UiFrame?> = _cameraFrame
+    
+    // 마지막 정상 프레임 유지
+    private var lastGoodFrame: UiFrame? = null
 
     private val _boundingBoxes = MutableLiveData<List<BoundingBox>>()
     val boundingBoxes: LiveData<List<BoundingBox>> = _boundingBoxes
@@ -116,24 +118,15 @@ class HomeViewModel(
     }
 
     /**
-     *  Advanced Tagged Pool에서 온 프레임을 UI로 전달 - 최적화된 버전
+     * SensorData를 UiFrame으로 변환하여 안전하게 전달
      */
     private fun updateCameraFrame(sensorData: SensorData?) {
-        // actor에 프레임 전송 (DROP_OLDEST로 자동 처리)
-        frameProcessingActor.trySend(sensorData)
-    }
-    
-    /**
-     * 백그라운드에서 프레임 처리 후 UI 업데이트
-     */
-    private suspend fun processFrameInBackground(sensorData: SensorData?) {
         try {
             if (sensorData?.bitmap != null &&
                 !sensorData.bitmap.isRecycled &&
                 sensorData.bitmap.width > 0 &&
                 sensorData.bitmap.height > 0) {
 
-                // ManagedBitmap 유효성 검증 (백그라운드에서 수행)
                 if (sensorData.managedBitmap != null) {
                     if (!sensorData.managedBitmap!!.isValid()) {
                         Log.w(TAG, "무효한 ManagedBitmap 스킵: frameId=${sensorData.frameId}")
@@ -142,37 +135,43 @@ class HomeViewModel(
                     }
                 }
 
-                // UI 업데이트는 메인 스레드에서만 (참조만 전달)
-                withContext(Dispatchers.Main.immediate) {
-                    if (!sensorData.bitmap.isRecycled && sensorData.bitmap.width > 0) {
-                        _cameraFrame.value = sensorData
-                        Log.d(TAG, "프레임 UI 전달: frameId=${sensorData.frameId}")
-                    } else {
-                        sensorData.managedBitmap?.release()
-                        _cameraFrame.value = null
-                    }
-                }
+                // UiFrame 생성 - UI가 그린 후 release 호출
+                val uiFrame = UiFrame(
+                    bitmap = sensorData.bitmap,
+                    frameId = sensorData.frameId,
+                    timestamp = sensorData.timestamp,
+                    release = { sensorData.managedBitmap?.release() }
+                )
+                
+                renderSafeFrame(uiFrame)
+                Log.d(TAG, "안전 프레임 전달: frameId=${sensorData.frameId}")
             } else {
-                // null 데이터 처리
-                withContext(Dispatchers.Main.immediate) {
-                    _cameraFrame.value = null
-                }
+                // null 데이터는 마지막 정상 프레임 유지
+                renderSafeFrame(null)
             }
         } catch (e: Exception) {
             Log.e(TAG, "프레임 처리 실패: ${e.message}", e)
             sensorData?.managedBitmap?.release()
-            withContext(Dispatchers.Main.immediate) {
-                _cameraFrame.value = null
-            }
-        } finally {
-            // 리소스 정리는 항상 수행
-            if (sensorData?.managedBitmap != null && !sensorData.managedBitmap!!.isValid()) {
-                try {
-                    sensorData.managedBitmap!!.release()
-                } catch (e: Exception) {
-                    Log.w(TAG, "ManagedBitmap 해제 실패: ${e.message}")
+            renderSafeFrame(null)
+        }
+    }
+    
+    /**
+     * 마지막 정상 프레임 유지로 깜빡임 방지
+     */
+    private fun renderSafeFrame(uiFrame: UiFrame?) {
+        if (uiFrame != null) {
+            // 이전 프레임 정리 (다음 프레임에 예약)
+            lastGoodFrame?.let { oldFrame ->
+                Choreographer.getInstance().postFrameCallback {
+                    oldFrame.release()
                 }
             }
+            lastGoodFrame = uiFrame
+            _cameraFrame.value = uiFrame
+        } else {
+            // null일 때 검은 화면 방지 - 이전 프레임 유지
+            // _cameraFrame.value = null 하지 말기
         }
     }
 
@@ -379,18 +378,16 @@ class HomeViewModel(
         isCameraStreamingJob = viewModelScope.launch {
             Log.d(TAG, " Advanced Tagged Camera Flow 구독 시작...")
             try {
-                // 33ms 샘플링 (약 30fps) 적용
-                homeRepository.cameraStreamFlow
-                    .sample(33) // 프레임 레이트 제한
-                    .collect { sensorData ->
-                        if (sensorData != null) {
-                            updateCameraFrame(sensorData)
-                            Log.d(TAG, " Advanced Tagged frame pushed: frameId=${sensorData.frameId}, size=${sensorData.bitmap?.width}x${sensorData.bitmap?.height}")
-                        } else {
-                            Log.w(TAG, " Received null sensor data from Advanced Tagged camera flow")
-                            updateCameraFrame(null)
-                        }
+                // sample() 제거 - Repository에서만 DROP_OLDEST 사용
+                homeRepository.cameraStreamFlow.collect { sensorData ->
+                    if (sensorData != null) {
+                        updateCameraFrame(sensorData)
+                        Log.d(TAG, " Advanced Tagged frame pushed: frameId=${sensorData.frameId}, size=${sensorData.bitmap?.width}x${sensorData.bitmap?.height}")
+                    } else {
+                        Log.w(TAG, " Received null sensor data from Advanced Tagged camera flow")
+                        updateCameraFrame(null)
                     }
+                }
             } catch (e: Exception) {
                 Log.e(TAG, " Advanced Tagged Camera Flow 구독 오류: ${e.message}", e)
                 _text.postValue("Advanced Tagged 카메라 스트리밍 오류: ${e.message}")
@@ -508,8 +505,9 @@ class HomeViewModel(
         //  안전한 정리 순서
         stopSurfaceFpsMonitoring()  // 1. FPS 모니터링 먼저 중지
         
-        // Actor 채널 종료
-        frameProcessingActor.close()
+        // 마지막 프레임 정리
+        lastGoodFrame?.release()
+        lastGoodFrame = null
 
         isCameraStreamingJob?.cancel()
         homeRepository.stopCameraStreaming()
