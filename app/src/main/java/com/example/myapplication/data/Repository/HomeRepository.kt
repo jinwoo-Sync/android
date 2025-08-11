@@ -21,6 +21,8 @@ import kotlinx.coroutines.channels.actor
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 
 class HomeRepository(
     private val context: Context,
@@ -30,19 +32,13 @@ class HomeRepository(
 ) {
     private val TAG = "HomeRepository"
 
-    // DROP_OLDEST 정책을 위한 SharedFlow 사용
-    private val _cameraStreamFlow = MutableStateFlow<SensorData?>(null)
-    val cameraStreamFlow: StateFlow<SensorData?> = _cameraStreamFlow
-    
-    // 프레임 처리를 위한 액터 (백그라운드 처리)
-    private val frameProcessingScope = CoroutineScope(Dispatchers.Default.limitedParallelism(4))
-    private val frameActor = frameProcessingScope.actor<SensorData?>(
-        capacity = Channel.CONFLATED // 최신 프레임만 유지
-    ) {
-        for (frame in channel) {
-            processFrameAsync(frame)
-        }
-    }
+    // 한 곳에서만 제한: Repository에서 DROP_OLDEST만 사용
+    private val _cameraStreamFlow = MutableSharedFlow<SensorData?>(
+        replay = 1,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val cameraStreamFlow: SharedFlow<SensorData?> = _cameraStreamFlow
 
     init {
         // 10초마다 백업 정리
@@ -162,8 +158,11 @@ class HomeRepository(
 
         sensorCollector.startCameraStreaming(
             callback = { sensorData ->
-                // Actor로 프레임 전송 (DROP_OLDEST 자동 처리)
-                frameActor.trySend(sensorData)
+                // 직접 SharedFlow에 전송 (DROP_OLDEST 자동 처리)
+                _cameraStreamFlow.tryEmit(sensorData)
+                if (sensorData != null) {
+                    Log.d(TAG, "✅ Frame emitted: frameId=${sensorData.frameId}")
+                }
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
                 // Detection 콜백은 직접 처리 (경량화)
@@ -174,28 +173,6 @@ class HomeRepository(
         Log.d(TAG, " 카메라 시작 완료 - 최적화 모드")
     }
     
-    /**
-     * 비동기로 프레임 처리 후 Flow에 배포
-     */
-    private suspend fun processFrameAsync(sensorData: SensorData?) {
-        try {
-            if (sensorData?.bitmap != null &&
-                !sensorData.bitmap.isRecycled &&
-                sensorData.bitmap.width > 0 &&
-                sensorData.bitmap.height > 0) {
-                
-                // 필요한 검증만 수행 후 바로 전달
-                _cameraStreamFlow.value = sensorData
-                Log.d(TAG, " Frame processed: frameId=${sensorData.frameId}")
-            } else {
-                // 무효한 프레임 해제
-                sensorData?.managedBitmap?.release()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Frame processing error: ${e.message}", e)
-            sensorData?.managedBitmap?.release()
-        }
-    }
 
     /**
      *  카메라 스트리밍 중지 - 최적화된 버전
@@ -206,12 +183,11 @@ class HomeRepository(
             return
         }
 
-        // Actor 종료
-        frameActor.close()
+        // SharedFlow 사용으로 actor 정리 불필요
         
         sensorCollector.stopCameraStreaming()
         isStreamingActive = false
-        _cameraStreamFlow.value = null
+        _cameraStreamFlow.tryEmit(null)
         Log.d(TAG, "Camera streaming stopped with cleanup")
     }
 
@@ -235,7 +211,7 @@ class HomeRepository(
         if (isStreamingActive) {
             Log.w(TAG, " 카메라 활성 상태 - 센서만 재등록 (카메라 보호)")
 
-            CoroutineScope(Dispatchers.IO).launch {
+            CoroutineScope(Dispatchers.IO).launch @androidx.annotation.RequiresPermission(allOf = [android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION]) {
                 delay(100) // 안전 대기
 
                 // 카메라와 완전 분리된 센서만 재등록
