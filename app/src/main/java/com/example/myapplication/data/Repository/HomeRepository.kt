@@ -16,6 +16,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.actor
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.sample
+import kotlinx.coroutines.channels.BufferOverflow
 
 class HomeRepository(
     private val context: Context,
@@ -25,8 +30,19 @@ class HomeRepository(
 ) {
     private val TAG = "HomeRepository"
 
+    // DROP_OLDEST 정책을 위한 SharedFlow 사용
     private val _cameraStreamFlow = MutableStateFlow<SensorData?>(null)
     val cameraStreamFlow: StateFlow<SensorData?> = _cameraStreamFlow
+    
+    // 프레임 처리를 위한 액터 (백그라운드 처리)
+    private val frameProcessingScope = CoroutineScope(Dispatchers.Default.limitedParallelism(4))
+    private val frameActor = frameProcessingScope.actor<SensorData?>(
+        capacity = Channel.CONFLATED // 최신 프레임만 유지
+    ) {
+        for (frame in channel) {
+            processFrameAsync(frame)
+        }
+    }
 
     init {
         // 10초마다 백업 정리
@@ -80,25 +96,25 @@ class HomeRepository(
     }
 
     /**
-     * 🎯 비트맵 풀 강제 정리 (UI 요청) - BitmapPoolManager 사용
+     *  비트맵 풀 강제 정리 (UI 요청) - BitmapPoolManager 사용
      */
     fun requestPoolCleanup() {
         try {
-            // ✅ BitmapPoolManager를 통한 풀 정리
+            //  BitmapPoolManager를 통한 풀 정리
             bitmapPoolManager.requestPoolCleanup()
 
-            // ✅ SensorCollector의 개별 정리도 수행
+            //  SensorCollector의 개별 정리도 수행
             sensorCollector.requestPoolCleanup()
 
-            Log.d(TAG, "🧹 Repository: 전체 비트맵 풀 정리 요청 완료")
+            Log.d(TAG, " Repository: 전체 비트맵 풀 정리 요청 완료")
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Repository: 비트맵 풀 정리 실패: ${e.message}", e)
+            Log.e(TAG, " Repository: 비트맵 풀 정리 실패: ${e.message}", e)
             throw e
         }
     }
 
     /**
-     * 🎯 풀 상세 상태 조회 (UI 요청) - BitmapPoolManager 사용
+     *  풀 상세 상태 조회 (UI 요청) - BitmapPoolManager 사용
      */
     fun getPoolDetailedStatus(): String {
         return try {
@@ -113,27 +129,27 @@ class HomeRepository(
                 appendLine(sensorCollectorStatus)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Repository: 풀 상태 조회 실패: ${e.message}", e)
+            Log.e(TAG, " Repository: 풀 상태 조회 실패: ${e.message}", e)
             "풀 상태 조회 실패: ${e.message}"
         }
     }
 
     /**
-     * 🚨 응급 복구 (심각한 상황용)
+     *  응급 복구 (심각한 상황용)
      */
     fun performEmergencyPoolReset() {
         try {
-            Log.w(TAG, "🚨 Repository: 응급 풀 복구 시작")
+            Log.w(TAG, " Repository: 응급 풀 복구 시작")
             bitmapPoolManager.performEmergencyReset()
-            Log.w(TAG, "✅ Repository: 응급 풀 복구 완료")
+            Log.w(TAG, " Repository: 응급 풀 복구 완료")
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Repository: 응급 풀 복구 실패: ${e.message}", e)
+            Log.e(TAG, " Repository: 응급 풀 복구 실패: ${e.message}", e)
             throw e
         }
     }
 
     /**
-     * ✅ 카메라 스트리밍 시작 - 센서 콜백 보존
+     *  카메라 스트리밍 시작 - 최적화된 버전
      */
     fun startCameraStreaming() {
         if (isStreamingActive) {
@@ -141,31 +157,48 @@ class HomeRepository(
             return
         }
 
-        Log.d(TAG, "🎯 카메라 시작 - 센서 간섭 방지 모드")
+        Log.d(TAG, " 카메라 시작 - 최적화 모드")
         isStreamingActive = true
 
         sensorCollector.startCameraStreaming(
             callback = { sensorData ->
-                if (sensorData?.bitmap != null &&
-                    !sensorData.bitmap.isRecycled &&
-                    sensorData.bitmap.width > 0 &&
-                    sensorData.bitmap.height > 0) {
-
-                    _cameraStreamFlow.value = sensorData
-                    Log.d(TAG, "✅ Camera frame: frameId=${sensorData.frameId}")
-                }
+                // Actor로 프레임 전송 (DROP_OLDEST 자동 처리)
+                frameActor.trySend(sensorData)
             },
             detectionCallback = { boundingBoxes, inferenceTime, frameId ->
+                // Detection 콜백은 직접 처리 (경량화)
                 detectionCallback?.invoke(boundingBoxes, inferenceTime, frameId)
             }
         )
 
-        // 🚨 카메라 시작 후 센서 복원은 하지 않음 (간섭 방지)
-        Log.d(TAG, "✅ 카메라 시작 완료 - 센서 간섭 방지")
+        Log.d(TAG, " 카메라 시작 완료 - 최적화 모드")
+    }
+    
+    /**
+     * 비동기로 프레임 처리 후 Flow에 배포
+     */
+    private suspend fun processFrameAsync(sensorData: SensorData?) {
+        try {
+            if (sensorData?.bitmap != null &&
+                !sensorData.bitmap.isRecycled &&
+                sensorData.bitmap.width > 0 &&
+                sensorData.bitmap.height > 0) {
+                
+                // 필요한 검증만 수행 후 바로 전달
+                _cameraStreamFlow.value = sensorData
+                Log.d(TAG, " Frame processed: frameId=${sensorData.frameId}")
+            } else {
+                // 무효한 프레임 해제
+                sensorData?.managedBitmap?.release()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Frame processing error: ${e.message}", e)
+            sensorData?.managedBitmap?.release()
+        }
     }
 
     /**
-     * ✅ 카메라 스트리밍 중지 - UI 버튼용
+     *  카메라 스트리밍 중지 - 최적화된 버전
      */
     fun stopCameraStreaming() {
         if (!isStreamingActive) {
@@ -173,6 +206,9 @@ class HomeRepository(
             return
         }
 
+        // Actor 종료
+        frameActor.close()
+        
         sensorCollector.stopCameraStreaming()
         isStreamingActive = false
         _cameraStreamFlow.value = null
@@ -180,7 +216,7 @@ class HomeRepository(
     }
 
     /**
-     * ✅ 센서 데이터 스트리밍 시작 - 수정된 버전
+     *  센서 데이터 스트리밍 시작 - 수정된 버전
      */
     fun startSensorStreaming(
         gpsCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
@@ -188,16 +224,16 @@ class HomeRepository(
         gnssCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
         detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
     ) {
-        Log.d(TAG, "🎯 Repository startSensorStreaming - 카메라 보호 모드")
+        Log.d(TAG, " Repository startSensorStreaming - 카메라 보호 모드")
 
         // 콜백들을 저장
         currentGpsCallback = gpsCallback
         currentImuCallback = imuCallback
         currentGnssCallback = gnssCallback
 
-        // 🚨 카메라가 활성화된 경우 센서만 조심스럽게 재등록
+        //  카메라가 활성화된 경우 센서만 조심스럽게 재등록
         if (isStreamingActive) {
-            Log.w(TAG, "⚠️ 카메라 활성 상태 - 센서만 재등록 (카메라 보호)")
+            Log.w(TAG, " 카메라 활성 상태 - 센서만 재등록 (카메라 보호)")
 
             CoroutineScope(Dispatchers.IO).launch {
                 delay(100) // 안전 대기
@@ -211,7 +247,7 @@ class HomeRepository(
             }
         } else {
             // 카메라 비활성 상태에서만 전체 재시작
-            Log.d(TAG, "🎯 카메라 비활성 - 전체 센서 재시작 가능")
+            Log.d(TAG, " 카메라 비활성 - 전체 센서 재시작 가능")
 
             CoroutineScope(Dispatchers.IO).launch {
                 delay(200)

@@ -60,6 +60,11 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.actor
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.channels.BufferOverflow
 
 class DeepLearningAdaptiveManager {
     private val TAG = "DeepLearningAdaptiveManager"
@@ -198,6 +203,16 @@ class SensorCollector(
     private val frameProcessingStats = AtomicInteger(0)
 
     private val deepLearningAdaptiveManager = DeepLearningAdaptiveManager()
+    
+    // 프레임 처리를 위한 actor 채널 (DROP_OLDEST 정책)
+    private val frameProcessingActor = sensorScope.actor<Pair<ManagedBitmap, (SensorData?) -> Unit>>(
+        context = Dispatchers.Default.limitedParallelism(4),
+        capacity = Channel.CONFLATED // 최신 프레임만 유지
+    ) {
+        for ((bitmap, callback) in channel) {
+            processFrameInBackground(bitmap, callback)
+        }
+    }
     private var currentDetectionStrategy =
         deepLearningAdaptiveManager.getCurrentDetectionStrategy(60L)
 
@@ -1192,71 +1207,86 @@ class SensorCollector(
         managedBitmap: ManagedBitmap,
         callback: (SensorData?) -> Unit
     ) {
-        // Process frame in sensor thread pool
-        sensorScope.launch(Dispatchers.IO) {
-            val frameId = System.nanoTime()
-            val systemTime = System.currentTimeMillis()
-
+        // Actor로 프레임 전송 (DROP_OLDEST 자동 처리)
+        frameProcessingActor.trySend(managedBitmap to callback)
+    }
+    
+    /**
+     * 백그라운드에서 프레임 처리 - 최적화된 버전
+     */
+    private suspend fun processFrameInBackground(
+        managedBitmap: ManagedBitmap,
+        callback: (SensorData?) -> Unit
+    ) {
+        val frameId = System.nanoTime()
+        val systemTime = System.currentTimeMillis()
+        
+        try {
             frameProcessingStats.incrementAndGet()
 
-            //  ManagedBitmap 유효성 재검증
+            // ManagedBitmap 유효성 검증
             if (!managedBitmap.isValid() || managedBitmap.bitmap.isRecycled) {
                 Log.w(TAG, "무효한 ManagedBitmap 감지 - 프레임 스킵: frameId=$frameId")
-                managedBitmap.release()
-                withContext(Dispatchers.Main) { callback(null) }
-                return@launch
+                return
             }
 
-            // LoggerManager 처리는 백그라운드에서 (이미 백그라운드 스레드)
+            // LoggerManager 처리 (비동기 방식으로 변경)
             if (::dataSynchronizer.isInitialized) {
-                try {
-                    val sensorData = SensorData(
-                        value = "TaggedFrame: $frameId",
-                        bitmap = managedBitmap.bitmap,
-                        managedBitmap = managedBitmap,
-                        timestamp = systemTime,
-                        monoTimestamp = System.nanoTime(),
-                        frameId = frameId
-                    )
-                    LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
-                } catch (e: Exception) {
-                    Log.e(TAG, "백그라운드 LoggerManager 처리 실패: ${e.message}", e)
+                sensorScope.launch(Dispatchers.IO) {
+                    try {
+                        val sensorData = SensorData(
+                            value = "TaggedFrame: $frameId",
+                            bitmap = managedBitmap.bitmap,
+                            managedBitmap = managedBitmap,
+                            timestamp = systemTime,
+                            monoTimestamp = System.nanoTime(),
+                            frameId = frameId
+                        )
+                        LoggerManager.getInstance(context, dataSynchronizer).pushCamera(sensorData)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "LoggerManager 처리 실패: ${e.message}")
+                    }
                 }
             }
 
-            // 🎯 수정: UI로 메인 스레드에서 전달 - withContext를 사용
-            withContext(Dispatchers.Main) {
-                try {
-                    if (managedBitmap.isValid() && !managedBitmap.bitmap.isRecycled) {
-                        callback(
-                            SensorData(
-                                value = "Advanced Tagged Frame: $frameId",
-                                bitmap = managedBitmap.bitmap,
-                                managedBitmap = managedBitmap,
-                                timestamp = systemTime,
-                                monoTimestamp = System.nanoTime(),
-                                frameId = frameId
-                            )
+            // UI로 메인 스레드에서 전달 (참조만 전달)
+            withContext(Dispatchers.Main.immediate) {
+                if (managedBitmap.isValid() && !managedBitmap.bitmap.isRecycled) {
+                    callback(
+                        SensorData(
+                            value = "Advanced Tagged Frame: $frameId",
+                            bitmap = managedBitmap.bitmap,
+                            managedBitmap = managedBitmap,
+                            timestamp = systemTime,
+                            monoTimestamp = System.nanoTime(),
+                            frameId = frameId
                         )
-                        Log.d(TAG, "✅ Non-blocking frame delivered: frameId=$frameId")
-                    } else {
-                        Log.w(TAG, "⚠️ UI 전달 시 비트맵 무효: frameId=$frameId")
-                        managedBitmap.release()
-                        callback(null)
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Frame delivery error: ${e.message}", e)
-                    managedBitmap.release()
+                    )
+                    Log.d(TAG, "✅ Frame delivered: frameId=$frameId")
+                } else {
                     callback(null)
                 }
             }
 
+            // Detection은 별도 스레드에서 처리
             handleSelectiveDetection(managedBitmap, frameId)
 
             if (frameCount % 90 == 0) {
-                Log.i(TAG, "📊 Non-blocking: ${taggedBitmapPool.getStatus()}")
+                Log.i(TAG, "📊 Pool: ${taggedBitmapPool.getStatus()}")
                 Log.i(TAG, "📊 Processor: ${highSpeedProcessor.getStatus()}")
-                Log.i(TAG, "📊 Thread: ${Thread.currentThread().name}")
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Frame processing error: ${e.message}", e)
+            callback(null)
+        } finally {
+            // 리소스 해제는 finally에서 보장
+            if (!managedBitmap.isValid() || managedBitmap.bitmap.isRecycled) {
+                try {
+                    managedBitmap.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "ManagedBitmap release failed: ${e.message}")
+                }
             }
         }
     }
@@ -1367,6 +1397,9 @@ class SensorCollector(
         try {
             isSessionActive.set(false)
             cameraOpenCloseLock.acquire()
+            
+            // Actor 채널 종료
+            frameProcessingActor.close()
 
             cleanupCameraResources()
             isStreaming.set(false)
