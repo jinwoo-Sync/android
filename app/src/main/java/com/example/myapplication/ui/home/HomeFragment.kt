@@ -418,7 +418,7 @@ class HomeFragment : Fragment() {
                 renderSafeFrame(uiFrame)
             } catch (e: Exception) {
                 Log.e("HomeFragment", "Frame observer 오류: ${e.message}", e)
-                uiFrame?.release()
+                uiFrame?.release?.let { it() }
             }
         }
     }
@@ -660,7 +660,7 @@ class HomeFragment : Fragment() {
         clearCurrentDisplay()
         
         // 마지막 UiFrame 정리
-        lastGoodUiFrame?.release()
+        lastGoodUiFrame?.release?.let { it() }
         lastGoodUiFrame = null
 
         // 성능 통계
