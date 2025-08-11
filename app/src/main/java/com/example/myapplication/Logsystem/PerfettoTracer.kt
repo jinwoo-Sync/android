@@ -40,7 +40,11 @@ class PerfettoTracer private constructor(
     private var perfettoTraceFile: File? = null
     private var methodTraceFile: File? = null
     private var startTime: Long = 0
+    
+    // 순환 버퍼로 메모리 사용량 최적화 (50,000개 제한)
     private val performanceEvents = mutableListOf<PerformanceEvent>()
+    private val maxEventsInMemory = 50_000
+    private var eventsWrittenToDisk = 0
 
     data class PerformanceEvent(
         val timestamp: Long,
@@ -72,9 +76,9 @@ class PerfettoTracer private constructor(
             // Documents/save/ 폴더에 모든 파일 저장
             val saveDir = getSaveDirectory()
 
-            // Perfetto UI에서 읽을 수 있는 파일 생성
-            perfettoTraceFile = File(saveDir, "perfetto_trace_${timestamp}.perfetto-trace")
-            methodTraceFile = File(saveDir, "method_trace_${timestamp}.trace")
+            // Perfetto UI에서 읽을 수 있는 파일 생성 (전체 앱 실행 기간)
+            perfettoTraceFile = File(saveDir, "full_app_perfetto_trace_${timestamp}.perfetto-trace")
+            methodTraceFile = File(saveDir, "full_app_method_trace_${timestamp}.trace")
 
             fileLogger.i(TAG, "✅ Perfetto 추적 시작")
             fileLogger.i(TAG, "📁 Perfetto 파일: ${perfettoTraceFile!!.absolutePath}")
@@ -106,8 +110,8 @@ class PerfettoTracer private constructor(
         try {
             if (methodTraceFile == null) return
 
-            // 더 큰 버퍼 (32MB)
-            Debug.startMethodTracing(methodTraceFile!!.absolutePath, 32 * 1024 * 1024)
+            // 대용량 버퍼 (128MB) - 전체 앱 실행 기간용
+            Debug.startMethodTracing(methodTraceFile!!.absolutePath, 128 * 1024 * 1024)
             fileLogger.i(TAG, "📊 메서드 추적 시작: ${methodTraceFile!!.absolutePath}")
 
             addPerformanceEvent("Method Tracing Start", "method", "B")
@@ -126,7 +130,7 @@ class PerfettoTracer private constructor(
             while (isTracing) {
                 try {
                     collectPerformanceSnapshot()
-                    delay(1000) // 1초마다 수집
+                    delay(2000) // 2초마다 수집 (전체 실행 기간용 최적화)
                 } catch (e: Exception) {
                     fileLogger.e(TAG, "성능 데이터 수집 오류: ${e.message}", e)
                     delay(2000)
@@ -223,7 +227,7 @@ class PerfettoTracer private constructor(
     }
 
     /**
-     * 성능 이벤트 추가
+     * 성능 이벤트 추가 (순환 버퍼 사용)
      */
     private fun addPerformanceEvent(
         name: String,
@@ -243,6 +247,19 @@ class PerfettoTracer private constructor(
 
         synchronized(performanceEvents) {
             performanceEvents.add(event)
+            
+            // 순환 버퍼: 최대 크기 초과 시 오래된 이벤트 제거
+            if (performanceEvents.size > maxEventsInMemory) {
+                // 가장 오래된 이벤트 25% 제거
+                val removeCount = maxEventsInMemory / 4
+                repeat(removeCount) {
+                    if (performanceEvents.isNotEmpty()) {
+                        performanceEvents.removeAt(0)
+                        eventsWrittenToDisk++
+                    }
+                }
+                fileLogger.i(TAG, "🔄 순환 버퍼: ${removeCount}개 이벤트 제거, 총 ${eventsWrittenToDisk}개 처리됨")
+            }
         }
     }
 
@@ -280,7 +297,7 @@ class PerfettoTracer private constructor(
             fileLogger.i(TAG, "✅ Perfetto 추적 완료")
             fileLogger.i(TAG, "📁 최종 Perfetto 파일: $traceFilePath")
             fileLogger.i(TAG, "📁 최종 메서드 파일: ${methodTraceFile?.absolutePath}")
-            fileLogger.i(TAG, "📊 수집된 성능 이벤트: ${performanceEvents.size}개")
+            fileLogger.i(TAG, "📊 수집된 성능 이벤트: ${performanceEvents.size}개 (총 처리: ${performanceEvents.size + eventsWrittenToDisk}개)")
 
             return traceFilePath
 
@@ -360,7 +377,9 @@ class PerfettoTracer private constructor(
             appendLine("    \"trace_type\": \"android_app_trace\",")
             appendLine("    \"app_package\": \"${context.packageName}\",")
             appendLine("    \"trace_duration_ms\": ${System.currentTimeMillis() - startTime},")
-            appendLine("    \"events_count\": ${performanceEvents.size}")
+            appendLine("    \"events_count\": ${performanceEvents.size},")
+            appendLine("    \"total_events_processed\": ${performanceEvents.size + eventsWrittenToDisk},")
+            appendLine("    \"events_in_circular_buffer\": ${performanceEvents.size}")
             appendLine("  }")
             appendLine("}")
         }
@@ -371,7 +390,7 @@ class PerfettoTracer private constructor(
      */
     private fun getSaveDirectory(): File {
         return try {
-            // Documents/save 폴더 사용
+            // Documents/save 폴더 사용 - 디버깅용 전체 기간 트레이스
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val documentsDir = File(
                     Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
@@ -494,9 +513,9 @@ class PerfettoTracer private constructor(
     fun isTracing(): Boolean = isTracing
 
     /**
-     * 수집된 이벤트 수 반환
+     * 수집된 이벤트 수 반환 (순환 버퍼 + 처리된 총량)
      */
-    fun getEventCount(): Int = performanceEvents.size
+    fun getEventCount(): Int = performanceEvents.size + eventsWrittenToDisk
 
     /**
      * 추적 정리

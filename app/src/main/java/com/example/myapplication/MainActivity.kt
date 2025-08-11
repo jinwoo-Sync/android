@@ -101,7 +101,8 @@ class MainActivity : AppCompatActivity() {
 
     // Perfetto 자동 추적 관련
     private var perfettoAutoTraceJob: Job? = null
-    private val PERFETTO_TRACE_DURATION = 60_000L // 60초
+    // Perfetto 트레이싱은 앱 실행 전체 기간 동안 연속 동작 (제한 없음)
+    // private val PERFETTO_TRACE_DURATION = 60_000L // 제거됨
 
     // 응급 복구 변수
     private var emergencyRecoveryCount = 0
@@ -189,68 +190,39 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     }
 
     /**
-     * Perfetto 자동 추적 시작
+     * Perfetto 전체 앱 실행 기간 추적 시작
      */
     private fun startPerfettoAutoTracing() {
         perfettoAutoTraceJob = lifecycleScope.launch {
             try {
-                // 앱 시작 5초 후 Perfetto 추적 시작
-                delay(5_000)
+                // 앱 시작 3초 후 Perfetto 추적 시작 (디버깅용 전체 기간 연속 동작)
+                delay(3_000)
 
-                val traceFilePath = perfettoTracer.startPerfettoTrace("AutoTrace_$sessionId")
-                fileLogger.i("MainActivity", "🎯 자동 Perfetto 추적 시작: $traceFilePath")
+                val traceFilePath = perfettoTracer.startPerfettoTrace("FullAppTrace_$sessionId")
+                fileLogger.i("MainActivity", "🎯 전체 앱 실행 Perfetto 추적 시작: $traceFilePath")
+                fileLogger.i("MainActivity", "🔄 연속 디버깅 모드: 앱 종료까지 모든 성능 데이터 기록")
 
-                // 지정된 시간 후 자동 중지
-                delay(PERFETTO_TRACE_DURATION)
-                stopPerfettoTracing()
-
-                // 30초 간격으로 새로운 추적 시작 (지속적 모니터링)
-                startContinuousPerfettoTracing()
+                // 앱 실행 전체 기간 동안 지속 (제한 없이 연속 동작)
+                // 자동 중지 제거 - onDestroy에서만 중지
 
             } catch (e: Exception) {
-                fileLogger.e("MainActivity", "자동 Perfetto 추적 실패: ${e.message}", e)
+                fileLogger.e("MainActivity", "전체 앱 Perfetto 추적 실패: ${e.message}", e)
             }
         }
     }
 
-    /**
-     * 지속적 Perfetto 추적 (30초 간격)
-     */
-    private fun startContinuousPerfettoTracing() {
-        lifecycleScope.launch {
-            var traceCount = 1
-
-            while (isActive) {
-                try {
-                    delay(120_000) // 30초 → 2분으로 변경
-
-                    if (!perfettoTracer.isTracing()) {
-                        val traceFilePath = perfettoTracer.startPerfettoTrace("ContinuousTrace_${sessionId}_${traceCount}")
-                        fileLogger.i("MainActivity", "🔄 지속적 Perfetto 추적 시작 #${traceCount}: $traceFilePath")
-
-                        delay(30_000) // 60초 → 30초로 단축
-                        stopPerfettoTracing()
-
-                        traceCount++
-                    }
-
-                } catch (e: Exception) {
-                    fileLogger.e("MainActivity", "지속적 Perfetto 추적 오류: ${e.message}", e)
-                    delay(300_000) // 에러 시 5분 대기
-                }
-            }
-        }
-    }
+    // 지속적 추적 제거 - 이제 전체 앱 실행 기간 동안 단일 트레이스로 연속 동작
+    // private fun startContinuousPerfettoTracing() - 삭제됨
 
     /**
-     * Perfetto 추적 중지
+     * Perfetto 추적 중지 (앱 종료 시에만 호출)
      */
     private fun stopPerfettoTracing() {
         lifecycleScope.launch {
             try {
                 val finalTracePath = perfettoTracer.stopPerfettoTrace()
-                fileLogger.i("MainActivity", "🎯 Perfetto 추적 완료: $finalTracePath")
-                fileLogger.i("MainActivity", "📊 수집된 이벤트: ${perfettoTracer.getEventCount()}개")
+                fileLogger.i("MainActivity", "🎯 전체 앱 Perfetto 추적 완료: $finalTracePath")
+                fileLogger.i("MainActivity", "📊 수집된 전체 이벤트: ${perfettoTracer.getEventCount()}개")
 
                 // 모든 추적 파일 경로 출력
                 val allTraceFiles = perfettoTracer.getAllTraceFiles()

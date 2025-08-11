@@ -86,15 +86,12 @@ class HomeFragment : Fragment() {
     // 복구 관련 변수
     private var lastRecoveryTime = 0L
     
-    // 통합 TextView 업데이트 변수 (1초 단위 배칭)
-    private val uiHandler = Handler(Looper.getMainLooper())
-    private var pendingGpsText: String? = null
-    private var pendingGnssText: String? = null  
-    private var pendingImuText: String? = null
-    private var lastBatchUpdateTime = 0L
-    private val BATCH_UPDATE_INTERVAL_MS = 1000L // 1초마다 모든 TextView 동시 업데이트
+    // 1fps 배치 UI 업데이터 (단일 Job으로 3개 TextView 동시 갱신)
+    @Volatile private var latestGpsText: String? = null
+    @Volatile private var latestGnssText: String? = null
+    @Volatile private var latestImuText: String? = null
+    private var uiBatchJob: Job? = null
     private var textUpdatesEnabled = true
-    private var batchUpdateRunnable: Runnable? = null
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -350,11 +347,10 @@ class HomeFragment : Fragment() {
     }
 
     private fun resetSensorDisplays() {
-        // 펜딩 데이터 초기화
-        pendingGpsText = null
-        pendingGnssText = null
-        pendingImuText = null
-        cancelBatchUpdate()
+        // 최신 데이터 초기화
+        latestGpsText = null
+        latestGnssText = null
+        latestImuText = null
         
         binding.gpsLogText.text = "GPS: 대기 중"
         binding.gnssLogText.text = "GNSS: 대기 중"
@@ -362,53 +358,35 @@ class HomeFragment : Fragment() {
     }
     
     /**
-     * 1초 단위 배치 업데이트 스케줄링
+     * 1fps 배치 UI 업데이터 시작 (onStart에서 호출)
      */
-    private fun scheduleBatchUpdate() {
-        if (!textUpdatesEnabled) return
-        
-        val currentTime = System.currentTimeMillis()
-        
-        // 이미 스케줄된 업데이트가 없고, 마지막 업데이트로부터 1초가 지났으면
-        if (batchUpdateRunnable == null && currentTime - lastBatchUpdateTime >= BATCH_UPDATE_INTERVAL_MS) {
-            performBatchUpdate()
-        } else if (batchUpdateRunnable == null) {
-            // 다음 1초 시점에 업데이트 스케줄
-            val delay = BATCH_UPDATE_INTERVAL_MS - (currentTime - lastBatchUpdateTime)
-            batchUpdateRunnable = Runnable {
-                performBatchUpdate()
-                batchUpdateRunnable = null
+    private fun startUiBatchUpdater() {
+        stopUiBatchUpdater()
+        uiBatchJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
+            while (isActive && textUpdatesEnabled) {
+                // 백그라운드에서 스냅샷 (최신값 캡처)
+                val gps = latestGpsText
+                val gnss = latestGnssText
+                val imu = latestImuText
+
+                // 단일 UI 커밋으로 3개 TextView 동시 갱신
+                withContext(Dispatchers.Main.immediate) {
+                    gps?.let { binding.gpsLogText.text = it }
+                    gnss?.let { binding.gnssLogText.text = it }
+                    imu?.let { binding.imuLogText.text = it }
+                }
+
+                delay(1000L) // 1fps 고정
             }
-            uiHandler.postDelayed(batchUpdateRunnable!!, delay)
         }
     }
-    
+
     /**
-     * 실제 배치 업데이트 수행 (모든 TextView 동시 업데이트)
+     * 1fps 배치 UI 업데이터 중지 (onStop에서 호출)
      */
-    private fun performBatchUpdate() {
-        if (!textUpdatesEnabled) return
-        
-        lastBatchUpdateTime = System.currentTimeMillis()
-        
-        // 메인 스레드에서 모든 TextView를 한 번에 업데이트
-        uiHandler.post {
-            pendingGpsText?.let { binding.gpsLogText.text = it }
-            pendingGnssText?.let { binding.gnssLogText.text = it }
-            pendingImuText?.let { binding.imuLogText.text = it }
-            
-            Log.d("HomeFragment", "배치 업데이트 완료 - GPS/GNSS/IMU 동시 갱신")
-        }
-    }
-    
-    /**
-     * 배치 업데이트 취소
-     */
-    private fun cancelBatchUpdate() {
-        batchUpdateRunnable?.let {
-            uiHandler.removeCallbacks(it)
-            batchUpdateRunnable = null
-        }
+    private fun stopUiBatchUpdater() {
+        uiBatchJob?.cancel()
+        uiBatchJob = null
     }
 
     private fun updateFrameSkipIfNeeded(interval: Int) {
@@ -488,31 +466,30 @@ class HomeFragment : Fragment() {
     }
 
     private fun setupSensorObservers() {
-        // GPS 데이터 수신 - 펜딩만 하고 즉시 업데이트하지 않음
+        // GPS 데이터 수신 - 최신값만 보존 (1fps 배처가 주기적으로 처리)
         viewModel.gpsData.observe(viewLifecycleOwner) { data ->
-            if (!textUpdatesEnabled) return@observe
-            pendingGpsText = data
-            scheduleBatchUpdate()
-        }
-
-        // GNSS 데이터 수신 - 펜딩만 하고 즉시 업데이트하지 않음
-        viewModel.gnssData.observe(viewLifecycleOwner) { data ->
-            if (!textUpdatesEnabled) return@observe
-            
-            val displayText = if (data == "GNSS: 대기 중") {
-                "GNSS 데이터가 수신되지 않습니다."
-            } else {
-                data
+            if (textUpdatesEnabled) {
+                latestGpsText = data
             }
-            pendingGnssText = displayText
-            scheduleBatchUpdate()
         }
 
-        // IMU 데이터 수신 - 펜딩만 하고 즉시 업데이트하지 않음
+        // GNSS 데이터 수신 - 최신값만 보존 (1fps 배처가 주기적으로 처리)
+        viewModel.gnssData.observe(viewLifecycleOwner) { data ->
+            if (textUpdatesEnabled) {
+                val displayText = if (data == "GNSS: 대기 중") {
+                    "GNSS 데이터가 수신되지 않습니다."
+                } else {
+                    data
+                }
+                latestGnssText = displayText
+            }
+        }
+
+        // IMU 데이터 수신 - 최신값만 보존 (1fps 배처가 주기적으로 처리)
         viewModel.imuData.observe(viewLifecycleOwner) { data ->
-            if (!textUpdatesEnabled) return@observe
-            pendingImuText = data
-            scheduleBatchUpdate()
+            if (textUpdatesEnabled) {
+                latestImuText = data
+            }
         }
     }
 
@@ -647,6 +624,18 @@ class HomeFragment : Fragment() {
                 mainActivity.isBackgroundLocationPermissionGranted()
     }
 
+    override fun onStart() {
+        super.onStart()
+        startUiBatchUpdater()
+        Log.d("HomeFragment", "onStart - 1fps 배치 UI 업데이터 시작")
+    }
+
+    override fun onStop() {
+        super.onStop()
+        stopUiBatchUpdater()
+        Log.d("HomeFragment", "onStop - 1fps 배치 UI 업데이터 중지")
+    }
+
     override fun onResume() {
         super.onResume()
         binding.glSurfaceView.onResume()  //  GLSurfaceView Resume
@@ -664,8 +653,8 @@ class HomeFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
 
-        // 배치 업데이트 정리
-        cancelBatchUpdate()
+        // 1fps 배치 UI 업데이터 정리
+        stopUiBatchUpdater()
         
         // GLSurfaceView 정리
         clearCurrentDisplay()
@@ -695,7 +684,6 @@ class HomeFragment : Fragment() {
      */
     fun pauseTextUpdates() {
         textUpdatesEnabled = false
-        cancelBatchUpdate()
         Log.d("HomeFragment", "TextView 업데이트 일시정지")
     }
     
@@ -704,7 +692,6 @@ class HomeFragment : Fragment() {
      */
     fun resumeTextUpdates() {
         textUpdatesEnabled = true
-        scheduleBatchUpdate()
         Log.d("HomeFragment", "TextView 업데이트 재개")
     }
     
@@ -725,7 +712,7 @@ class HomeFragment : Fragment() {
                 
                 // 복구 후 재개
                 resumeTextUpdates()
-                Log.d("HomeFragment", "FPS 복구 루틴 완료 - 배치 TextView 업데이트 재개")
+                Log.d("HomeFragment", "FPS 복구 루틴 완료 - 1fps 배치 TextView 업데이트 재개")
             }
         }
     }
