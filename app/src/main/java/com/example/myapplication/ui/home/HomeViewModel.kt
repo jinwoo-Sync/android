@@ -15,6 +15,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.actor
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.sample
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 
@@ -27,6 +31,16 @@ class HomeViewModel(
     //  SensorData 전체를 전달하도록 수정 (frameId 포함)
     private val _cameraFrame = MutableLiveData<SensorData?>()
     val cameraFrame: LiveData<SensorData?> = _cameraFrame
+    
+    // 프레임 처리를 위한 actor 채널 (DROP_OLDEST 정책)
+    private val frameProcessingActor = viewModelScope.actor<SensorData?>(
+        context = Dispatchers.Default.limitedParallelism(4),
+        capacity = Channel.CONFLATED // 최신 프레임만 유지
+    ) {
+        for (frame in channel) {
+            processFrameInBackground(frame)
+        }
+    }
 
     private val _boundingBoxes = MutableLiveData<List<BoundingBox>>()
     val boundingBoxes: LiveData<List<BoundingBox>> = _boundingBoxes
@@ -102,51 +116,62 @@ class HomeViewModel(
     }
 
     /**
-     *  Advanced Tagged Pool에서 온 프레임을 UI로 전달
+     *  Advanced Tagged Pool에서 온 프레임을 UI로 전달 - 최적화된 버전
      */
     private fun updateCameraFrame(sensorData: SensorData?) {
+        // actor에 프레임 전송 (DROP_OLDEST로 자동 처리)
+        frameProcessingActor.trySend(sensorData)
+    }
+    
+    /**
+     * 백그라운드에서 프레임 처리 후 UI 업데이트
+     */
+    private suspend fun processFrameInBackground(sensorData: SensorData?) {
         try {
             if (sensorData?.bitmap != null &&
                 !sensorData.bitmap.isRecycled &&
                 sensorData.bitmap.width > 0 &&
                 sensorData.bitmap.height > 0) {
 
+                // ManagedBitmap 유효성 검증 (백그라운드에서 수행)
                 if (sensorData.managedBitmap != null) {
                     if (!sensorData.managedBitmap!!.isValid()) {
-                        Log.w(TAG, " 무효한 ManagedBitmap 스킵: frameId=${sensorData.frameId}")
+                        Log.w(TAG, "무효한 ManagedBitmap 스킵: frameId=${sensorData.frameId}")
                         sensorData.managedBitmap!!.release()
                         return
                     }
                 }
 
-                //  이전 프레임 무시하고 최신것만 즉시 UI에 전달
-                viewModelScope.launch(Dispatchers.Main.immediate) {
-                    try {
-                        if (!sensorData.bitmap.isRecycled && sensorData.bitmap.width > 0) {
-                            //  항상 최신 데이터로 덮어쓰기 (큐잉 없음)
-                            _cameraFrame.value = sensorData
-                            Log.d(TAG, " 최신 프레임 즉시 UI 전달: frameId=${sensorData.frameId}")
-                        } else {
-                            sensorData.managedBitmap?.release()
-                            _cameraFrame.value = null
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, " 최신 프레임 UI 업데이트 실패: ${e.message}", e)
+                // UI 업데이트는 메인 스레드에서만 (참조만 전달)
+                withContext(Dispatchers.Main.immediate) {
+                    if (!sensorData.bitmap.isRecycled && sensorData.bitmap.width > 0) {
+                        _cameraFrame.value = sensorData
+                        Log.d(TAG, "프레임 UI 전달: frameId=${sensorData.frameId}")
+                    } else {
                         sensorData.managedBitmap?.release()
                         _cameraFrame.value = null
                     }
                 }
             } else {
-                // null 데이터도 즉시 전달
-                viewModelScope.launch(Dispatchers.Main.immediate) {
+                // null 데이터 처리
+                withContext(Dispatchers.Main.immediate) {
                     _cameraFrame.value = null
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, " 최신 프레임 처리 실패: ${e.message}", e)
+            Log.e(TAG, "프레임 처리 실패: ${e.message}", e)
             sensorData?.managedBitmap?.release()
-            viewModelScope.launch(Dispatchers.Main.immediate) {
+            withContext(Dispatchers.Main.immediate) {
                 _cameraFrame.value = null
+            }
+        } finally {
+            // 리소스 정리는 항상 수행
+            if (sensorData?.managedBitmap != null && !sensorData.managedBitmap!!.isValid()) {
+                try {
+                    sensorData.managedBitmap!!.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "ManagedBitmap 해제 실패: ${e.message}")
+                }
             }
         }
     }
@@ -354,15 +379,18 @@ class HomeViewModel(
         isCameraStreamingJob = viewModelScope.launch {
             Log.d(TAG, " Advanced Tagged Camera Flow 구독 시작...")
             try {
-                homeRepository.cameraStreamFlow.collect { sensorData ->
-                    if (sensorData != null) {
-                        updateCameraFrame(sensorData)
-                        Log.d(TAG, " Advanced Tagged frame pushed: frameId=${sensorData.frameId}, size=${sensorData.bitmap?.width}x${sensorData.bitmap?.height}")
-                    } else {
-                        Log.w(TAG, " Received null sensor data from Advanced Tagged camera flow")
-                        updateCameraFrame(null)
+                // 33ms 샘플링 (약 30fps) 적용
+                homeRepository.cameraStreamFlow
+                    .sample(33) // 프레임 레이트 제한
+                    .collect { sensorData ->
+                        if (sensorData != null) {
+                            updateCameraFrame(sensorData)
+                            Log.d(TAG, " Advanced Tagged frame pushed: frameId=${sensorData.frameId}, size=${sensorData.bitmap?.width}x${sensorData.bitmap?.height}")
+                        } else {
+                            Log.w(TAG, " Received null sensor data from Advanced Tagged camera flow")
+                            updateCameraFrame(null)
+                        }
                     }
-                }
             } catch (e: Exception) {
                 Log.e(TAG, " Advanced Tagged Camera Flow 구독 오류: ${e.message}", e)
                 _text.postValue("Advanced Tagged 카메라 스트리밍 오류: ${e.message}")
@@ -479,6 +507,9 @@ class HomeViewModel(
 
         //  안전한 정리 순서
         stopSurfaceFpsMonitoring()  // 1. FPS 모니터링 먼저 중지
+        
+        // Actor 채널 종료
+        frameProcessingActor.close()
 
         isCameraStreamingJob?.cancel()
         homeRepository.stopCameraStreaming()
