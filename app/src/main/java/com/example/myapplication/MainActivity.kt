@@ -39,6 +39,8 @@ import com.example.myapplication.Logsystem.GpuMemoryMonitor
 import com.example.myapplication.Logsystem.LeakCanaryIntegration
 import com.example.myapplication.Logsystem.PerfettoTracer
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -65,6 +67,11 @@ class MainActivity : AppCompatActivity() {
     private val FPS_CRITICAL_THRESHOLD = 5 // FPS 5 이하 긴급 처리
     private val FPS_WARNING_THRESHOLD = 10 // FPS 10 이하 경고
     private var isEmergencyRecoveryActive = false
+    
+    // FPS 모니터링을 위한 캐싱 변수
+    private val _cachedFps = MutableStateFlow(60.0)
+    private val cachedFps: StateFlow<Double> = _cachedFps
+    private var lastFpsUpdateTime = 0L
 
     //  BitmapPool 모니터링 추가
     private var lastPoolHealthCheck = 0L
@@ -479,86 +486,39 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
     }
 
     /**
-     *  실시간 FPS 모니터링 (.mp4 녹화 특별 추적 포함)
+     *  실시간 FPS 모니터링 - 최적화된 버전
      */
     private fun startRealTimeFpsMonitoring() {
         lastFpsTime = System.currentTimeMillis()
         frameCount = 0
         consecutiveLowFpsCount = 0
+        
+        // 백그라운드에서 FPS 계산 및 캐싱
+        monitoringScope.launch {
+            while (true) {
+                delay(1000) // 1초마다 업데이트
+                val currentTime = System.currentTimeMillis()
+                val currentFrameCount = frameCount
+                if (currentFrameCount > 0) {
+                    val fps = currentFrameCount * 1000.0 / (currentTime - lastFpsTime)
+                    _cachedFps.value = fps
+                    currentFps.set(fps.toLong())
+                    lastFpsUpdateTime = currentTime
+                    
+                    // FPS 기반 제어는 백그라운드에서 처리
+                    handleCachedFpsBasedControl(fps)
+                    
+                    lastFpsTime = currentTime
+                    frameCount = 0
+                }
+            }
+        }
 
         fpsMonitor = object : Choreographer.FrameCallback {
             override fun doFrame(frameTimeNanos: Long) {
                 try {
                     frameCount++
-                    val currentTime = System.currentTimeMillis()
-
-                    // 1초마다 FPS 계산
-                    if (currentTime - lastFpsTime >= 1000) {
-                        val fps = frameCount * 1000.0 / (currentTime - lastFpsTime)
-                        currentFps.set(fps.toLong())
-                        
-                        // FPS에 따른 TextView 업데이트 제어
-                        handleFpsBasedTextViewControl(fps)
-
-                        // .mp4 녹화 중 FPS 드롭 특별 추적
-                        if (isMp4Recording && fps <= 10.0) {
-                            mp4RecordingFpsDrops++
-                            fileLogger.w("MainActivity", " .mp4 녹화 중 FPS 드롭: ${String.format("%.1f", fps)}fps (총 ${mp4RecordingFpsDrops}회)")
-
-                            // 녹화 중 FPS 드롭 시 BitmapPool 상태 즉시 체크
-                            monitoringScope.launch {
-                                logMp4FpsDropState(fps)
-                            }
-                        }
-
-                        //  강화된 FPS 기반 복구 로직
-                        when {
-                            fps < FPS_CRITICAL_THRESHOLD -> {
-                                consecutiveLowFpsCount++
-                                
-                                // FPS 5 이하일 때 즉시 TextView 업데이트 중지 및 복구
-                                if (!isEmergencyRecoveryActive) {
-                                    isEmergencyRecoveryActive = true
-                                    val context = if (isMp4Recording) "치명적_FPS_드롭_MP4녹화중" else "치명적_FPS_드롭"
-                                    fileLogger.e("MainActivity", " FPS ${FPS_CRITICAL_THRESHOLD} 이하 감지: ${String.format("%.1f", fps)}fps ")
-                                    
-                                    // TextView 업데이트 즉시 중지
-                                    pauseTextViewUpdates()
-                                    
-                                    // 긴급 복구 시작
-                                    monitoringScope.launch {
-                                        performTextViewEmergencyRecovery(fps)
-                                    }
-                                }
-                            }
-                            fps < FPS_WARNING_THRESHOLD -> {
-                                if (!isLowFpsDetected.getAndSet(true)) {
-                                    val context = if (isMp4Recording) "경고_FPS_드롭_MP4녹화중" else "경고_FPS_드롭"
-                                    fileLogger.w("MainActivity", " FPS ${FPS_WARNING_THRESHOLD} 이하 감지: ${String.format("%.1f", fps)}fps ")
-                                    logDetailedSystemState(context + "_${String.format("%.1f", fps)}")
-
-                                    // 5초 후 플래그 리셋
-                                    monitoringScope.launch {
-                                        delay(5000)
-                                        isLowFpsDetected.set(false)
-                                    }
-                                }
-                            }
-                            fps >= 15.0 -> {
-                                consecutiveLowFpsCount = 0
-                                isEmergencyRecoveryActive = false
-                                
-                                if (isLowFpsDetected.getAndSet(false)) {
-                                    val context = if (isMp4Recording) "FPS회복_MP4녹화중" else "FPS회복"
-                                    fileLogger.i("MainActivity", " FPS 회복: ${String.format("%.1f", fps)}fps ($context)")
-                                }
-                            }
-                        }
-
-                        lastFpsTime = currentTime
-                        frameCount = 0
-                    }
-
+                    // 무거운 작업 없이 프레임만 카운트
                     Choreographer.getInstance().postFrameCallback(this)
                 } catch (e: Exception) {
                     fileLogger.e("MainActivity", "FPS 모니터링 오류: ${e.message}", e)
@@ -567,7 +527,62 @@ private suspend fun initializeHeavySystemsInBackground() = withContext(Dispatche
         }
 
         Choreographer.getInstance().postFrameCallback(fpsMonitor!!)
-        fileLogger.i("MainActivity", " 실시간 FPS 모니터링 시작 (.mp4 녹화 추적 포함)")
+        fileLogger.i("MainActivity", "실시간 FPS 모니터링 시작 (최적화됨)")
+    }
+    
+    /**
+     * 캐싱된 FPS 기반 제어 (백그라운드에서 처리)
+     */
+    private suspend fun handleCachedFpsBasedControl(fps: Double) {
+        // FPS에 따른 TextView 업데이트 제어
+        withContext(Dispatchers.Main) {
+            handleFpsBasedTextViewControl(fps)
+        }
+        
+        // .mp4 녹화 중 FPS 드롭 특별 추적
+        if (isMp4Recording && fps <= 10.0) {
+            mp4RecordingFpsDrops++
+            fileLogger.w("MainActivity", ".mp4 녹화 중 FPS 드롭: ${String.format("%.1f", fps)}fps (총 ${mp4RecordingFpsDrops}회)")
+            logMp4FpsDropState(fps)
+        }
+        
+        // FPS 기반 복구 로직
+        when {
+            fps < FPS_CRITICAL_THRESHOLD -> {
+                consecutiveLowFpsCount++
+                if (!isEmergencyRecoveryActive) {
+                    isEmergencyRecoveryActive = true
+                    fileLogger.e("MainActivity", "FPS ${FPS_CRITICAL_THRESHOLD} 이하 감지: ${String.format("%.1f", fps)}fps")
+                    
+                    withContext(Dispatchers.Main) {
+                        pauseTextViewUpdates()
+                    }
+                    performTextViewEmergencyRecovery(fps)
+                }
+            }
+            fps < FPS_WARNING_THRESHOLD -> {
+                if (!isLowFpsDetected.getAndSet(true)) {
+                    val context = if (isMp4Recording) "경고_FPS_드롭_MP4녹화중" else "경고_FPS_드롭"
+                    fileLogger.w("MainActivity", "FPS ${FPS_WARNING_THRESHOLD} 이하 감지: ${String.format("%.1f", fps)}fps")
+                    logDetailedSystemState(context + "_${String.format("%.1f", fps)}")
+                    
+                    launch {
+                        delay(5000)
+                        isLowFpsDetected.set(false)
+                    }
+                }
+            }
+            fps >= 15.0 -> {
+                consecutiveLowFpsCount = 0
+                if (isEmergencyRecoveryActive) {
+                    isEmergencyRecoveryActive = false
+                    fileLogger.i("MainActivity", "FPS 회복: ${String.format("%.1f", fps)}fps")
+                    withContext(Dispatchers.Main) {
+                        resumeTextViewUpdates()
+                    }
+                }
+            }
+        }
     }
 
     /**
