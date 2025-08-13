@@ -594,18 +594,34 @@ class LoggerManager private constructor(
         }
     }
 
-    //  비디오 프레임 메타데이터 저장
+    //  비디오 프레임 메타데이터 저장 - 성공/실패 파일 분리
     private suspend fun saveVideoMetadata() = withContext(Dispatchers.IO) {
         try {
             val commonDir = getCurrentDataDirectory()
-            val metadataFile = File(commonDir, "video_frame_metadata.txt")
+            val successMetadataFile = File(commonDir, "video_frame_metadata.txt")
+            val failedMetadataFile = File(commonDir, "video_frame_metadata2.txt")
 
             videoMetadataMutex.withLock {
                 if (videoMetadataList.isNotEmpty()) {
-                    saveToFile(metadataFile, VIDEO_METADATA_HEADER, videoMetadataList.toList(), ::buildVideoMetadataContent)
-                    val savedCount = videoMetadataList.size
+                    // 성공한 프레임과 실패한 프레임 분리
+                    val successfulFrames = videoMetadataList.filter { it.encodingSuccess }
+                    val failedFrames = videoMetadataList.filter { !it.encodingSuccess }
+                    
+                    // 성공한 프레임은 video_frame_metadata.txt에 저장
+                    if (successfulFrames.isNotEmpty()) {
+                        saveToFile(successMetadataFile, VIDEO_METADATA_HEADER, successfulFrames, ::buildVideoMetadataContent)
+                        Log.d(TAG, " 성공 프레임 메타데이터 저장: ${successfulFrames.size}개")
+                    }
+                    
+                    // 실패한 프레임은 video_frame_metadata2.txt에 fail 상태로 저장
+                    if (failedFrames.isNotEmpty()) {
+                        saveToFile(failedMetadataFile, VIDEO_METADATA2_HEADER, failedFrames, ::buildVideoMetadata2Content)
+                        Log.d(TAG, " 실패 프레임 메타데이터 저장: ${failedFrames.size}개 (ENCODING_STATUS=fail)")
+                    }
+                    
+                    val totalSaved = videoMetadataList.size
                     videoMetadataList.clear()
-                    Log.d(TAG, " 비디오 메타데이터 저장: ${savedCount}개")
+                    Log.d(TAG, " 비디오 메타데이터 저장 완료: 성공=${successfulFrames.size}개, 실패=${failedFrames.size}개, 총=${totalSaved}개")
                 }
             }
         } catch (e: Exception) {
@@ -613,7 +629,7 @@ class LoggerManager private constructor(
         }
     }
 
-    //  비디오 메타데이터 내용 생성
+    //  성공한 프레임 메타데이터 내용 생성
     private fun buildVideoMetadataContent(metadataList: List<VideoFrameMetadata>): String {
         return buildString(metadataList.size * 200) {
             for (metadata in metadataList) {
@@ -627,7 +643,27 @@ class LoggerManager private constructor(
                 append("${metadata.width}\t")
                 append("${metadata.height}\t")
                 append("${String.format("%.3f", metadata.bitmapSizeMB)}\t")
-                append("${if (metadata.encodingSuccess) "SUCCESS" else "FAILED"}")
+                append("SUCCESS")
+                append("\n")
+            }
+        }
+    }
+
+    //  실패한 프레임 메타데이터 내용 생성 (ENCODING_STATUS=fail)
+    private fun buildVideoMetadata2Content(metadataList: List<VideoFrameMetadata>): String {
+        return buildString(metadataList.size * 200) {
+            for (metadata in metadataList) {
+                append("${metadata.frameId}\t")
+                append("${metadata.sequenceNumber}\t")
+                append("${metadata.timestamp}\t")
+                append("${metadata.monoTimestamp}\t")
+                append("${metadata.captureTime}\t")
+                append("${metadata.encodingTime}\t")
+                append("${metadata.sessionId}\t")
+                append("${metadata.width}\t")
+                append("${metadata.height}\t")
+                append("${String.format("%.3f", metadata.bitmapSizeMB)}\t")
+                append("fail")
                 append("\n")
             }
         }
@@ -1463,10 +1499,18 @@ class LoggerManager private constructor(
 
         ioScope.launch {
             try {
+                // ✅ 성공한 프레임 메타데이터 헤더 파일 생성
                 val metadataFile = File(currentLogDirectory, "video_frame_metadata.txt")
                 if (!metadataFile.exists()) {
                     metadataFile.writeText(VIDEO_METADATA_HEADER + "\n")
                     Log.d(TAG, "✅ 비디오 메타데이터 헤더 파일 생성")
+                }
+                
+                // ✅ 실패한 프레임 메타데이터 헤더 파일 생성
+                val metadata2File = File(currentLogDirectory, "video_frame_metadata2.txt")
+                if (!metadata2File.exists()) {
+                    metadata2File.writeText(VIDEO_METADATA2_HEADER + "\n")
+                    Log.d(TAG, "✅ 실패 프레임 메타데이터2 헤더 파일 생성")
                 }
 
                 // ✅ 비디오 인코더 초기화 및 세션 동기화
@@ -1774,11 +1818,20 @@ class LoggerManager private constructor(
     private inline fun shouldSave() = isLogSavingEnabled
     private inline fun shouldLiveStream() = isLiveStreamingEnabled
 
-    // ✅ 비디오 프레임 메타데이터 헤더
+    // ✅ 비디오 프레임 메타데이터 헤더 (성공한 프레임)
     private val VIDEO_METADATA_HEADER = """
-# Video Frame Metadata - Complete Frame Processing Information
-# This file contains metadata for each frame saved to the .mp4 video file
+# Video Frame Metadata - Complete Frame Processing Information (SUCCESS only)
+# This file contains metadata for each frame successfully saved to the .mp4 video file
 # Use this file to synchronize video frames with other sensor data (GPS, IMU, GNSS, etc.)
+FRAME_ID	SEQUENCE_NUMBER	TIMESTAMP	MONO_TIMESTAMP	CAPTURE_TIME	ENCODING_TIME	SESSION_ID	WIDTH	HEIGHT	BITMAP_SIZE_MB	ENCODING_STATUS
+""".trimIndent()
+
+    // ✅ 실패한 프레임 메타데이터 헤더
+    private val VIDEO_METADATA2_HEADER = """
+# Video Frame Metadata2 - Failed Frame Processing Information
+# This file contains metadata for frames that FAILED to encode properly to the .mp4 video file
+# These frames were captured but not included in the final video due to encoding errors
+# ENCODING_STATUS is always 'fail' for all entries in this file
 FRAME_ID	SEQUENCE_NUMBER	TIMESTAMP	MONO_TIMESTAMP	CAPTURE_TIME	ENCODING_TIME	SESSION_ID	WIDTH	HEIGHT	BITMAP_SIZE_MB	ENCODING_STATUS
 """.trimIndent()
 
