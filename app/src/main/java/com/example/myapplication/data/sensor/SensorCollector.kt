@@ -508,7 +508,7 @@ class SensorCollector(
         }
     }
 
-    // GNSS 콜백들 (기존과 동일하므로 생략...)
+    // GNSS 콜백들
     @RequiresApi(Build.VERSION_CODES.N)
     private val gnssStatusCallback = object : GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(status: GnssStatus) {

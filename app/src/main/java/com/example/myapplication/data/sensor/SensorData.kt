@@ -23,7 +23,7 @@ data class SensorData(
 )
 
 /**
- * ✅ GPS 설정 - GPS 시간과 로컬 시간 매핑 정보 추가
+ *  GPS 설정 - GPS 시간과 로컬 시간 매핑 정보 추가
  */
 data class GpsConfig(
     val gpsTimestamp: Long,         // GPS 제공 시간
@@ -54,7 +54,7 @@ enum class TimeSyncMode {
 }
 
 /**
- * ✅ 시간 매핑 정보
+ *  시간 매핑 정보
  */
 data class TimeMapping(
     val gpsTime: Long,
