@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.view.Choreographer
+import com.example.myapplication.perfetto.PerfettoManager
 import kotlinx.coroutines.*
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -16,7 +17,7 @@ class AdvancedPerformanceMonitor private constructor(
     private val context: Context,
     private val fileLogger: FileLogger,
     private val resourceMonitor: ResourceMonitor,
-    private val perfettoTracer: PerfettoTracer
+    private val perfettoManager: PerfettoManager
 ) {
     companion object {
         private const val TAG = "AdvancedPerfMonitor"
@@ -30,7 +31,7 @@ class AdvancedPerformanceMonitor private constructor(
                     context.applicationContext,
                     FileLogger.getInstance(context),
                     ResourceMonitor.getInstance(context),
-                    PerfettoTracer.getInstance(context)
+                    PerfettoManager.getInstance(context)
                 ).also { INSTANCE = it }
             }
         }
@@ -83,7 +84,7 @@ class AdvancedPerformanceMonitor private constructor(
             startPerformanceSnapshots()
 
             // Perfetto 추적도 함께 시작
-            perfettoTracer.startPerfettoTrace("ComprehensiveMonitoring")
+            perfettoManager.startPerfettoTracing("ComprehensiveMonitoring")
         }
     }
 
@@ -478,7 +479,7 @@ class AdvancedPerformanceMonitor private constructor(
             memoryLeakDetector?.interrupt()
 
             // Perfetto 추적 중지
-            perfettoTracer.stopPerfettoTrace()
+            perfettoManager.stopPerfettoTracing()
 
             // 최종 보고서 생성
             val report = generatePerformanceReport()

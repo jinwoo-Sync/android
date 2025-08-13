@@ -37,7 +37,7 @@ import androidx.lifecycle.lifecycleScope
 import com.example.myapplication.Logsystem.AdvancedPerformanceMonitor
 import com.example.myapplication.Logsystem.GpuMemoryMonitor
 import com.example.myapplication.Logsystem.LeakCanaryIntegration
-import com.example.myapplication.Logsystem.PerfettoTracer
+import com.example.myapplication.perfetto.PerfettoManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity() {
     //  모니터링 시스템
     private lateinit var fileLogger: FileLogger
     private lateinit var resourceMonitor: ResourceMonitor
-    private var perfettoTracer: PerfettoTracer? = null  // nullable로 변경
+    private var perfettoManager: PerfettoManager? = null  // nullable로 변경
 
     // Perfetto 활성화 여부 체크
     private val isPerfettoEnabled: Boolean by lazy {
@@ -184,10 +184,10 @@ class MainActivity : AppCompatActivity() {
 
             // Perfetto 조건부 초기화
             if (isPerfettoEnabled) {
-                perfettoTracer = PerfettoTracer.getInstance(this)
+                perfettoManager = PerfettoManager.getInstance(this)
                 fileLogger.i("MainActivity", "✅ Perfetto 활성화")
             } else {
-                perfettoTracer = null
+                perfettoManager = null
                 fileLogger.i("MainActivity", "⚪ Perfetto 비활성화 (리소스 절약)")
             }
 
@@ -206,7 +206,7 @@ class MainActivity : AppCompatActivity() {
      * Perfetto 전체 앱 실행 기간 추적 시작 (조건부)
      */
     private fun startPerfettoAutoTracing() {
-        if (!isPerfettoEnabled || perfettoTracer == null) {
+        if (!isPerfettoEnabled || perfettoManager == null) {
             Log.i("MainActivity", "⚪ Perfetto 추적 스킵됨")
             return
         }
@@ -216,7 +216,7 @@ class MainActivity : AppCompatActivity() {
                 // 앱 시작 3초 후 Perfetto 추적 시작
                 delay(3_000)
 
-                val traceFilePath = perfettoTracer!!.startPerfettoTrace("FullAppTrace_$sessionId")
+                val traceFilePath = perfettoManager!!.startPerfettoTracing("FullAppTrace_$sessionId")
                 fileLogger.i("MainActivity", "🎯 전체 앱 실행 Perfetto 추적 시작: $traceFilePath")
                 fileLogger.i("MainActivity", "🔄 연속 디버깅 모드: 앱 종료까지 모든 성능 데이터 기록")
 
@@ -230,16 +230,16 @@ class MainActivity : AppCompatActivity() {
      * Perfetto 추적 중지 (조건부)
      */
     private fun stopPerfettoTracing() {
-        if (!isPerfettoEnabled || perfettoTracer == null) return
+        if (!isPerfettoEnabled || perfettoManager == null) return
 
         lifecycleScope.launch {
             try {
-                val finalTracePath = perfettoTracer!!.stopPerfettoTrace()
+                val finalTracePath = perfettoManager!!.stopPerfettoTracing()
                 fileLogger.i("MainActivity", "🎯 전체 앱 Perfetto 추적 완료: $finalTracePath")
-                fileLogger.i("MainActivity", "📊 수집된 전체 이벤트: ${perfettoTracer!!.getEventCount()}개")
+                fileLogger.i("MainActivity", "📊 수집된 전체 이벤트: ${perfettoManager!!.getEventCount()}개")
 
                 // 모든 추적 파일 경로 출력
-                val allTraceFiles = perfettoTracer!!.getAllTraceFiles()
+                val allTraceFiles = perfettoManager!!.getAllTraceFiles()
                 fileLogger.i("MainActivity", "📁 Documents/save/에 저장된 추적 파일들:")
                 allTraceFiles.forEach { filePath ->
                     fileLogger.i("MainActivity", "  - $filePath")
@@ -255,14 +255,14 @@ class MainActivity : AppCompatActivity() {
      * 성능 문제 발생 시 즉시 힙 덤프 생성 (조건부)
      */
     private fun generateEmergencyHeapDump(reason: String) {
-        if (!isPerfettoEnabled || perfettoTracer == null) {
+        if (!isPerfettoEnabled || perfettoManager == null) {
             fileLogger.w("MainActivity", "⚪ 힙 덤프 스킵됨 - Perfetto 비활성화")
             return
         }
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val heapDumpPath = perfettoTracer!!.generateHeapDump("Emergency_$reason")
+                val heapDumpPath = perfettoManager!!.generateHeapDump("Emergency_$reason")
                 if (heapDumpPath != null) {
                     fileLogger.e("MainActivity", "🚨 응급 힙 덤프 생성: $heapDumpPath")
                 } else {
@@ -330,9 +330,9 @@ class MainActivity : AppCompatActivity() {
             // HomeRepository 감시
             leakCanaryIntegration.watchObject(homeRepository, "HomeRepository")
 
-            // PerfettoTracer 조건부 감시
-            if (isPerfettoEnabled && perfettoTracer != null) {
-                leakCanaryIntegration.watchObject(perfettoTracer!!, "PerfettoTracer")
+            // PerfettoManager 조건부 감시
+            if (isPerfettoEnabled && perfettoManager != null) {
+                leakCanaryIntegration.watchObject(perfettoManager!!, "PerfettoManager")
             }
 
             fileLogger.i("MainActivity", "✅ LeakCanary 통합 완료")
@@ -720,8 +720,8 @@ class MainActivity : AppCompatActivity() {
             fileLogger.w("MainActivity", "🔧 강화된 응급 복구 시작: $reason")
 
             // Perfetto 활성화된 경우에만 traceSectionAsync 사용
-            if (isPerfettoEnabled && perfettoTracer != null) {
-                perfettoTracer!!.traceSectionAsync("EmergencyRecovery") {
+            if (isPerfettoEnabled && perfettoManager != null) {
+                perfettoManager!!.traceSectionAsync("EmergencyRecovery") {
                     performRecoverySteps()
                 }
             } else {
@@ -828,8 +828,8 @@ class MainActivity : AppCompatActivity() {
             fileLogger.w("MainActivity", "🔧 제한된 응급 복구 시작: $reason (${emergencyRecoveryCount}회)")
 
             // Perfetto 활성화된 경우에만 traceSectionAsync 사용
-            if (isPerfettoEnabled && perfettoTracer != null) {
-                perfettoTracer!!.traceSectionAsync("EmergencyRecovery") {
+            if (isPerfettoEnabled && perfettoManager != null) {
+                perfettoManager!!.traceSectionAsync("EmergencyRecovery") {
                     performLimitedRecoverySteps()
                 }
             } else {
@@ -1030,10 +1030,10 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Perfetto 추적 상태 (조건부)
-            if (isPerfettoEnabled && perfettoTracer != null) {
+            if (isPerfettoEnabled && perfettoManager != null) {
                 fileLogger.i("MainActivity", "=== Perfetto 추적 상태 ===")
-                fileLogger.i("MainActivity", "추적 활성: ${perfettoTracer!!.isTracing()}")
-                fileLogger.i("MainActivity", "수집된 이벤트: ${perfettoTracer!!.getEventCount()}개")
+                fileLogger.i("MainActivity", "추적 활성: ${perfettoManager!!.isTracingActive()}")
+                fileLogger.i("MainActivity", "수집된 이벤트: ${perfettoManager!!.getEventCount()}개")
             } else {
                 fileLogger.i("MainActivity", "=== Perfetto 상태 ===")
                 fileLogger.i("MainActivity", "Perfetto 비활성화됨 (리소스 절약)")
@@ -1070,8 +1070,8 @@ class MainActivity : AppCompatActivity() {
                 fileLogger.i("MainActivity", "앱 버전: ${packageManager.getPackageInfo(packageName, 0).versionName}")
 
                 // Documents/save/ 폴더 정보 (조건부)
-                if (isPerfettoEnabled && perfettoTracer != null) {
-                    val traceFiles = perfettoTracer!!.getAllTraceFiles()
+                if (isPerfettoEnabled && perfettoManager != null) {
+                    val traceFiles = perfettoManager!!.getAllTraceFiles()
                     fileLogger.i("MainActivity", "Documents/save/ 저장 위치 확인:")
                     if (traceFiles.isNotEmpty()) {
                         fileLogger.i("MainActivity", "기존 추적 파일들:")
@@ -1109,8 +1109,8 @@ class MainActivity : AppCompatActivity() {
             fileLogger.i("MainActivity", "최종 FPS: ${currentFps.get()}fps")
 
             // 최종 Perfetto 추적 파일 목록 (조건부)
-            if (isPerfettoEnabled && perfettoTracer != null) {
-                val finalTraceFiles = perfettoTracer!!.getAllTraceFiles()
+            if (isPerfettoEnabled && perfettoManager != null) {
+                val finalTraceFiles = perfettoManager!!.getAllTraceFiles()
                 fileLogger.i("MainActivity", "🎯 Documents/save/에 저장된 최종 추적 파일들:")
                 finalTraceFiles.forEach { filePath ->
                     val file = java.io.File(filePath)
@@ -1292,7 +1292,7 @@ class MainActivity : AppCompatActivity() {
                     // Perfetto 조건부 중지
                     if (isPerfettoEnabled) {
                         stopPerfettoTracing()
-                        perfettoTracer?.generateHeapDump("AppShutdown")
+                        perfettoManager?.generateHeapDump("AppShutdown")
                     }
 
                     // 모든 리소스 강제 정리
@@ -1339,8 +1339,8 @@ class MainActivity : AppCompatActivity() {
 
             // Perfetto 자동 추적 중지 (조건부)
             perfettoAutoTraceJob?.cancel()
-            if (isPerfettoEnabled && perfettoTracer != null) {
-                perfettoTracer!!.cleanup()
+            if (isPerfettoEnabled && perfettoManager != null) {
+                perfettoManager!!.cleanup()
             }
 
             monitoringScope.cancel()

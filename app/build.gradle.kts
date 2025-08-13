@@ -32,7 +32,7 @@ android {
         debug {
             isDebuggable = true
             //applicationIdSuffix = ".debug"
-            buildConfigField("boolean", "PERFETTO_TRACING_ENABLED", "false")
+            buildConfigField("boolean", "PERFETTO_TRACING_ENABLED", "true")
             // debug는 기본 debug signing 사용
         }
 
