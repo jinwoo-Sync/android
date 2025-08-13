@@ -7,6 +7,7 @@ import android.os.Debug
 import android.os.Environment
 import android.os.Trace
 import android.util.Log
+import com.example.myapplication.BuildConfig
 import com.example.myapplication.Logsystem.GpuMemoryMonitor
 import com.example.myapplication.utils.BitmapPoolManager
 import kotlinx.coroutines.*
@@ -16,7 +17,22 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 
-class PerfettoTracer private constructor(
+/**
+ * NoOp 구현 - Perfetto 비활성화 시 사용
+ */
+class NoOpPerfettoTracer(private val context: Context) : PerfettoTracer(context, FileLogger.getInstance(context)) {
+    override fun startPerfettoTrace(category: String): String? = null
+    override fun stopPerfettoTrace(): String? = null
+    override fun traceSection(sectionName: String, block: () -> Unit) = block()
+    override suspend fun traceSectionAsync(sectionName: String, block: suspend () -> Unit) = block()
+    override fun generateHeapDump(reason: String): String? = null
+    override fun getAllTraceFiles(): List<String> = emptyList()
+    override fun isTracing(): Boolean = false
+    override fun getEventCount(): Int = 0
+    override fun cleanup() {}
+}
+
+open class PerfettoTracer internal constructor(
     private val context: Context,
     private val fileLogger: FileLogger
 ) {
@@ -27,6 +43,13 @@ class PerfettoTracer private constructor(
         private var INSTANCE: PerfettoTracer? = null
 
         fun getInstance(context: Context): PerfettoTracer {
+            // BuildConfig.DEBUG = false일 때 NoOp 구현 반환
+            if (!BuildConfig.DEBUG) {
+                return INSTANCE ?: synchronized(this) {
+                    INSTANCE ?: NoOpPerfettoTracer(context).also { INSTANCE = it }
+                }
+            }
+            
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: PerfettoTracer(
                     context.applicationContext,
@@ -73,7 +96,7 @@ class PerfettoTracer private constructor(
     /**
      * Perfetto UI 호환 추적 시작
      */
-    fun startPerfettoTrace(category: String = "AppPerformance"): String? {
+    open fun startPerfettoTrace(category: String = "AppPerformance"): String? {
         if (isTracing) {
             fileLogger.w(TAG, "이미 추적 중입니다")
             return perfettoTraceFile?.absolutePath
@@ -415,7 +438,7 @@ class PerfettoTracer private constructor(
     /**
      * 추적 중지 및 파일 최종화
      */
-    fun stopPerfettoTrace(): String? {
+    open fun stopPerfettoTrace(): String? {
         if (!isTracing) {
             fileLogger.w(TAG, "추적이 실행 중이 아닙니다")
             return null
@@ -623,7 +646,7 @@ class PerfettoTracer private constructor(
     /**
      * 힙 덤프 생성 - Documents/save/에 저장
      */
-    fun generateHeapDump(reason: String = "Manual"): String? {
+    open fun generateHeapDump(reason: String = "Manual"): String? {
         return try {
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
                 .format(Date())
@@ -642,7 +665,7 @@ class PerfettoTracer private constructor(
     /**
      * 섹션별 추적
      */
-    fun traceSection(sectionName: String, block: () -> Unit) {
+    open fun traceSection(sectionName: String, block: () -> Unit) {
         try {
             Trace.beginSection(sectionName)
             addPerformanceEvent(sectionName, "section", "B")
@@ -658,7 +681,7 @@ class PerfettoTracer private constructor(
     /**
      * 비동기 섹션 추적
      */
-    suspend fun traceSectionAsync(sectionName: String, block: suspend () -> Unit) {
+    open suspend fun traceSectionAsync(sectionName: String, block: suspend () -> Unit) {
         try {
             Trace.beginSection(sectionName)
             addPerformanceEvent(sectionName, "async_section", "B")
@@ -674,7 +697,7 @@ class PerfettoTracer private constructor(
     /**
      * 모든 추적 파일 경로 반환 - Documents/save/에서 검색
      */
-    fun getAllTraceFiles(): List<String> {
+    open fun getAllTraceFiles(): List<String> {
         val traceFiles = mutableListOf<String>()
 
         try {
@@ -713,17 +736,17 @@ class PerfettoTracer private constructor(
     /**
      * 추적 상태 확인
      */
-    fun isTracing(): Boolean = isTracing
+    open fun isTracing(): Boolean = isTracing
 
     /**
      * 수집된 이벤트 수 반환 (순환 버퍼 + 처리된 총량)
      */
-    fun getEventCount(): Int = performanceEvents.size + eventsWrittenToDisk
+    open fun getEventCount(): Int = performanceEvents.size + eventsWrittenToDisk
 
     /**
      * 추적 정리
      */
-    fun cleanup() {
+    open fun cleanup() {
         try {
             if (isTracing) {
                 stopPerfettoTrace()
