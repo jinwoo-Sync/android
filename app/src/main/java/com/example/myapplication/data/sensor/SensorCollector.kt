@@ -1666,10 +1666,23 @@ class SensorCollector(
                 val availableFpsRanges =
                     characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
                         ?: emptyArray()
-                builder.set(
-                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                    availableFpsRanges.firstOrNull { it.lower == cameraConfig.aeTargetFpsRange.lower && it.upper == cameraConfig.aeTargetFpsRange.upper }
-                        ?: availableFpsRanges.firstOrNull() ?: Range(15, 15))
+                
+                // 15fps를 보장하기 위해 우선순위 설정
+                val targetFpsRange = when {
+                    // 1순위: 정확히 (15, 15) 지원
+                    availableFpsRanges.any { it.lower == 15 && it.upper == 15 } -> 
+                        Range(15, 15)
+                    // 2순위: 15fps를 포함하는 범위 (15 이하 ~ 15 이상)
+                    availableFpsRanges.firstOrNull { it.lower <= 15 && it.upper >= 15 } -> 
+                        availableFpsRanges.first { it.lower <= 15 && it.upper >= 15 }
+                    // 3순위: 15fps에 가장 가까운 범위
+                    else -> availableFpsRanges.minByOrNull { 
+                        kotlin.math.abs(it.lower - 15) + kotlin.math.abs(it.upper - 15) 
+                    } ?: Range(15, 15)
+                }
+                
+                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, targetFpsRange)
+                Log.i(TAG, " 카메라 FPS 설정: $targetFpsRange (목표: 15fps 보장)")
                 builder.set(
                     CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
                     cameraConfig.aePrecaptureTrigger
