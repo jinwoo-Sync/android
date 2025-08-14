@@ -231,6 +231,16 @@ class SensorCollector(
 
     // Keep IO scope for general background work
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    
+    // Single channels for sensor data to avoid repeated coroutine creation
+    private val gpsDataChannel = Channel<Location>(capacity = Channel.CONFLATED)
+    private val gnssDataChannel = Channel<GnssMeasurementsEvent>(capacity = Channel.CONFLATED)
+    private val imuDataChannel = Channel<Triple<FloatArray, Long, Long>>(capacity = Channel.CONFLATED)
+    
+    // Single consumer jobs for each sensor
+    private var gpsConsumerJob: Job? = null
+    private var gnssConsumerJob: Job? = null
+    private var imuConsumerJob: Job? = null
 
 
     // 프레임 처리를 위한 actor - 이미지 전용 디스패처 사용
@@ -379,9 +389,19 @@ class SensorCollector(
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(locationResult: LocationResult) {
-            // Process GPS data on sensor thread pool
-            sensorScope.launch(Dispatchers.IO) {
-                locationResult.lastLocation?.let { location ->
+            // Send to channel without creating new coroutine
+            locationResult.lastLocation?.let { location ->
+                gpsDataChannel.trySend(location)
+            }
+        }
+    }
+    
+    // GPS single consumer coroutine
+    private fun startGpsConsumer() {
+        gpsConsumerJob?.cancel()
+        gpsConsumerJob = sensorScope.launch {
+            for (location in gpsDataChannel) {
+                try {
                     val gpsTimestamp = location.time
                     val localTimestamp = System.currentTimeMillis()
                     val monoTimestamp = System.nanoTime()
@@ -409,6 +429,8 @@ class SensorCollector(
                             location, localTimestamp, monoTimestamp
                         )
                     }
+                } catch (e: Exception) {
+                    Log.e(TAG, "GPS data processing error: ${e.message}", e)
                 }
             }
         }
@@ -417,13 +439,23 @@ class SensorCollector(
     @RequiresApi(Build.VERSION_CODES.N)
     private val gnssMeasurementsCallback = object : GnssMeasurementsEvent.Callback() {
         override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
-            // Process GNSS measurements on sensor thread pool
-            sensorScope.launch(Dispatchers.IO) {
-                val clock = event.clock
-                val gpsTimestamp = clock.timeNanos / 1_000_000
-                val localTimestamp = System.currentTimeMillis()
-                val monoTimestamp = System.nanoTime()
-                val isGpsTimeValid = gpsTimestamp > 0 && abs(gpsTimestamp - localTimestamp) < 86400000L
+            // Send to channel without creating new coroutine
+            gnssDataChannel.trySend(event)
+        }
+    }
+    
+    // GNSS single consumer coroutine
+    @RequiresApi(Build.VERSION_CODES.N)
+    private fun startGnssConsumer() {
+        gnssConsumerJob?.cancel()
+        gnssConsumerJob = sensorScope.launch {
+            for (event in gnssDataChannel) {
+                try {
+                    val clock = event.clock
+                    val gpsTimestamp = clock.timeNanos / 1_000_000
+                    val localTimestamp = System.currentTimeMillis()
+                    val monoTimestamp = System.nanoTime()
+                    val isGpsTimeValid = gpsTimestamp > 0 && abs(gpsTimestamp - localTimestamp) < 86400000L
 
             val clockData = GnssClockData(
                 gpsTimestamp = gpsTimestamp,
@@ -502,8 +534,11 @@ class SensorCollector(
                     LoggerManager.getInstance(context, dataSynchronizer).pushComprehensiveGnss(
                         comprehensiveData, clockData
                     )
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "GNSS data processing error: ${e.message}", e)
                 }
-            }
             }
         }
     }
@@ -512,10 +547,9 @@ class SensorCollector(
     @RequiresApi(Build.VERSION_CODES.N)
     private val gnssStatusCallback = object : GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(status: GnssStatus) {
-            // Process GNSS status on sensor thread pool
-            sensorScope.launch(Dispatchers.IO) {
-                val localTimestamp = System.currentTimeMillis()
-                val monoTimestamp = System.nanoTime()
+            // Process directly without creating new coroutine
+            val localTimestamp = System.currentTimeMillis()
+            val monoTimestamp = System.nanoTime()
 
             val totalSatellites = status.satelliteCount
             var usedSatellites = 0
@@ -546,7 +580,6 @@ class SensorCollector(
                         .pushSatelliteStatus(satelliteStatus)
                 }
             }
-            }
         }
 
         override fun onFirstFix(ttffMillis: Int) {
@@ -576,10 +609,9 @@ class SensorCollector(
     @RequiresApi(Build.VERSION_CODES.N)
     private val gnssNavigationMessageCallback = object : GnssNavigationMessage.Callback() {
         override fun onGnssNavigationMessageReceived(message: GnssNavigationMessage) {
-            // Process navigation messages on sensor thread pool
-            sensorScope.launch(Dispatchers.IO) {
-                val localTimestamp = System.currentTimeMillis()
-                val monoTimestamp = System.nanoTime()
+            // Process directly without creating new coroutine
+            val localTimestamp = System.currentTimeMillis()
+            val monoTimestamp = System.nanoTime()
 
             val navigationData = GnssNavigationData(
                 gpsTimestamp = 0L,
@@ -599,20 +631,17 @@ class SensorCollector(
                 LoggerManager.getInstance(context, dataSynchronizer)
                     .pushNavigationMessage(navigationData)
             }
-            }
         }
     }
 
     private val accelerometerListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             if (!imuConfig.accelerometerEnabled) return
-            // Process on sensor thread pool, no main thread blocking
-            sensorScope.launch(Dispatchers.IO) {
-                latestAccelerometer = event.values.clone()
-                val systemTimestamp = System.currentTimeMillis()
-                val monoTimestamp = System.nanoTime()
-                updateLatestImuDataAsync(systemTimestamp, monoTimestamp)
-            }
+            // Send to channel without creating new coroutine
+            latestAccelerometer = event.values.clone()
+            val systemTimestamp = System.currentTimeMillis()
+            val monoTimestamp = System.nanoTime()
+            imuDataChannel.trySend(Triple(latestAccelerometer.clone(), systemTimestamp, monoTimestamp))
         }
 
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
@@ -621,13 +650,11 @@ class SensorCollector(
     private val gyroscopeListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             if (!imuConfig.gyroscopeEnabled) return
-            // Process on sensor thread pool, no main thread blocking
-            sensorScope.launch(Dispatchers.IO) {
-                latestGyroscope = event.values.clone()
-                val systemTimestamp = System.currentTimeMillis()
-                val monoTimestamp = System.nanoTime()
-                updateLatestImuDataAsync(systemTimestamp, monoTimestamp)
-            }
+            // Send to channel without creating new coroutine
+            latestGyroscope = event.values.clone()
+            val systemTimestamp = System.currentTimeMillis()
+            val monoTimestamp = System.nanoTime()
+            imuDataChannel.trySend(Triple(latestGyroscope.clone(), systemTimestamp, monoTimestamp))
         }
 
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
@@ -636,61 +663,62 @@ class SensorCollector(
     private val magnetometerListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             if (!imuConfig.magnetometerEnabled) return
-            // Process on sensor thread pool, no main thread blocking
-            sensorScope.launch(Dispatchers.IO) {
-                latestMagnetometer = event.values.clone()
-                val systemTimestamp = System.currentTimeMillis()
-                val monoTimestamp = System.nanoTime()
-                updateLatestImuDataAsync(systemTimestamp, monoTimestamp)
-            }
+            // Send to channel without creating new coroutine
+            latestMagnetometer = event.values.clone()
+            val systemTimestamp = System.currentTimeMillis()
+            val monoTimestamp = System.nanoTime()
+            imuDataChannel.trySend(Triple(latestMagnetometer.clone(), systemTimestamp, monoTimestamp))
         }
 
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
     }
 
-    // Async version that doesn't block any thread
-    private suspend fun updateLatestImuDataAsync(systemTimestamp: Long, monoTimestamp: Long) {
-        // Already in IO dispatcher from caller, no need to launch again
-            try {
-                // Update latestImuData in background
-                latestImuData = FloatArray(9).apply {
-                    latestAccelerometer.copyInto(this, 0, 0, 3)
-                    latestGyroscope.copyInto(this, 3, 0, 3)
-                    latestMagnetometer.copyInto(this, 6, 0, 3)
-                }
+    // IMU single consumer coroutine
+    private fun startImuConsumer() {
+        imuConsumerJob?.cancel()
+        imuConsumerJob = sensorScope.launch {
+            for ((_, systemTimestamp, monoTimestamp) in imuDataChannel) {
+                try {
+                    // Update latestImuData in background
+                    latestImuData = FloatArray(9).apply {
+                        latestAccelerometer.copyInto(this, 0, 0, 3)
+                        latestGyroscope.copyInto(this, 3, 0, 3)
+                        latestMagnetometer.copyInto(this, 6, 0, 3)
+                    }
 
-                // Format sensor data string with 5 decimal places (matching original precision)
-                val dataString = buildString {
-                    append("ACC[")
-                    append(latestAccelerometer.joinToString(",") { String.format("%.5f", it) })
-                    append("] GYRO[")
-                    append(latestGyroscope.joinToString(",") { String.format("%.5f", it) })
-                    append("] MAG[")
-                    append(latestMagnetometer.joinToString(",") { String.format("%.5f", it) })
-                    append("]")
-                }
+                    // Format sensor data string with 5 decimal places (matching original precision)
+                    val dataString = buildString {
+                        append("ACC[")
+                        append(latestAccelerometer.joinToString(",") { String.format("%.5f", it) })
+                        append("] GYRO[")
+                        append(latestGyroscope.joinToString(",") { String.format("%.5f", it) })
+                        append("] MAG[")
+                        append(latestMagnetometer.joinToString(",") { String.format("%.5f", it) })
+                        append("]")
+                    }
 
-                // Create SensorData_String object
-                val sensorData = SensorData_String(
-                    value = dataString,
-                    timestamp = systemTimestamp,
-                    monoTimestamp = monoTimestamp
-                )
+                    // Create SensorData_String object
+                    val sensorData = SensorData_String(
+                        value = dataString,
+                        timestamp = systemTimestamp,
+                        monoTimestamp = monoTimestamp
+                    )
 
-                // Update UI on main thread
-                withContext(Dispatchers.Main) {
-                    imuCallback?.invoke(sensorData)
-                }
+                    // Update UI on main thread
+                    withContext(Dispatchers.Main) {
+                        imuCallback?.invoke(sensorData)
+                    }
 
-                // Push data to LoggerManager if initialized
-                if (::dataSynchronizer.isInitialized) {
-                    LoggerManager.getInstance(context, dataSynchronizer)
-                        .pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
+                    // Push data to LoggerManager if initialized
+                    if (::dataSynchronizer.isInitialized) {
+                        LoggerManager.getInstance(context, dataSynchronizer)
+                            .pushImu(latestImuData!!, systemTimestamp, monoTimestamp)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "IMU data processing error: ${e.message}", e)
                 }
-            } catch (e: Exception) {
-                // Log error or handle appropriately
-                Log.e("ImuDataProcessor", "Error processing IMU data", e)
             }
+        }
     }
 
     fun setDataSynchronizer(synchronizer: DataSynchronizer) {
@@ -970,6 +998,7 @@ class SensorCollector(
                     locationCallback,
                     backgroundHandler.looper
                 )
+                startGpsConsumer() // Start single consumer
                 Log.d(TAG, "✅ GPS만 재시작 완료")
             } catch (e: Exception) {
                 Log.e(TAG, "GPS 재시작 실패: ${e.message}", e)
@@ -1016,7 +1045,8 @@ class SensorCollector(
                     )
                     Log.d(TAG, "자기계 재등록 ${if (success) "성공" else "실패"}")
                 }
-
+                
+                startImuConsumer() // Start single consumer
                 Log.d(TAG, "✅ IMU 센서만 재시작 완료")
             } catch (e: Exception) {
                 Log.e(TAG, "IMU 재시작 실패: ${e.message}", e)
@@ -1036,6 +1066,7 @@ class SensorCollector(
                     locationManager.registerGnssMeasurementsCallback(gnssMeasurementsCallback)
                     locationManager.registerGnssStatusCallback(gnssStatusCallback)
                     locationManager.registerGnssNavigationMessageCallback(gnssNavigationMessageCallback)
+                    startGnssConsumer() // Start single consumer
                 }
                 isGnssCallbackRegistered.set(true)
                 Log.d(TAG, "✅ GNSS 콜백만 재등록 완료")
@@ -1482,6 +1513,7 @@ class SensorCollector(
                 locationManager.registerGnssMeasurementsCallback(gnssMeasurementsCallback)
                 locationManager.registerGnssStatusCallback(gnssStatusCallback)
                 locationManager.registerGnssNavigationMessageCallback(gnssNavigationMessageCallback)
+                startGnssConsumer() // Start single consumer
                 Log.d(TAG, "✅ GNSS 콜백들 재등록 성공")
             }
             isGnssCallbackRegistered.set(true)
@@ -1509,6 +1541,7 @@ class SensorCollector(
                 locationCallback,
                 backgroundHandler.looper
             )
+            startGpsConsumer() // Start single consumer
             Log.d(TAG, "✅ GPS 위치 업데이트 재시작")
         } catch (e: Exception) {
             Log.e(TAG, "GPS 위치 업데이트 실패: ${e.message}", e)
@@ -1550,6 +1583,8 @@ class SensorCollector(
                 )
                 Log.d(TAG, "자기계 재등록 ${if (success) "성공" else "실패"}")
             }
+            
+            startImuConsumer() // Start single consumer
 
         } catch (e: Exception) {
             Log.e(TAG, "센서 등록 중 오류: ${e.message}", e)
@@ -1560,6 +1595,16 @@ class SensorCollector(
 
     fun stopSensorStreaming() {
         try {
+            // Cancel consumer jobs
+            gpsConsumerJob?.cancel()
+            gnssConsumerJob?.cancel()
+            imuConsumerJob?.cancel()
+            
+            // Close channels
+            gpsDataChannel.close()
+            gnssDataChannel.close()
+            imuDataChannel.close()
+            
             fusedLocationClient.removeLocationUpdates(locationCallback)
 
             if (isGnssCallbackRegistered.getAndSet(false)) {
@@ -2019,6 +2064,16 @@ class SensorCollector(
 
     fun cleanup() {
         try {
+            // Cancel consumer jobs
+            gpsConsumerJob?.cancel()
+            gnssConsumerJob?.cancel()
+            imuConsumerJob?.cancel()
+            
+            // Close channels
+            gpsDataChannel.close()
+            gnssDataChannel.close()
+            imuDataChannel.close()
+            
             imageProcessingHandler.removeCallbacksAndMessages(null)
             imageProcessingThread.quitSafely()
 
