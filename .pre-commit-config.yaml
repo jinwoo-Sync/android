@@ -1,0 +1,27 @@
+repos:
+  - repo: local
+    hooks:
+      - id: run-tests
+        name: Run Android Tests
+        entry: ./run-tests.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        
+      - id: check-kotlin-format
+        name: Check Kotlin Format
+        entry: bash -c './gradlew ktlintCheck'
+        language: system
+        files: \.kt$
+        
+      - id: no-hardcoded-secrets
+        name: Check for hardcoded secrets
+        entry: bash -c 'if grep -r "api_key\|password\|secret\|token" --include="*.kt" --include="*.java" --exclude-dir=build app/src/main | grep -v "// TODO\|// FIXME"; then exit 1; fi'
+        language: system
+        pass_filenames: false
+        
+      - id: check-large-files
+        name: Check for large files
+        entry: bash -c 'find . -type f -size +5M | grep -v build | grep -v .gradle'
+        language: system
+        pass_filenames: false

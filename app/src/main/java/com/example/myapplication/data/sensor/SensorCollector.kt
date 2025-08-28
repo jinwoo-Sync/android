@@ -244,8 +244,9 @@ class SensorCollector(
 
 
     // 프레임 처리를 위한 actor - 이미지 전용 디스패처 사용
+    // capacity를 3으로 설정하여 버퍼링 개선 (15fps = 66ms/frame, 3프레임 = 200ms 버퍼)
     private val frameChannel =
-        Channel<Pair<ManagedBitmap, (SensorData?) -> Unit>>(capacity = 1)
+        Channel<Pair<ManagedBitmap, (SensorData?) -> Unit>>(capacity = 3)
 
     // 2) 소비 코루틴 (imageScope에서 실행)
     private val frameConsumerJob = imageScope.launch {
@@ -321,7 +322,7 @@ class SensorCollector(
         zoomRatio = 1.0f,
         syncMode = CameraMetadata.SYNC_MAX_LATENCY_PER_FRAME_CONTROL,
         opticalStabilizationMode = CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF,
-        aeMode = CameraMetadata.CONTROL_AE_MODE_ON_AUTO_FLASH
+        aeMode = CameraMetadata.CONTROL_AE_MODE_ON
     )
 
     private val gpsConfig = GpsConfig(
@@ -888,11 +889,12 @@ class SensorCollector(
             val validatedSize =
                 validateImageSize(cameraId, cameraConfig.imageSize, cameraConfig.imageFormat)
 
+            // ImageReader 버퍼를 3으로 줄여 메모리 사용 최적화 (15fps에 충분)
             imageReader = ImageReader.newInstance(
                 validatedSize.width,
                 validatedSize.height,
                 cameraConfig.imageFormat,
-                4
+                3
             ).apply {
                 setOnImageAvailableListener(createAdvancedImageListener(cameraId, callback), imageProcessingHandler)
             }
@@ -1076,6 +1078,11 @@ class SensorCollector(
         }
     }
 
+    // 15fps 보장을 위한 프레임 타이밍 추적
+    private val targetFrameIntervalMs = 66L // 15fps = 66.67ms per frame
+    private var lastFrameTimestamp = 0L
+    private var frameDropCount = 0
+    
     private fun createAdvancedImageListener(
         cameraId: String,
         callback: (SensorData?) -> Unit
@@ -1086,8 +1093,23 @@ class SensorCollector(
                 return@OnImageAvailableListener
             }
 
-            // 전략 업데이트 주기를 200ms로 단축
+            // 프레임 타이밍 체크 (15fps 보장)
             val now = System.currentTimeMillis()
+            val timeSinceLastFrame = now - lastFrameTimestamp
+            
+            // 너무 빨리 도착한 프레임은 드롭 (15fps 유지)
+            if (lastFrameTimestamp > 0 && timeSinceLastFrame < 50) {
+                reader.acquireLatestImage()?.close()
+                frameDropCount++
+                if (frameDropCount % 30 == 0) {
+                    Log.d(TAG, "Dropping frame to maintain 15fps, interval: ${timeSinceLastFrame}ms")
+                }
+                return@OnImageAvailableListener
+            }
+            
+            lastFrameTimestamp = now
+            
+            // 전략 업데이트 주기를 200ms로 단축
             if (now - lastStrategyUpdate.get() > 200) {
                 updateDetectionProcessingStrategy()
                 lastStrategyUpdate.set(now)
@@ -1712,22 +1734,30 @@ class SensorCollector(
                     characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
                         ?: emptyArray()
                 
-                // 15fps를 보장하기 위해 우선순위 설정
+                // 15fps를 보장하기 위한 최적 FPS 범위 선택
                 val targetFpsRange = when {
                     // 1순위: 정확히 (15, 15) 지원
                     availableFpsRanges.any { it.lower == 15 && it.upper == 15 } -> 
                         Range(15, 15)
-                    // 2순위: 15fps를 포함하는 범위 (15 이하 ~ 15 이상)
+                    // 2순위: (15, 30) 범위 - 15fps 최소 보장하면서 유연성 제공
+                    availableFpsRanges.any { it.lower == 15 && it.upper == 30 } ->
+                        Range(15, 30)
+                    // 3순위: 15fps를 포함하는 범위 (15 이하 ~ 15 이상)
                     availableFpsRanges.firstOrNull { it.lower <= 15 && it.upper >= 15 } -> 
                         availableFpsRanges.first { it.lower <= 15 && it.upper >= 15 }
-                    // 3순위: 15fps에 가장 가까운 범위
+                    // 4순위: 15fps에 가장 가까운 범위
                     else -> availableFpsRanges.minByOrNull { 
                         kotlin.math.abs(it.lower - 15) + kotlin.math.abs(it.upper - 15) 
                     } ?: Range(15, 15)
                 }
                 
                 builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, targetFpsRange)
-                Log.i(TAG, " 카메라 FPS 설정: $targetFpsRange (목표: 15fps 보장)")
+                Log.i(TAG, "🎯 카메라 FPS 설정: $targetFpsRange (목표: 15fps 보장)")
+                
+                // 15fps 성능 최적화를 위한 추가 설정
+                builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+                builder.set(CaptureRequest.CONTROL_AE_LOCK, false) // AE 자동 조정 활성화
+                
                 builder.set(
                     CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
                     cameraConfig.aePrecaptureTrigger
@@ -1811,10 +1841,11 @@ class SensorCollector(
                         }
                     }
                 }
-            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, cameraConfig.noiseReductionMode)
-            builder.set(CaptureRequest.SHADING_MODE, cameraConfig.shadingMode)
+            // 15fps 성능을 위해 무거운 후처리 최소화
+            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_FAST)
+            builder.set(CaptureRequest.SHADING_MODE, CameraMetadata.SHADING_MODE_FAST)
             cameraConfig.tonemapCurve?.let { builder.set(CaptureRequest.TONEMAP_CURVE, it) }
-            builder.set(CaptureRequest.EDGE_MODE, cameraConfig.edgeMode)
+            builder.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_FAST)
         } catch (e: CameraAccessException) {
             Log.e(TAG, "Failed to apply camera settings: ${e.message}", e)
         }

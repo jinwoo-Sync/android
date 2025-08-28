@@ -27,6 +27,14 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // signingConfig 제거 - buildTypes에서 개별 관리
     }
+    
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            isReturnDefaultValues = true
+        }
+        animationsDisabled = true
+    }
 
     buildTypes {
         debug {
@@ -132,8 +140,19 @@ dependencies {
 
     // 테스트 라이브러리
     testImplementation(libs.junit)
+    testImplementation("org.mockito:mockito-core:5.5.0")
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.1.0")
+    testImplementation("org.jetbrains.kotlin:kotlin-test:1.9.20")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+    testImplementation("androidx.arch.core:core-testing:2.2.0")
+    
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test:rules:1.5.0")
+    androidTestImplementation("androidx.fragment:fragment-testing:1.6.2")
+    androidTestImplementation("androidx.benchmark:benchmark-junit4:1.2.2")
+    androidTestImplementation("org.mockito:mockito-android:5.5.0")
 
     // Firebase BOM
     implementation(platform("com.google.firebase:firebase-bom:32.7.1"))
