@@ -1,8 +1,8 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
-    id("com.google.gms.google-services") // Firebase 플러그인
-    id("com.google.firebase.crashlytics") // 이 줄 추가!
+    id("com.google.gms.google-services")
+    id("com.google.firebase.crashlytics")
 }
 
 android {
@@ -60,7 +60,7 @@ android {
             signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = true
             isDebuggable = true
-            applicationIdSuffix = ".benchmark"
+            applicationIdSuffix = ""
             buildConfigField("boolean", "PERFETTO_TRACING_ENABLED", "true")
             matchingFallbacks.add("release")
         }
@@ -154,14 +154,21 @@ dependencies {
     androidTestImplementation("androidx.benchmark:benchmark-junit4:1.2.2")
     androidTestImplementation("org.mockito:mockito-android:5.5.0")
 
-    // Firebase BOM
-    implementation(platform("com.google.firebase:firebase-bom:32.7.1"))
-    // Firebase Performance Monitoring
-    implementation("com.google.firebase:firebase-perf")
-    // Firebase Crashlytics
-    implementation("com.google.firebase:firebase-crashlytics")
-    // Firebase Analytics
-    implementation("com.google.firebase:firebase-analytics")
+    // Firebase BOM (benchmark 제외)
+    "debugImplementation"(platform("com.google.firebase:firebase-bom:32.7.1"))
+    "releaseImplementation"(platform("com.google.firebase:firebase-bom:32.7.1"))
+    
+    // Firebase Performance Monitoring (benchmark 제외)
+    "debugImplementation"("com.google.firebase:firebase-perf")
+    "releaseImplementation"("com.google.firebase:firebase-perf")
+    
+    // Firebase Crashlytics (benchmark 제외)
+    "debugImplementation"("com.google.firebase:firebase-crashlytics")
+    "releaseImplementation"("com.google.firebase:firebase-crashlytics")
+    
+    // Firebase Analytics (benchmark 제외)
+    "debugImplementation"("com.google.firebase:firebase-analytics")
+    "releaseImplementation"("com.google.firebase:firebase-analytics")
 
     debugImplementation("com.squareup.leakcanary:leakcanary-android:2.14")
 }
