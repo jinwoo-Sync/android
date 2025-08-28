@@ -1385,17 +1385,17 @@ class SensorCollector(
 
                         detectorExecutor.submit {
                             try {
-                            val reusableGpuBitmap = copyToGpuInferenceBitmap(managedBitmap.bitmap)
+                                val reusableGpuBitmap = copyToGpuInferenceBitmap(managedBitmap.bitmap)
 
                                 if (reusableGpuBitmap != null) {
                                     detector?.detect(reusableGpuBitmap, frameId)
 
-                                val inferenceEndTime = System.currentTimeMillis()
-                                val actualInferenceTime = inferenceEndTime - inferenceStartTime
-                                updateLastInferenceTime(actualInferenceTime)
+                                    val inferenceEndTime = System.currentTimeMillis()
+                                    val actualInferenceTime = inferenceEndTime - inferenceStartTime
+                                    updateLastInferenceTime(actualInferenceTime)
 
-                                Log.d(TAG, " Detection 완료: frameId=$frameId, 추론시간=${actualInferenceTime}ms")
-                            }
+                                    Log.d(TAG, " Detection 완료: frameId=$frameId, 추론시간=${actualInferenceTime}ms")
+                                }
                             } catch (e: Exception) {
                                 Log.e(TAG, " Detection 오류: ${e.message}", e)
                             } finally {

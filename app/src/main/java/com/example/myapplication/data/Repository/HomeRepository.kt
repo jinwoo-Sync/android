@@ -1,5 +1,6 @@
 package com.example.myapplication.data.repository
 
+import android.annotation.SuppressLint
 import android.content.Context
 import com.example.myapplication.data.sensor.SensorCollector
 import com.example.myapplication.data.sync.DataSynchronizer
@@ -194,6 +195,7 @@ class HomeRepository(
     /**
      *  센서 데이터 스트리밍 시작 - 수정된 버전
      */
+    @SuppressLint("MissingPermission")
     fun startSensorStreaming(
         gpsCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
         imuCallback: ((com.example.myapplication.model.SensorData_String) -> Unit)? = null,
