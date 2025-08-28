@@ -3,6 +3,11 @@ name: Code Quality Check
 on:
   pull_request:
     branches: [ main, develop ]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
     
 jobs:
   code-quality:
