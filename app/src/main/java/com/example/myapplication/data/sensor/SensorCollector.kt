@@ -1743,7 +1743,7 @@ class SensorCollector(
                     availableFpsRanges.any { it.lower == 15 && it.upper == 30 } ->
                         Range(15, 30)
                     // 3순위: 15fps를 포함하는 범위 (15 이하 ~ 15 이상)
-                    availableFpsRanges.firstOrNull { it.lower <= 15 && it.upper >= 15 } -> 
+                    availableFpsRanges.any { it.lower <= 15 && it.upper >= 15 } -> 
                         availableFpsRanges.first { it.lower <= 15 && it.upper >= 15 }
                     // 4순위: 15fps에 가장 가까운 범위
                     else -> availableFpsRanges.minByOrNull { 
