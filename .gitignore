@@ -31,9 +31,9 @@ build/reports/
 *.swp
 *~
 
-# Test directories
-app/src/androidTest/
-app/src/test/
+# Test directories (commented out to include test files in git)
+# app/src/androidTest/
+# app/src/test/
 
 # Non-standard assets directory (if unused)
 app/assets/
