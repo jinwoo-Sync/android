@@ -20,7 +20,11 @@ data class KalmanFilteredData(
     val filteredAltitude: Double,
     val filteredAccuracy: Float,
     val timestamp: Long,
-    val filterEnabled: Boolean
+    val filterEnabled: Boolean,
+    val filterType: String = "MAD_STYLE",
+    val filterQuality: FilterQuality = FilterQuality.POOR,
+    val velocity: Triple<Double, Double, Double> = Triple(0.0, 0.0, 0.0),
+    val uncertainty: Triple<Double, Double, Double> = Triple(0.0, 0.0, 0.0)
 )
 
 class OptionalKalmanFilter {

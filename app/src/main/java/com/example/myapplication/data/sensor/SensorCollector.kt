@@ -349,20 +349,34 @@ class SensorCollector(
     private var detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
     private var kalmanDataCallback: ((KalmanFilteredData) -> Unit)? = null
     
-    // Kalman filter instance
-    private val optionalKalmanFilter = OptionalKalmanFilter()
+    // Mad Style Kalman filter instance
+    private val madKalmanFilter = MadStyleKalmanFilter()
+    private var isKalmanFilterEnabled = false
 
     fun setKalmanFilterEnabled(enabled: Boolean) {
-        optionalKalmanFilter.setEnabled(enabled)
+        isKalmanFilterEnabled = enabled
+        if (!enabled) {
+            madKalmanFilter.reset()
+        }
     }
     
-    fun isKalmanFilterEnabled(): Boolean = optionalKalmanFilter.isEnabled()
+    fun isKalmanFilterEnabled(): Boolean = isKalmanFilterEnabled
     
     fun setKalmanDataCallback(callback: (KalmanFilteredData) -> Unit) {
         kalmanDataCallback = callback
     }
     
-    fun getKalmanFilterStats(): Map<String, Any> = optionalKalmanFilter.getFilterStats()
+    fun getKalmanFilterStats(): Map<String, Any> {
+        val filteredPos = madKalmanFilter.getFilteredPosition()
+        return mapOf(
+            "enabled" to isKalmanFilterEnabled,
+            "ready" to madKalmanFilter.isReady(),
+            "filterType" to filteredPos.fixType,
+            "filterQuality" to filteredPos.filterQuality.name,
+            "accuracy" to filteredPos.accuracy,
+            "covarianceTrace" to filteredPos.uncertainty.let { it.first + it.second }
+        )
+    }
     
     init {
         Log.d(TAG, "🎯 SensorCollector with BitmapPoolManager 초기화 완료")
@@ -410,15 +424,8 @@ class SensorCollector(
             locationResult.lastLocation?.let { location ->
                 gpsDataChannel.trySend(location)
                 
-                // Process through Kalman filter if enabled
-                val kalmanData = optionalKalmanFilter.processGpsData(
-                    latitude = location.latitude,
-                    longitude = location.longitude,
-                    altitude = location.altitude,
-                    accuracy = location.accuracy,
-                    timestamp = location.time
-                )
-                kalmanDataCallback?.invoke(kalmanData)
+                // Process through Mad Kalman filter if enabled
+                processWithMadKalmanFilter(location)
             }
         }
     }
@@ -669,6 +676,13 @@ class SensorCollector(
             val systemTimestamp = System.currentTimeMillis()
             val monoTimestamp = System.nanoTime()
             imuDataChannel.trySend(Triple(latestAccelerometer.clone(), systemTimestamp, monoTimestamp))
+            
+            // Update IMU data for Mad Kalman Filter
+            updateLatestImuData(
+                accelerometer = Triple(event.values[0].toDouble(), event.values[1].toDouble(), event.values[2].toDouble()),
+                gyroscope = Triple(latestGyroscope[0].toDouble(), latestGyroscope[1].toDouble(), latestGyroscope[2].toDouble()),
+                magnetometer = Triple(latestMagnetometer[0].toDouble(), latestMagnetometer[1].toDouble(), latestMagnetometer[2].toDouble())
+            )
         }
 
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
@@ -2185,5 +2199,90 @@ class SensorCollector(
                 }
             }
         }
+    }
+    
+    /**
+     * Mad Kalman Filter processing
+     */
+    private fun processWithMadKalmanFilter(location: android.location.Location) {
+        if (!isKalmanFilterEnabled) {
+            // Return raw data when filter is disabled
+            val kalmanData = KalmanFilteredData(
+                rawLatitude = location.latitude,
+                rawLongitude = location.longitude,
+                rawAltitude = location.altitude,
+                rawAccuracy = location.accuracy,
+                filteredLatitude = location.latitude,
+                filteredLongitude = location.longitude,
+                filteredAltitude = location.altitude,
+                filteredAccuracy = location.accuracy,
+                timestamp = location.time,
+                filterEnabled = false
+            )
+            kalmanDataCallback?.invoke(kalmanData)
+            return
+        }
+        
+        // Update Mad Kalman Filter with GPS data
+        madKalmanFilter.updateWithGPS(
+            latitude = location.latitude,
+            longitude = location.longitude,
+            accuracy = location.accuracy.toDouble(),
+            timestamp = location.time
+        )
+        
+        // Update with latest IMU data if available
+        latestImuData?.let { imuData ->
+            madKalmanFilter.updateWithIMUData(imuData)
+            
+            // Update with accelerometer data
+            madKalmanFilter.updateWithAccelerometer(
+                accX = imuData.accelerometer.first,
+                accY = imuData.accelerometer.second,
+                accZ = imuData.accelerometer.third,
+                timestamp = System.currentTimeMillis()
+            )
+        }
+        
+        // Get filtered position
+        val filteredPos = madKalmanFilter.getFilteredPosition()
+        
+        // Create comparison data
+        val kalmanData = KalmanFilteredData(
+            rawLatitude = location.latitude,
+            rawLongitude = location.longitude,
+            rawAltitude = location.altitude,
+            rawAccuracy = location.accuracy,
+            filteredLatitude = filteredPos.latitude,
+            filteredLongitude = filteredPos.longitude,
+            filteredAltitude = filteredPos.altitude,
+            filteredAccuracy = filteredPos.accuracy.toFloat(),
+            timestamp = location.time,
+            filterEnabled = true,
+            filterType = filteredPos.fixType,
+            filterQuality = filteredPos.filterQuality,
+            velocity = filteredPos.velocity,
+            uncertainty = filteredPos.uncertainty
+        )
+        
+        kalmanDataCallback?.invoke(kalmanData)
+    }
+    
+    // Store latest IMU data for Kalman filter
+    private var latestImuData: com.example.myapplication.model.IMUData? = null
+    
+    /**
+     * Update latest IMU data for Mad Kalman Filter
+     */
+    private fun updateLatestImuData(accelerometer: Triple<Double, Double, Double>, 
+                                  gyroscope: Triple<Double, Double, Double>, 
+                                  magnetometer: Triple<Double, Double, Double>) {
+        latestImuData = com.example.myapplication.model.IMUData(
+            accelerometer = accelerometer,
+            gyroscope = gyroscope,
+            magnetometer = magnetometer,
+            timestamp = System.currentTimeMillis(),
+            monoTimestamp = System.nanoTime()
+        )
     }
 }

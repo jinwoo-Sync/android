@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.example.myapplication.MainActivity
 import com.example.myapplication.databinding.FragmentDashboardBinding
 import com.example.myapplication.data.sensor.KalmanFilteredData
+import com.example.myapplication.data.sensor.FilterQuality
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -185,17 +186,27 @@ class DashboardFragment : Fragment() {
             kalmanRawDataText.text = "Raw GPS: ${String.format("%.6f", data.rawLatitude)}, ${String.format("%.6f", data.rawLongitude)} (±${String.format("%.1f", data.rawAccuracy)}m)"
             
             if (data.filterEnabled) {
-                kalmanFilteredDataText.text = "Filtered GPS: ${String.format("%.6f", data.filteredLatitude)}, ${String.format("%.6f", data.filteredLongitude)} (±${String.format("%.1f", data.filteredAccuracy)}m)"
+                kalmanFilteredDataText.text = "Mad Filtered: ${String.format("%.6f", data.filteredLatitude)}, ${String.format("%.6f", data.filteredLongitude)} (±${String.format("%.1f", data.filteredAccuracy)}m)"
                 
                 val mainActivity = activity as? MainActivity
                 val stats = mainActivity?.sensorCollector?.getKalmanFilterStats()
-                val covTrace = stats?.get("covarianceTrace") as? Double ?: 0.0
-                val improvement = (1 - data.filteredAccuracy/data.rawAccuracy) * 100
-                kalmanStatsText.text = "Stats: Covariance=${String.format("%.2f", covTrace)}, Improvement=${String.format("%.1f%%", improvement)}"
-                kalmanStatsText.setTextColor(resources.getColor(android.R.color.holo_green_dark))
+                val filterQuality = stats?.get("filterQuality") as? String ?: "UNKNOWN"
+                val filterType = stats?.get("filterType") as? String ?: "MAD_STYLE"
+                val improvement = if (data.rawAccuracy > 0) (1 - data.filteredAccuracy/data.rawAccuracy) * 100 else 0.0
+                val velocity = data.velocity
+                val speed = Math.sqrt(velocity.first * velocity.first + velocity.second * velocity.second)
+                
+                kalmanStatsText.text = "Mad Filter: ${filterType} | Quality: ${filterQuality} | Speed: ${String.format("%.1f", speed)}m/s | Improvement: ${String.format("%.1f%%", improvement)}"
+                kalmanStatsText.setTextColor(when (data.filterQuality) {
+                    FilterQuality.EXCELLENT -> resources.getColor(android.R.color.holo_green_dark)
+                    FilterQuality.GOOD -> resources.getColor(android.R.color.holo_green_light)
+                    FilterQuality.FAIR -> resources.getColor(android.R.color.holo_orange_light)
+                    FilterQuality.POOR -> resources.getColor(android.R.color.holo_red_light)
+                    FilterQuality.VERY_POOR -> resources.getColor(android.R.color.holo_red_dark)
+                })
             } else {
-                kalmanFilteredDataText.text = "Filtered GPS: 필터 비활성화"
-                kalmanStatsText.text = "Stats: 필터 비활성화됨"
+                kalmanFilteredDataText.text = "Mad Filtered: 필터 비활성화"
+                kalmanStatsText.text = "Mad Filter: 비활성화됨"
                 kalmanStatsText.setTextColor(resources.getColor(android.R.color.darker_gray))
             }
         }
