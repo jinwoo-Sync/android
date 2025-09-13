@@ -33,6 +33,7 @@ import android.provider.Settings
 import android.os.PowerManager
 import android.view.Choreographer
 import android.view.WindowManager
+import android.view.View
 import androidx.lifecycle.lifecycleScope
 import com.example.myapplication.Logsystem.AdvancedPerformanceMonitor
 import com.example.myapplication.Logsystem.GpuMemoryMonitor
@@ -112,6 +113,7 @@ class MainActivity : AppCompatActivity() {
     private var emergencyRecoveryCount = 0
     private var lastRecoveryTime = 0L
     private var isTextUpdatesPaused = false
+    
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -134,6 +136,7 @@ class MainActivity : AppCompatActivity() {
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
         )
+        
     }
 
     //  Fragment가 즉시 필요로 하는 객체들만 동기적으로 초기화
@@ -143,6 +146,7 @@ class MainActivity : AppCompatActivity() {
             bitmapPoolManager = BitmapPoolManager.getInstance(this)
             sensorCollector = SensorCollector(this, bitmapPoolManager)
             sensorCollector.setDataSynchronizer(dataSynchronizer)
+            
             homeRepository = HomeRepository(this, sensorCollector, dataSynchronizer, bitmapPoolManager)
 
             Log.d("MainActivity", " 기본 객체 초기화 완료")
@@ -1457,4 +1461,5 @@ class MainActivity : AppCompatActivity() {
     fun isCameraPermissionGranted(): Boolean = isCameraPermissionGranted
     fun isLocationPermissionGranted(): Boolean = isLocationPermissionGranted
     fun isBackgroundLocationPermissionGranted(): Boolean = isBackgroundLocationPermissionGranted
+    
 }

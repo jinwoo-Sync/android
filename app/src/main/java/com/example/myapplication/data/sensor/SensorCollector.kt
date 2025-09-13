@@ -347,7 +347,23 @@ class SensorCollector(
     private var imuCallback: ((SensorData_String) -> Unit)? = null
     private var gnssCallback: ((SensorData_String) -> Unit)? = null
     private var detectionCallback: ((List<BoundingBox>, Long, Long) -> Unit)? = null
+    private var kalmanDataCallback: ((KalmanFilteredData) -> Unit)? = null
+    
+    // Kalman filter instance
+    private val optionalKalmanFilter = OptionalKalmanFilter()
 
+    fun setKalmanFilterEnabled(enabled: Boolean) {
+        optionalKalmanFilter.setEnabled(enabled)
+    }
+    
+    fun isKalmanFilterEnabled(): Boolean = optionalKalmanFilter.isEnabled()
+    
+    fun setKalmanDataCallback(callback: (KalmanFilteredData) -> Unit) {
+        kalmanDataCallback = callback
+    }
+    
+    fun getKalmanFilterStats(): Map<String, Any> = optionalKalmanFilter.getFilterStats()
+    
     init {
         Log.d(TAG, "🎯 SensorCollector with BitmapPoolManager 초기화 완료")
     }
@@ -393,6 +409,16 @@ class SensorCollector(
             // Send to channel without creating new coroutine
             locationResult.lastLocation?.let { location ->
                 gpsDataChannel.trySend(location)
+                
+                // Process through Kalman filter if enabled
+                val kalmanData = optionalKalmanFilter.processGpsData(
+                    latitude = location.latitude,
+                    longitude = location.longitude,
+                    altitude = location.altitude,
+                    accuracy = location.accuracy,
+                    timestamp = location.time
+                )
+                kalmanDataCallback?.invoke(kalmanData)
             }
         }
     }
