@@ -178,7 +178,7 @@ class SensorCollector(
 ) {
     // ✅ GPS 필터링 시스템 추가
     private val gpsFilterManager = com.example.myapplication.data.gps.GPSFilterManager(context)
-    private val gpsFilterPreferences = com.example.myapplication.data.gps.GPSFilterPreferences(context)
+    private val gpsFilterPreferences = com.company.rtkgps.core.GPSFilterPreferences(context)
 
     // ✅ 거리 기반 전송을 위한 마지막 전송 위치
     private var lastSentFilteredLocation: Location? = null
