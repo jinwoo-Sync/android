@@ -28,6 +28,8 @@ import com.example.myapplication.utils.HealthLevel
 import com.example.myapplication.utils.ManagedBitmap
 import com.example.myapplication.utils.PoolHealthStatus
 import com.example.myapplication.Logsystem.ResourceMonitor
+import com.example.myapplication.ui.dialogs.GPSSettingsDialog
+import com.example.myapplication.data.gps.GPSFilterSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -168,7 +170,7 @@ class HomeFragment : Fragment() {
                     }
                 }
 
-                binding.poolStatusText.text = bitmapPoolManager.advancedTaggedBitmapPool.getStatus()
+                _binding?.poolStatusText?.text = bitmapPoolManager.advancedTaggedBitmapPool.getStatus()
             }
         }
     }
@@ -584,6 +586,29 @@ class HomeFragment : Fragment() {
             viewModel.resumeSensors()
             showToast("IMU 센서 재개")
         }
+
+        binding.buttonGpsSettings.setOnClickListener {
+            showGPSSettingsDialog()
+        }
+    }
+
+    private fun showGPSSettingsDialog() {
+        val dialog = GPSSettingsDialog.newInstance { newSettings ->
+            // 설정 적용
+            (requireActivity() as? MainActivity)?.sensorCollector?.updateGPSFilterSettings(newSettings)
+
+            val filterModeName = when (newSettings.filterMode) {
+                com.example.myapplication.data.gps.GPSFilterManager.FilterMode.RAW_GPS -> "Raw GPS"
+                com.example.myapplication.data.gps.GPSFilterManager.FilterMode.GPS_KALMAN -> "GPS Kalman"
+                com.example.myapplication.data.gps.GPSFilterManager.FilterMode.MAD_KALMAN -> "MAD Kalman"
+                com.example.myapplication.data.gps.GPSFilterManager.FilterMode.IMU_KALMAN -> "IMU Kalman"
+                com.example.myapplication.data.gps.GPSFilterManager.FilterMode.RTK_NTRIP -> "RTK/NTRIP"
+            }
+
+            showToast("GPS 필터 설정 적용: $filterModeName (${newSettings.distanceIntervalMeters}m)", true)
+        }
+
+        dialog.show(parentFragmentManager, "GPSSettingsDialog")
     }
 
     private fun handleCameraButtonClick(mainActivity: MainActivity) {

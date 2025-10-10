@@ -176,6 +176,13 @@ class SensorCollector(
     private val context: Context,
     private val bitmapPoolManager: BitmapPoolManager  // ✅ BitmapPoolManager 주입
 ) {
+    // ✅ GPS 필터링 시스템 추가
+    private val gpsFilterManager = com.example.myapplication.data.gps.GPSFilterManager(context)
+    private val gpsFilterPreferences = com.example.myapplication.data.gps.GPSFilterPreferences(context)
+
+    // ✅ 거리 기반 전송을 위한 마지막 전송 위치
+    private var lastSentFilteredLocation: Location? = null
+
     private var cameraDevice: CameraDevice? = null
     private var imageReader: ImageReader? = null
     private var captureSession: CameraCaptureSession? = null
@@ -350,6 +357,16 @@ class SensorCollector(
 
     init {
         Log.d(TAG, "🎯 SensorCollector with BitmapPoolManager 초기화 완료")
+
+        // ✅ GPS 필터 매니저 초기화
+        try {
+            val settings = gpsFilterPreferences.loadSettings()
+            gpsFilterManager.initialize()
+            gpsFilterManager.setFilterMode(settings.filterMode)
+            Log.d(TAG, "✅ GPS 필터 매니저 초기화 완료: 모드=${settings.filterMode}, 거리간격=${settings.distanceIntervalMeters}m")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ GPS 필터 매니저 초기화 실패: ${e.message}", e)
+        }
     }
 
     private fun initializeDetector() {
@@ -390,9 +407,28 @@ class SensorCollector(
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(locationResult: LocationResult) {
-            // Send to channel without creating new coroutine
-            locationResult.lastLocation?.let { location ->
-                gpsDataChannel.trySend(location)
+            locationResult.lastLocation?.let { rawLocation ->
+                try {
+                    // ✅ 1. Raw GPS 데이터는 항상 서버로 전송
+                    sendRawGPSToServer(rawLocation)
+
+                    // ✅ 2. GPS 필터 적용
+                    val filteredLocation = gpsFilterManager.processGPS(rawLocation)
+
+                    // ✅ 3. 거리 기반 전송 확인 후 필터링된 데이터 전송
+                    if (shouldSendFilteredData(filteredLocation)) {
+                        sendFilteredGPSToServer(filteredLocation)
+                        lastSentFilteredLocation = filteredLocation
+                    }
+
+                    // ✅ 4. 기존 채널로 필터링된 위치 전송 (UI 표시용)
+                    gpsDataChannel.trySend(filteredLocation)
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "GPS 필터링 처리 오류: ${e.message}", e)
+                    // 오류 발생 시 원본 데이터 사용
+                    gpsDataChannel.trySend(rawLocation)
+                }
             }
         }
     }
@@ -1530,13 +1566,19 @@ class SensorCollector(
                 }
             }
 
-            // 새로 등록
+            // 새로 등록 - 메인 스레드에서 실행
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                locationManager.registerGnssMeasurementsCallback(gnssMeasurementsCallback)
-                locationManager.registerGnssStatusCallback(gnssStatusCallback)
-                locationManager.registerGnssNavigationMessageCallback(gnssNavigationMessageCallback)
-                startGnssConsumer() // Start single consumer
-                Log.d(TAG, "✅ GNSS 콜백들 재등록 성공")
+                Handler(Looper.getMainLooper()).post {
+                    try {
+                        locationManager.registerGnssMeasurementsCallback(gnssMeasurementsCallback)
+                        locationManager.registerGnssStatusCallback(gnssStatusCallback)
+                        locationManager.registerGnssNavigationMessageCallback(gnssNavigationMessageCallback)
+                        startGnssConsumer() // Start single consumer
+                        Log.d(TAG, "✅ GNSS 콜백들 재등록 성공")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "GNSS 콜백 등록 실패 (메인 스레드): ${e.message}", e)
+                    }
+                }
             }
             isGnssCallbackRegistered.set(true)
         } catch (e: Exception) {
@@ -1556,13 +1598,18 @@ class SensorCollector(
 
         try {
             fusedLocationClient.removeLocationUpdates(locationCallback)
-            // Use background thread looper for location updates
-            val backgroundHandler = Handler(imageProcessingThread.looper)
-            fusedLocationClient.requestLocationUpdates(
-                locationRequest,
-                locationCallback,
-                backgroundHandler.looper
-            )
+            // Use main thread looper for location updates to avoid Handler issues
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    fusedLocationClient.requestLocationUpdates(
+                        locationRequest,
+                        locationCallback,
+                        Looper.getMainLooper()
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "GPS 위치 업데이트 등록 실패: ${e.message}", e)
+                }
+            }
             startGpsConsumer() // Start single consumer
             Log.d(TAG, "✅ GPS 위치 업데이트 재시작")
         } catch (e: Exception) {
@@ -2159,5 +2206,109 @@ class SensorCollector(
                 }
             }
         }
+    }
+
+    // ========================================
+    // ✅ GPS 필터링 관련 함수들
+    // ========================================
+
+    /**
+     * 거리 기반 전송 여부 확인
+     */
+    private fun shouldSendFilteredData(location: Location): Boolean {
+        val lastLocation = lastSentFilteredLocation ?: return true // 첫 번째는 항상 전송
+
+        val distance = lastLocation.distanceTo(location)
+        val distanceThreshold = gpsFilterPreferences.getDistanceInterval()
+
+        return distance >= distanceThreshold
+    }
+
+    /**
+     * Raw GPS 데이터 서버 전송
+     */
+    private fun sendRawGPSToServer(location: Location) {
+        try {
+            if (::dataSynchronizer.isInitialized) {
+                val localTimestamp = System.currentTimeMillis()
+                val monoTimestamp = System.nanoTime()
+
+                // Raw GPS 데이터 로깅 (항상 전송)
+                LoggerManager.getInstance(context, dataSynchronizer).pushGps(
+                    location, localTimestamp, monoTimestamp
+                )
+
+                Log.d(TAG, "📍 Raw GPS 전송: Lat=${String.format("%.6f", location.latitude)}, " +
+                        "Lon=${String.format("%.6f", location.longitude)}, " +
+                        "Acc=${String.format("%.1f", location.accuracy)}m")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Raw GPS 데이터 전송 실패: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 필터링된 GPS 데이터 서버 전송
+     */
+    private fun sendFilteredGPSToServer(location: Location) {
+        try {
+            if (::dataSynchronizer.isInitialized) {
+                val localTimestamp = System.currentTimeMillis()
+                val monoTimestamp = System.nanoTime()
+                val settings = gpsFilterPreferences.loadSettings()
+
+                // 필터링된 GPS 데이터 로깅 (거리 기반 전송)
+                LoggerManager.getInstance(context, dataSynchronizer).pushGps(
+                    location, localTimestamp, monoTimestamp
+                )
+
+                val filterMode = settings.filterMode
+                val distance = lastSentFilteredLocation?.distanceTo(location) ?: 0f
+
+                Log.d(TAG, "🎯 필터링 GPS 전송: 모드=$filterMode, " +
+                        "Lat=${String.format("%.6f", location.latitude)}, " +
+                        "Lon=${String.format("%.6f", location.longitude)}, " +
+                        "Acc=${String.format("%.1f", location.accuracy)}m, " +
+                        "이동거리=${String.format("%.1f", distance)}m")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "필터링 GPS 데이터 전송 실패: ${e.message}", e)
+        }
+    }
+
+    /**
+     * GPS 필터 설정 업데이트
+     * UI에서 설정 변경 시 호출
+     */
+    fun updateGPSFilterSettings(settings: com.example.myapplication.data.gps.GPSFilterSettings) {
+        try {
+            gpsFilterPreferences.saveSettings(settings)
+            gpsFilterManager.setFilterMode(settings.filterMode)
+
+            // 마지막 전송 위치 리셋 (새 설정 적용 시)
+            lastSentFilteredLocation = null
+
+            Log.d(TAG, "✅ GPS 필터 설정 업데이트: 모드=${settings.filterMode}, 거리간격=${settings.distanceIntervalMeters}m")
+        } catch (e: Exception) {
+            Log.e(TAG, "GPS 필터 설정 업데이트 실패: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 현재 GPS 필터 설정 조회
+     */
+    fun getCurrentGPSFilterSettings(): com.example.myapplication.data.gps.GPSFilterSettings {
+        return gpsFilterPreferences.loadSettings()
+    }
+
+    /**
+     * GPS 필터 상태 정보 조회
+     */
+    fun getGPSFilterStatus(): String {
+        val settings = gpsFilterPreferences.loadSettings()
+        val quality = gpsFilterManager.getFilterQuality()
+        val isHighAccuracy = gpsFilterManager.isHighAccuracy()
+
+        return "필터모드: ${settings.filterMode}, 품질: $quality, 고정밀: $isHighAccuracy"
     }
 }

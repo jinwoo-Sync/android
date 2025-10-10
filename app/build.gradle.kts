@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+    kotlin("kapt")
     id("com.google.gms.google-services")
     id("com.google.firebase.crashlytics")
 }
@@ -105,8 +106,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
 
-    // Google Play Services - Location
+    // Google Play Services - Location & Maps
     implementation(libs.google.play.services.location)
+    implementation("com.google.android.gms:play-services-maps:18.2.0")
 
     // TensorFlow Lite
     implementation(libs.tensorflow.lite)
@@ -133,8 +135,18 @@ dependencies {
 
     // 네트워킹
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     implementation("com.squareup.retrofit2:converter-moshi:2.9.0")
+    implementation("com.squareup.moshi:moshi-kotlin:1.15.0")
+    kapt("com.squareup.moshi:moshi-kotlin-codegen:1.15.0")
+
+    // Security
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    // Apache Commons Math (GPS 필터링용)
+    implementation("org.apache.commons:commons-math3:3.6.1")
+
     implementation(libs.androidx.foundation.jvmstubs)
 
 

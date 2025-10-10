@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="GPS 필터링 설정"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="16dp"/>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="GPS 필터 모드 선택"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp"/>
+
+    <RadioGroup
+        android:id="@+id/gps_filter_mode_group"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp">
+
+        <RadioButton
+            android:id="@+id/radio_raw_gps"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Raw GPS (필터링 없음)"
+            android:padding="8dp"/>
+
+        <RadioButton
+            android:id="@+id/radio_gps_kalman"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="GPS 전용 Kalman 필터"
+            android:padding="8dp"/>
+
+        <RadioButton
+            android:id="@+id/radio_mad_kalman"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="MAD Style Kalman (GPS + 가속도계)"
+            android:padding="8dp"
+            android:checked="true"/>
+
+        <RadioButton
+            android:id="@+id/radio_imu_kalman"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="IMU 통합 Kalman (GPS + IMU)"
+            android:padding="8dp"/>
+
+        <RadioButton
+            android:id="@+id/radio_rtk_ntrip"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="RTK/NTRIP 보정"
+            android:padding="8dp"/>
+
+    </RadioGroup>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#CCCCCC"
+        android:layout_marginVertical="16dp"/>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="데이터 전송 설정"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="8dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="거리 기반 전송 간격 (미터)"/>
+
+        <EditText
+            android:id="@+id/distance_interval_edit"
+            android:layout_width="100dp"
+            android:layout_height="wrap_content"
+            android:inputType="numberDecimal"
+            android:text="5.0"
+            android:gravity="end"
+            android:hint="5.0"/>
+
+    </LinearLayout>
+
+    <CheckBox
+        android:id="@+id/always_send_raw_checkbox"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="항상 Raw GPS 데이터도 함께 전송"
+        android:checked="true"
+        android:enabled="false"
+        android:layout_marginBottom="16dp"/>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="* Raw GPS 데이터는 반드시 서버에 전송됩니다.\n* 선택한 필터의 데이터는 설정한 거리 간격마다 전송됩니다."
+        android:textSize="12sp"
+        android:textColor="#666666"
+        android:layout_marginBottom="16dp"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="end">
+
+        <Button
+            android:id="@+id/cancel_button"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="취소"
+            android:layout_marginEnd="8dp"
+            style="?android:attr/buttonBarButtonStyle"/>
+
+        <Button
+            android:id="@+id/apply_button"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="적용"
+            style="?android:attr/buttonBarButtonStyle"/>
+
+    </LinearLayout>
+
+</LinearLayout>

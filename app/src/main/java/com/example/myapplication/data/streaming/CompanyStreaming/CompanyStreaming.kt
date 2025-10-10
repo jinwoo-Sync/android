@@ -36,6 +36,10 @@ class CompanyStreaming : StreamingClient {
             .build()
     }
 
+    // ✅ Kafka Server Integration
+    private var kafkaIntegration: KafkaServerIntegration? = null
+    private var enableKafkaServer = false  // Set to true to enable kafka server transmission
+
     // ✅ 기존 데이터 큐들
     private val cameraDataQueue = ConcurrentLinkedQueue<SensorData>()
     private val gpsDataQueue = ConcurrentLinkedQueue<Triple<Location, Long, Long>>()
@@ -94,6 +98,12 @@ class CompanyStreaming : StreamingClient {
             Log.d(TAG, "Record Start 성공: recordId=$recordId, cameraId=$cameraId")
         }
 
+        // ✅ Kafka Server Integration 시작
+        if (enableKafkaServer && kafkaIntegration != null) {
+            kafkaIntegration?.start()
+            Log.d(TAG, "Kafka server integration started")
+        }
+
         startSendingLoop()
         Log.d(TAG, "CompanyStreaming이 시작되었습니다.")
     }
@@ -108,22 +118,54 @@ class CompanyStreaming : StreamingClient {
         sendingJob = null
         Log.d(TAG, "남은 데이터를 전송합니다.")
         sendAllQueuedData()
+        
+        // ✅ Kafka Server Integration 종료
+        if (enableKafkaServer && kafkaIntegration != null) {
+            kafkaIntegration?.stop()
+            Log.d(TAG, "Kafka server integration stopped")
+        }
+        
         Log.d(TAG, "CompanyStreaming이 중지되었습니다.")
     }
 
     override fun sendCameraData(data: SensorData) {
         cameraDataQueue.offer(data)
         Log.d(TAG, "Camera 데이터 추가: frameId=${data.frameId}, 큐 크기=${cameraDataQueue.size}")
+        
+        // ✅ Kafka Server에 카메라 프레임 전송
+        if (enableKafkaServer && kafkaIntegration != null) {
+            data.bitmap?.let { bitmap ->
+                coroutineScope.launch {
+                    kafkaIntegration?.sendCameraFrame(bitmap)
+                }
+            }
+        }
     }
 
     override fun sendGpsData(location: Location, systemTimestamp: Long, monoTimestamp: Long) {
         gpsDataQueue.offer(Triple(location, systemTimestamp, monoTimestamp))
         Log.d(TAG, "GPS 데이터 추가: lat=${location.latitude}, lon=${location.longitude}, 큐 크기=${gpsDataQueue.size}")
+        
+        // ✅ Kafka Server에 GPS 데이터 전송
+        if (enableKafkaServer && kafkaIntegration != null) {
+            kafkaIntegration?.addGpsData(location)
+        }
     }
 
     override fun sendImuData(imu: FloatArray, systemTimestamp: Long, monoTimestamp: Long) {
         imuDataQueue.offer(Triple(imu, systemTimestamp, monoTimestamp))
         Log.d(TAG, "IMU 데이터 추가: 큐 크기=${imuDataQueue.size}")
+        
+        // ✅ Kafka Server에 IMU 데이터 전송
+        if (enableKafkaServer && kafkaIntegration != null) {
+            // IMU 데이터: [accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z]
+            if (imu.size >= 9) {
+                val accel = floatArrayOf(imu[0], imu[1], imu[2])
+                val gyro = floatArrayOf(imu[3], imu[4], imu[5])
+                val mag = floatArrayOf(imu[6], imu[7], imu[8])
+                kafkaIntegration?.addImuData(accel, gyro, mag)
+            }
+        }
     }
 
     override fun sendGnssData(gnss: GnssData) {
@@ -134,6 +176,13 @@ class CompanyStreaming : StreamingClient {
     override fun sendBoundingBoxData(boundingBoxes: List<BoundingBoxLog>) {
         boundingBoxDataQueue.offer(boundingBoxes)
         Log.d(TAG, "BoundingBox 데이터 추가: frameId=${boundingBoxes.firstOrNull()?.frameId}, 개수=${boundingBoxes.size}, 큐 크기=${boundingBoxDataQueue.size}")
+        
+        // ✅ Kafka Server에 YOLO 감지 데이터 전송
+        if (enableKafkaServer && kafkaIntegration != null) {
+            boundingBoxes.forEach { bbox ->
+                kafkaIntegration?.addYoloData(bbox)
+            }
+        }
     }
 
     // ✅ 새로운 완전한 GNSS 데이터 전송 메서드들
@@ -606,4 +655,25 @@ class CompanyStreaming : StreamingClient {
         // 전송 간격을 늘려서 대역폭 절약
         Log.d(TAG, "대역폭 절약 모드 활성화")
     }
+
+    // ✅ Kafka Server 전송 활성화
+    fun enableKafkaServerTransmission(context: Context, authManager: com.example.myapplication.data.api.AuthManager) {
+        if (kafkaIntegration == null) {
+            kafkaIntegration = KafkaServerIntegration(context, authManager)
+            enableKafkaServer = true
+            Log.i(TAG, "Kafka server transmission enabled")
+        } else {
+            Log.w(TAG, "Kafka server integration already initialized")
+        }
+    }
+
+    // ✅ Kafka Server 전송 비활성화
+    fun disableKafkaServerTransmission() {
+        enableKafkaServer = false
+        kafkaIntegration = null
+        Log.i(TAG, "Kafka server transmission disabled")
+    }
+
+    // ✅ Kafka Server 활성화 상태 확인
+    fun isKafkaServerEnabled(): Boolean = enableKafkaServer && kafkaIntegration != null
 }

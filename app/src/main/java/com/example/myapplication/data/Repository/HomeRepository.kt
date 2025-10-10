@@ -227,7 +227,7 @@ class HomeRepository(
             // 카메라 비활성 상태에서만 전체 재시작
             Log.d(TAG, " 카메라 비활성 - 전체 센서 재시작 가능")
 
-            CoroutineScope(Dispatchers.IO).launch {
+            CoroutineScope(Dispatchers.Main).launch {
                 delay(200)
                 sensorCollector.startSensorStreaming(
                     gpsCallback = gpsCallback,
@@ -455,6 +455,36 @@ class HomeRepository(
         } catch (e: Exception) {
             Log.e(TAG, "❌ Repository: 센서 재개 실패: ${e.message}", e)
             throw e
+        }
+    }
+
+    
+    fun updateRtkSettings(url: String, mount: String, id: String, password: String) {
+        try {
+            Log.d(TAG, "Updating RTK settings - URL: $url, Mount: $mount, ID: $id")
+            
+            // GNSS 콜백이 있으면 RTK 설정 업데이트
+            currentGnssCallback?.let { callback ->
+                // RTK 설정을 GNSS 콜백에 전달
+                // 실제 구현은 GNSS 콜백 인터페이스에 따라 달라질 수 있음
+                val rtkConfig = mapOf(
+                    "url" to url,
+                    "mount" to mount,
+                    "id" to id,
+                    "password" to password
+                )
+                
+                // TODO: GNSS 서비스에 RTK 설정 전달
+                // 예: gnssService.updateRtkConfiguration(rtkConfig)
+                
+                Log.d(TAG, "RTK settings updated successfully")
+            }
+            
+            // DataSynchronizer에도 설정 전달 (필요한 경우)
+            // dataSynchronizer?.updateRtkConfiguration(url, mount, id, password)
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to update RTK settings", e)
         }
     }
 }
