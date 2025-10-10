@@ -1,4 +1,4 @@
-package com.example.myapplication.gps_modules.utils
+package com.company.rtkgps.utils
 
 import kotlin.math.*
 import com.example.myapplication.gps_modules.MatrixUtils as MU // MatrixUtils 별칭 사용

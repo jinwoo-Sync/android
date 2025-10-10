@@ -1,4 +1,4 @@
-package com.example.myapplication.gps_modules.models
+package com.company.rtkgps.models
 
 enum class FilterQuality {
     EXCELLENT,

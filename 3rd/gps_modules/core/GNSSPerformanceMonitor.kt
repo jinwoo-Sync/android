@@ -1,4 +1,4 @@
-package com.example.myapplication.data.gps
+package com.company.rtkgps.core
 
 // GNSSPerformanceMonitor.kt - 새 파일
 class GNSSPerformanceMonitor {

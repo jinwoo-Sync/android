@@ -1,4 +1,4 @@
-package com.example.myapplication.data.gps
+package com.company.rtkgps.core
 
 class FilterComparison(private val coordinateTransform: PreciseCoordinateTransform) {
     private var comparisonCallback: ((ComparisonResult) -> Unit)? = null

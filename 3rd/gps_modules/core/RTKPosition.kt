@@ -1,4 +1,4 @@
-package com.example.myapplication.data.gps
+package com.company.rtkgps.core
 
 data class RTKPosition(
     val latitude: Double,

@@ -1,5 +1,5 @@
 // PreciseGNSSDataCollector.kt - Constellation별 최적화 및 동적 품질 평가
-package com.example.myapplication.data.gps
+package com.company.rtkgps.core
 
 import android.content.Context
 import android.location.*

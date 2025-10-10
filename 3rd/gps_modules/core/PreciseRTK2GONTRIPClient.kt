@@ -1,5 +1,5 @@
 // PreciseRTK2GONTRIPClient.kt
-package com.example.myapplication.data.gps
+package com.company.rtkgps.core
 
 import android.util.Base64  // 이 import 추가
 import kotlinx.coroutines.*

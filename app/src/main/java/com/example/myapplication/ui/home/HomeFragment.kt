@@ -29,7 +29,7 @@ import com.example.myapplication.utils.ManagedBitmap
 import com.example.myapplication.utils.PoolHealthStatus
 import com.example.myapplication.Logsystem.ResourceMonitor
 import com.example.myapplication.ui.dialogs.GPSSettingsDialog
-import com.example.myapplication.data.gps.GPSFilterSettings
+import com.company.rtkgps.core.GPSFilterSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay

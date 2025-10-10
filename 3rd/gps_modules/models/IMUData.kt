@@ -1,4 +1,4 @@
-package com.example.myapplication.gps_modules.models
+package com.company.rtkgps.models
 
 data class IMUData(
     val accelerometer: Triple<Double, Double, Double>,

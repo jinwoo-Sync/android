@@ -1,4 +1,4 @@
-package com.example.myapplication.gps_modules.core
+package com.company.rtkgps.core
 
 import android.content.Context
 import android.hardware.Sensor

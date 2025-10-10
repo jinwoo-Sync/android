@@ -1,5 +1,5 @@
 // LocationUtils.kt - Mad Location Manager 스타일 유틸리티
-package com.example.myapplication.data.gps
+package com.company.rtkgps.core
 
 import android.hardware.SensorManager
 import kotlin.math.*

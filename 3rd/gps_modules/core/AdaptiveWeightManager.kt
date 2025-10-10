@@ -1,4 +1,4 @@
-package com.example.myapplication.data.gps
+package com.company.rtkgps.core
 
 /**
  * 동적 가중치 관리자 - GNSS/IMU 신뢰도 기반 가중치 조정

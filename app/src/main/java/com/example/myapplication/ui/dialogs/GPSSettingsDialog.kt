@@ -12,9 +12,9 @@ import android.widget.RadioGroup
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.DialogFragment
 import com.example.myapplication.R
-import com.example.myapplication.data.gps.GPSFilterManager
-import com.example.myapplication.data.gps.GPSFilterPreferences
-import com.example.myapplication.data.gps.GPSFilterSettings
+import com.company.rtkgps.core.GPSFilterManager
+import com.company.rtkgps.core.GPSFilterPreferences
+import com.company.rtkgps.core.GPSFilterSettings
 
 /**
  * GPS Settings Dialog

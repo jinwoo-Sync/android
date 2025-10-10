@@ -1,4 +1,4 @@
-package com.example.myapplication.gps_modules.filters
+package com.company.rtkgps.filters
 
 import android.hardware.SensorManager
 import kotlin.math.*

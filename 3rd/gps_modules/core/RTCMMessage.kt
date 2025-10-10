@@ -1,5 +1,5 @@
 // RTCMMessage.kt - 통합된 정의
-package com.example.myapplication.data.gps
+package com.company.rtkgps.core
 
 open class RTCMMessage(
     open val messageType: Int,

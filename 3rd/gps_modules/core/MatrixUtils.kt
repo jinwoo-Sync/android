@@ -1,4 +1,4 @@
-package com.example.myapplication.data.gps
+package com.company.rtkgps.core
 
 import org.apache.commons.math3.dfp.Dfp.copysign
 import kotlin.math.*

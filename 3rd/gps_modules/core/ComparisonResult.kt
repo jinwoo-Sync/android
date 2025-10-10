@@ -1,4 +1,4 @@
-package com.example.myapplication.data.gps
+package com.company.rtkgps.core
 
 data class ComparisonResult(
     val imuIntegratedResult: FilteredPosition,

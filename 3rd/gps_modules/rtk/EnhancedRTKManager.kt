@@ -1,4 +1,4 @@
-package com.example.myapplication.gps_modules.rtk
+package com.company.rtkgps.rtk
 
 import android.Manifest
 import android.content.Context
